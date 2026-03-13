@@ -133,9 +133,11 @@ impl<B: Backend> LayerNorm<B> {
     }
 
     fn layer_normalize<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
+        // Matches Python: x_centered = x - mean(x), var = mean(x^2) - mean(x)^2
         let mean = x.clone().mean_dim(D - 1);
-        let x_centered = x.sub(mean);
-        let var = x_centered.clone().powf_scalar(2.0).mean_dim(D - 1);
+        let x_centered = x.clone().sub(mean.clone());
+        // var = E[x^2] - E[x]^2  (equivalent to torch.var with unbiased=False)
+        let var = x.powf_scalar(2.0).mean_dim(D - 1).sub(mean.powf_scalar(2.0));
         let inv_std = var.add_scalar(self.eps).sqrt().recip();
         x_centered.mul(inv_std)
     }
@@ -188,9 +190,11 @@ impl<B: Backend> MultiHeadLayerNorm<B> {
     }
 
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 3> {
+        // Python normalizes over DH per head (last dim of (B,S,NH,DH)),
+        // then reshapes to (B,S,NH*DH) and applies weight/bias.
         let [b, s, nh, dh] = x.dims();
-        let x = self.norm.layer_normalize(x);
-        let x_reshaped = x.reshape([b, s, nh * dh]);
+        let x_norm = self.norm.layer_normalize(x); // normalizes over last dim (DH)
+        let x_reshaped = x_norm.reshape([b, s, nh * dh]);
         self.norm.apply_weight_bias(x_reshaped)
     }
 }

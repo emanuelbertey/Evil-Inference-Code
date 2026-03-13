@@ -32,6 +32,8 @@ cargo run --release --bin test_mingru
 
 cargo run --release --bin test_slstm
 
+$env:PYTHONPATH = "."; py tests\xlstm_large_test.py
+
 $env:PYTHONPATH = "."; py tests\mlstm_equivalence.py
 
 $env:PYTHONPATH = "."; py tests\test_conv.py
@@ -57,4 +59,12 @@ cargo run --release --bin wiki_mlstm -- input.txt
 
 cargo run --release --bin large_chat -- input.txt
 
+cargo run --release --bin xlstm_large_test
+
 cargo run --release --bin main
+
+cargo run --release --bin mingruchat -- input.txt
+
+$env:PYTHONPATH = "."; py tests\mingru_equivalence.py
+
+cargo run --release --bin mingru_equivalence

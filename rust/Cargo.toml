@@ -112,3 +112,16 @@ path = "xorIA/bin/test_mingru.rs"
 [[bin]]
 name = "test_slstm"
 path = "xorIA/bin/test_slstm.rs"
+
+[[bin]]
+name = "xlstm_large_test"
+path = "xorIA/bin/xlstm_large_test.rs"
+
+[[bin]]
+name = "mingruchat"
+path = "xorIA/mingruchat.rs"
+
+[[bin]]
+name = "mingru_equivalence"
+path = "xorIA/bin/mingru_equivalence.rs"
+

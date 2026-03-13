@@ -25,11 +25,13 @@ impl MLSTMBackend {
         let device = q.device();
 
         if s > 1 && state.is_none() {
-            // Parallel execution (training mode, no initial state)
-            let h = parallel_stabilized_simple(q, k, v, i, f, self.eps);
-            (h, None)
+            // --- PARALLEL PREFILL ---
+            // Process the whole prompt at once (efficient O(S^2) on GPU).
+            // Now computes and returns the last state so we can continue with steps.
+            parallel_stabilized_simple(q, k, v, i, f, self.eps)
         } else {
-            // Recurrent execution — used for inference (step-by-step with carried state)
+            // --- RECURRENT GENERATION ---
+            // Used for step-by-step generation or if an initial state is provided.
             let mut current_state = state.unwrap_or_else(|| {
                 let [b, nh, _, dh_qk] = q.dims();
                 let dh_v = v.dims()[3];
@@ -90,75 +92,58 @@ pub fn parallel_stabilized_simple<B: Backend>(
     igate_preact: Tensor<B, 4>,
     fgate_preact: Tensor<B, 4>,
     eps_val: f64,
-) -> Tensor<B, 4> {
+) -> (Tensor<B, 4>, Option<(Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>)>) {
     let [b, nh, s, dh] = queries.dims();
     let device = queries.device();
     let scale = 1.0 / (dh as f64).sqrt();
 
-    // ── Step 1: log-sigmoid of forget gates ── (B, NH, S, 1)
     let log_fg = burn::tensor::activation::log_sigmoid(fgate_preact);
 
-    // ── Step 2: Cumsum with prepended zero — matches Python ──
-    //   Python:
-    //     log_fgates_cumsum = cat([zeros(B,NH,1,1), cumsum(log_fg, dim=-2)], dim=-2)
-    //     # shape: (B, NH, S+1, 1)
-    //   Then builds (S+1 x S+1) matrix by repeat + subtract, and slices [1:, 1:]
-    //   so that the diagonal encodes f_t (not 1) and entry [i,j] = sum_{l=j+1}^{i} log_f_l
-    let zero_prefix = Tensor::<B, 4>::zeros([b, nh, 1, 1], &device); // (B, NH, 1, 1)
+    // Cumsum with zero prefix (S+1)
+    let zero_prefix = Tensor::<B, 4>::zeros([b, nh, 1, 1], &device);
     let log_fg_cumsum = Tensor::cat(vec![zero_prefix, log_fg.cumsum(2)], 2); // (B, NH, S+1, 1)
 
-    // Broadcast to (B, NH, S+1, S+1): row_i - col_j  =>  cumsum[i] - cumsum[j]
-    // swap_dims(2,3) turns (S+1,1) into (1,S+1) — broadcasting handles the rest
-    let log_fg_matrix_full = log_fg_cumsum.clone() - log_fg_cumsum.swap_dims(2, 3);
-    // (B, NH, S+1, S+1)
-
-    // Slice [1:, 1:] to get (B, NH, S, S)  — same as Python [:, :, 1:, 1:]
+    // Decay matrix D[i,j] = exp(sum_{l=j+1}^{i} log f_l + log i_j)
+    let log_fg_matrix_full = log_fg_cumsum.clone() - log_fg_cumsum.clone().swap_dims(2, 3);
     let log_fg_matrix = log_fg_matrix_full.narrow(2, 1, s).narrow(3, 1, s);
+    let log_d_matrix = log_fg_matrix + igate_preact.clone().swap_dims(2, 3);
 
-    // ── Step 3: Combination gate matrix log D = log_fg_matrix + igate_preact^T ──
-    // igate_preact: (B, NH, S, 1) — transpose to (B, NH, 1, S) for broadcasting
-    let log_d_matrix = log_fg_matrix + igate_preact.swap_dims(2, 3); // (B, NH, S, S)
+    let causal_mask = Tensor::<B, 2>::ones([s, s], &device).tril(0).reshape([1, 1, s, s]);
+    let masked_log_d = log_d_matrix.mask_fill(causal_mask.clone().equal_elem(0.0), f32::NEG_INFINITY as f64);
 
-    // ── Step 4: Causal mask with true -inf ──
-    // Using f32::NEG_INFINITY ensures exp(-inf) == 0 exactly, even in bfloat16.
-    let causal_mask = Tensor::<B, 2>::ones([s, s], &device)
-        .tril(0)
-        .reshape([1, 1, s, s]); // (1, 1, S, S)
+    let m = masked_log_d.clone().max_dim(3);
+    let d_matrix = (masked_log_d - m.clone()).exp().mask_fill(causal_mask.equal_elem(0.0), 0.0);
 
-    let masked_log_d = log_d_matrix
-        .mask_fill(causal_mask.clone().equal_elem(0.0), f32::NEG_INFINITY as f64);
+    let qk_matrix = queries.clone().matmul(keys.clone().swap_dims(2, 3)) * scale;
+    let c_matrix = qk_matrix * d_matrix;
 
-    // ── Step 5: Row-wise max for numerical stabilization ── m_i = max_{j<=i}(log_D_ij)
-    let m = masked_log_d.clone().max_dim(3); // (B, NH, S, 1)
+    let normalizer = c_matrix.clone().sum_dim(3).abs().max_pair(m.neg().exp()) + eps_val;
+    let h_tilde = (c_matrix / normalizer).matmul(values.clone());
 
-    // ── Step 6: Stabilized D matrix ── exp(log_D - m), then zero out upper triangle
-    let d_matrix = (masked_log_d - m.clone())
-        .exp()
-        .mask_fill(causal_mask.equal_elem(0.0), 0.0); // (B, NH, S, S)
+    // --- COMPUTE LAST STATE FOR PREFILL ---
+    // Decay to the very end (step S) for each token j: sum_{l=j+1}^{S-1} log f_l
+    // log_fg_cumsum[S] - log_fg_cumsum[j+1]
+    let total_sum = log_fg_cumsum.clone().narrow(2, s, 1); // (B, NH, 1, 1)
+    let cumsum_at_j = log_fg_cumsum.narrow(2, 1, s);     // (B, NH, S, 1)
+    let log_decay_to_end = total_sum - cumsum_at_j;     // (B, NH, S, 1)
+    
+    // Stabilized weights for the state contribution of each token
+    let log_w = log_decay_to_end + igate_preact;        // (B, NH, S, 1)
+    let m_s = log_w.clone().max_dim(2);                  // (B, NH, 1, 1)
+    let w = (log_w - m_s.clone()).exp();                 // (B, NH, S, 1)
 
-    // ── Step 7: Scaled QK^T weighted by D ──
-    let qk_matrix = queries.clone().matmul(keys.swap_dims(2, 3)) * scale; // (B, NH, S, S)
-    let c_matrix = qk_matrix * d_matrix;                                   // (B, NH, S, S)
+    // C_s = sum_j (w_j * k_j^T * v_j) = (K*W)^T @ V
+    let keys_scaled = keys * scale;
+    let kw = keys_scaled * w.clone();                    // (B, NH, S, DH_qk)
+    let next_c = kw.clone().swap_dims(2, 3).matmul(values);     // (B, NH, DH_qk, DH_v)
+    
+    // n_s = sum_j (w_j * k_j^T) = (K*W)^T @ ones
+    let next_n = kw.swap_dims(2, 3).sum_dim(3);         // (B, NH, DH_qk, 1)
+    let next_m = m_s;                                   // (B, NH, 1, 1)
 
-    // ── Step 8: Normalizer — max(|sum_j C_ij|, exp(-m_i)) + eps ──
-    let normalizer = c_matrix.clone().sum_dim(3).abs()
-        .max_pair(m.neg().exp()) + eps_val; // (B, NH, S, 1)
-
-    // ── Step 9: Normalize and retrieve values ──
-    let c_matrix_normalized = c_matrix / normalizer;
-    c_matrix_normalized.matmul(values) // (B, NH, S, DH)
+    (h_tilde, Some((next_c, next_n, next_m)))
 }
 
-/// Single recurrent step of the stabilized mLSTM.
-///
-/// Matches `recurrent_step_stabilized_simple` from `xlstm/blocks/mlstm/backends.py` exactly.
-///
-/// State tensors:
-///   c_state — (B, NH, DH_qk, DH_v)  memory matrix
-///   n_state — (B, NH, DH_qk, 1)     normalizer vector
-///   m_state — (B, NH, 1, 1)         log-max stabilizer scalar
-///
-/// Returns: (h — (B, NH, 1, DH_v), (c_new, n_new, m_new))
 pub fn recurrent_step_stabilized_simple<B: Backend>(
     c_state: Tensor<B, 4>,
     n_state: Tensor<B, 4>,

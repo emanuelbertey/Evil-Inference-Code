@@ -6,12 +6,14 @@ pub mod xlstm_lm_model;
 // Re-exports for easier access matching the old API expectations mapping to the new port
 pub use xlstm_lm_model::{XLSTMLMModel as XLstm, XLSTMLMModelConfig as XLstmConfig};
 pub use xlstm_block_stack::{XLSTMBlockStackState as XLstmState};
+pub use blocks::minrnn::mingru::{MinGru, MinGruConfig, MinGruState};
 
 #[derive(Debug, Clone, Copy)]
 pub enum LstmType {
     MLSTM,
     SLSTM,
     Alternate,
+    MINGRU,
 }
 
 #[derive(Debug, Clone)]

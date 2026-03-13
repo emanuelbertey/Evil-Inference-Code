@@ -51,13 +51,13 @@ impl<B: Backend> CausalConv1d<B> {
     }
 
     pub fn step(&self, x: Tensor<B, 2>, state: Tensor<B, 3>) -> (Tensor<B, 2>, Tensor<B, 3>) {
-        let [batch_size, k, f] = state.dims();
+        let [_batch_size, k, _f] = state.dims();
         let new_state = Tensor::cat(vec![state.narrow(1, 1, k - 1), x.unsqueeze_dim(1)], 1);
         
         // Convert [B, Kernel, F] -> [B, F, Kernel]
         let x_padded = new_state.clone().swap_dims(1, 2);
         
-        let mut y = self.conv.forward(x_padded);
+        let y = self.conv.forward(x_padded);
         let [b, f_dim, _l] = y.dims();
         let y = y.reshape([b, f_dim]);
         

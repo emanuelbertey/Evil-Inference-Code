@@ -244,12 +244,19 @@ fn generate_text_typed<B: Backend>(
     let mut current_state = model.empty_state(1, device);
     let mut last_logits = None;
 
-    for &id in &seed_ids {
-        let input = Tensor::<B, 2, Int>::from_data(TensorData::new(vec![id as i64], [1, 1]), device);
-        let (logits, next_state) = model.forward(input, Some(current_state));
-        current_state = next_state.expect("State should be returned in recurrent mode");
-        last_logits = Some(logits);
-    }
+    // --- PARALLEL PREFILL ---
+    // Enviamos todo el seed de golpe en modo paralelo. Es mucho más rápido.
+    let input = Tensor::<B, 2, Int>::from_data(
+        TensorData::new(seed_ids.iter().map(|&id| id as i64).collect(), [1, seed_ids.len()]), 
+        device
+    );
+    // Al pasar None, el backend activa la ejecución paralela y ahora devuelve el estado final corregido.
+    let (logits, next_state) = model.forward(input, None);
+    current_state = next_state.expect("El prefill paralelo debe devolver el estado");
+    
+    // Solo nos interesan los logits del ÚLTIMO token para empezar a samplear
+    let [_, s_len, v_dim] = logits.dims();
+    last_logits = Some(logits.slice([0..1, (s_len - 1)..s_len]).reshape([1, v_dim]));
 
     let mut result_ids = Vec::new();
     let mut history = seed_ids.clone();
@@ -258,9 +265,9 @@ fn generate_text_typed<B: Backend>(
     let top_p = 1.0;
 
     let mut next_id = if let Some(logits) = last_logits {
-        // logits is [1, 1, V], sample_from_logits expects [1, V]
-        let [_, _, v] = logits.dims();
-        sample_from_logits(logits.reshape([1, v]), temp, top_k, top_p, r_penalty, &history)
+        // logits is [1, V], sample_from_logits expects [1, V]
+        let [_, v] = logits.dims();
+        sample_from_logits(logits.clone(), temp, top_k, top_p, r_penalty, &history)
     } else {
         0
     };
@@ -301,26 +308,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let text_file = &args[1];
-    let tokenizer_path = "large_v1_cuda.json";
-    let model_file = "large_v1_model_cuda.mpk";
+    let mut tokenizer_path = "llarge_v1_cuda.json".to_string();
+    let mut model_file = "llarge_v1_model_cuda.mpk".to_string();
 
-    let target_vocab_size = 8192;
-    let tokenizer = if Path::new(tokenizer_path).exists() { 
-        println!("Cargando tokenizador existente...");
-        Tokenizer::load(tokenizer_path)?
-    } else {
-        println!("Entrenando nuevo tokenizador BPE...");
-        let text = fs::read_to_string(text_file)?;
-        let tokenizer = Tokenizer::from_text(&text, target_vocab_size)?;
-        tokenizer.save(tokenizer_path)?;
-        tokenizer
-    };
+    let mut target_vocab_size = 1024;
+    let mut modo_inferencia = false;
 
-    let vocab_size = tokenizer.vocab_size();
-    println!("Tamaño del vocabulario: {}\n", vocab_size);
-
-    let embedding_dim = 768;
-    let mut num_blocks = 6;
+    let mut embedding_dim = 256;
+    let mut num_blocks = 2;
     let mut num_heads = 4;
     let mut lr = 3e-3;
     let mut num_epochs = 20;
@@ -328,10 +323,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut temperature = 0.8;
     let mut r_penalty = 1.1;
     let seq_length = 256;
+    let mut mode =  "single".to_string();
 
     let device = Default::default();
-    let existe_modelo = Path::new(model_file).exists();
-    let mut modo_inferencia = false;
+
     
     loop {
         println!("\n--- CONFIGURACIÓN ACTUAL (xLSTMLarge) ---");
@@ -342,6 +337,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("  (5) Batch:   {}", batch_size);
         println!("  (6) Temp:    {}", temperature);
         println!("  (7) R-Pen:   {}", r_penalty);
+        println!("  (8) Emb dim: {}", embedding_dim);
+        println!("  (9) Mode:    {}", mode);
+        println!("  (10) Model:  {}", model_file); 
+        println!("  (11) token:  {}", target_vocab_size); 
+        println!("  (12) pathbpe:{}", tokenizer_path);
         println!("-----------------------------------------");
         print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
         io::stdout().flush()?;
@@ -396,8 +396,60 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             if let Ok(v) = input.trim().parse() { r_penalty = v; }
+
+            print!("embedding dim [{}]: ", embedding_dim);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if let Ok(v) = input.trim().parse() { embedding_dim = v; }
+
+            print!("Mode [{}]: ", mode);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let v = input.trim();
+            if !v.is_empty() { mode = v.to_string(); }
+
+            print!("Model Path [{}]: ", model_file);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let v = input.trim();
+            if !v.is_empty() { model_file = v.to_string(); }
+
+            print!("Vocab Size [{}]: ", target_vocab_size);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let v = input.trim();
+            if !v.is_empty() { if let Ok(parsed) = v.parse() { target_vocab_size = parsed; } }
+
+            print!("Tokenizer Path [{}]: ", tokenizer_path);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let v = input.trim();
+            if !v.is_empty() { tokenizer_path = v.to_string(); }
         }
     }
+   // let filbpe = tokenizer_path.to_string();
+    let tokenizer = if Path::new(&tokenizer_path.to_string()).exists() { 
+        println!("Cargando tokenizador existente...");
+        Tokenizer::load(&tokenizer_path.to_string())?
+    } else {
+        println!("Entrenando nuevo tokenizador BPE...");
+        let text = fs::read_to_string(text_file)?;
+        let tokenizer = Tokenizer::from_text(&text, target_vocab_size)?;
+        tokenizer.save(&tokenizer_path.to_string())?;
+        tokenizer
+    };
+
+    let vocab_size = tokenizer.vocab_size();
+    println!("Tamaño del vocabulario: {}\n", vocab_size);
+    let filemod = model_file.to_string().clone();
+    let existe_modelo = Path::new(&filemod).exists();
+    
+
 
     let config = XLSTMLargeConfig {
         embedding_dim,
@@ -415,13 +467,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         ffn_round_up_to_multiple_of: 64,
         gate_soft_cap: Some(15.0),
         output_logit_soft_cap: Some(30.0),
-        weight_mode: "single".to_string(),
+        weight_mode: mode.to_string(),
     };
 
     let mut model: XLSTMLarge<MyBackend> = if existe_modelo {
         println!("Cargando pesos del modelo...");
         let recorder = CompactRecorder::new();
-        let record = recorder.load(model_file.into(), &device)?;
+        let record = recorder.load(model_file.clone().into(), &device)?;
         XLSTMLarge::init(&config, &device).load_record(record)
     } else {
         println!("Iniciando nuevo modelo desde cero...\n");
@@ -514,7 +566,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("  Generado ({:.1} tok/s): {}\n", tps_gen, generated);
 
             let recorder = CompactRecorder::new();
-            model.clone().save_file(model_file, &recorder)?;
+            print!("Large model file  [file: {}] > ", model_file.clone()); 
+            model.clone().save_file(model_file.to_string().clone(), &recorder)?;
         }
     }
 

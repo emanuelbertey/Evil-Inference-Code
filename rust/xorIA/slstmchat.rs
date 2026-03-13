@@ -270,9 +270,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Model configuration
     let embedding_dim = 256;
-    let num_blocks = 3;
+    let num_blocks = 1;
     let seq_length = 128;
-    let batch_size = 16;
+    let batch_size = 24;
     let num_epochs = 50;
 
     let device = Default::default();
@@ -317,7 +317,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             dropout: 0.1,
             mlstm_block: Some(mlstm_cfg),
             slstm_block: Some(slstm_cfg),
-            slstm_at: vec![0, 1, 2],
+         //   slstm_at: vec![0, 1, 2],
+            slstm_at: vec![0],
         },
     };
 
@@ -379,7 +380,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let grads = loss.backward();
             let grads = GradientsParams::from_grads(grads, &model);
             
-            let lr = 2e-4; // Stability for sLSTM
+            let lr = 2e-3; // Stability for sLSTM
             model = optim.step(lr, model, grads);
 
             if batch_idx % 5 == 0 || batch_idx == num_batches - 1 {

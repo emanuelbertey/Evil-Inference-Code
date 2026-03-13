@@ -28,7 +28,7 @@ use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
 use tokenizers::models::TrainerWrapper;
 
-use xlstm::blocks::xlstm_large::{XLSTMLarge, XLSTMLargeConfig, XLSTMLargeState};
+use xlstm::blocks::xlstm_large::{XLSTMLarge, XLSTMLargeConfig};
 
 // Use CUDA backend with Autodiff
 type MyBackend = Autodiff<Cuda<f32, i32>>;
@@ -244,12 +244,16 @@ fn generate_text_typed<B: Backend>(
     let mut current_state = model.empty_state(1, device);
     let mut last_logits = None;
 
-    for &id in &seed_ids {
-        let input = Tensor::<B, 2, Int>::from_data(TensorData::new(vec![id as i64], [1, 1]), device);
-        let (logits, next_state) = model.forward(input, Some(current_state));
-        current_state = next_state.expect("State should be returned in recurrent mode");
-        last_logits = Some(logits);
-    }
+    // --- PARALLEL PREFILL (GPU OPTIMIZED) ---
+    let input = Tensor::<B, 2, Int>::from_data(
+        TensorData::new(seed_ids.iter().map(|&id| id as i64).collect(), [1, seed_ids.len()]), 
+        device
+    );
+    let (logits, next_state) = model.forward(input, None);
+    current_state = next_state.expect("El prefill paralelo debe devolver el estado");
+    
+    let [_, s_len, v_dim] = logits.dims();
+    last_logits = Some(logits.slice([0..1, (s_len - 1)..s_len]).reshape([1, v_dim]));
 
     let mut result_ids = Vec::new();
     let mut history = seed_ids.clone();
@@ -258,8 +262,8 @@ fn generate_text_typed<B: Backend>(
     let top_p = 1.0;
 
     let mut next_id = if let Some(logits) = last_logits {
-        let [_, _, v] = logits.dims();
-        sample_from_logits(logits.reshape([1, v]), temp, top_k, top_p, r_penalty, &history)
+        let [_, v] = logits.dims();
+        sample_from_logits(logits.clone(), temp, top_k, top_p, r_penalty, &history)
     } else {
         0
     };
@@ -314,7 +318,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vocab_size = tokenizer.vocab_size();
     println!("Tamaño del vocabulario: {}\n", vocab_size);
 
-    let mut embedding_dim = 768;
+    let embedding_dim = 768;
     let mut num_blocks = 5;
     let mut num_heads = 4;
     let mut lr = 3e-3;
