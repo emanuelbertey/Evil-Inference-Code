@@ -114,6 +114,10 @@ name = "test_slstm"
 path = "xorIA/bin/test_slstm.rs"
 
 [[bin]]
+name = "test_slstm2"
+path = "xorIA/bin/test_slstm2.rs"
+
+[[bin]]
 name = "xlstm_large_test"
 path = "xorIA/bin/xlstm_large_test.rs"
 
@@ -125,3 +129,6 @@ path = "xorIA/mingruchat.rs"
 name = "mingru_equivalence"
 path = "xorIA/bin/mingru_equivalence.rs"
 
+[[bin]]
+name = "mingruchat_cuda"
+path = "xorIA/mingruchat_cuda.rs"

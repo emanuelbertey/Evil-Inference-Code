@@ -14,7 +14,7 @@ fn g_3d<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
 
 fn log_g_3d<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     let mask = x.clone().greater_equal_elem(0.0);
-    let pos = (x.clone().add_scalar(0.5)).log();
+    let pos = (activation::relu(x.clone()).add_scalar(0.5)).log();
     let neg = activation::softplus(x.clone().neg(), 1.0).neg();
     neg.mask_where(mask, pos)
 }
@@ -45,7 +45,7 @@ fn logcumsumexp_stable<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
         let x_i = x.clone().slice([0..b, i..i+1, 0..h]);
         let m = current_lse.clone().max_dim(1); // GRADIENTE PURO sin detach
         let mask = x_i.clone().greater_equal(m.clone());
-        let m_new = m.clone().mask_where(mask, x_i.clone().max_dim(1));
+        let m_new = m.clone().mask_where(mask, x_i.clone().max_dim(1));// GRADIENTE PURO sin detach
         
         current_lse = ((current_lse - m_new.clone()).exp() + (x_i - m_new.clone()).exp()).log() + m_new;
         results.push(current_lse.clone());

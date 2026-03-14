@@ -168,8 +168,23 @@ impl<B: Backend> SLSTMLayer<B> {
 
     /// Forward: (B, S, D) → (B, S, D)
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        self.forward_with_state(x, None).0
+    }
+
+    /// Forward with state: returns (output, final_state)
+    pub fn forward_with_state(
+        &self,
+        x: Tensor<B, 3>,
+        state: Option<SLSTMLayerState<B>>,
+    ) -> (Tensor<B, 3>, SLSTMLayerState<B>) {
         let [b, s, _d] = x.dims();
         let dh = self.embedding_dim / self.num_heads;
+        let device = x.device();
+
+        let (cell_state, conv_state) = match state {
+            Some(st) => (Some(st.0), st.1),
+            None => (None, None),
+        };
 
         // Optional causal conv + SiLU
         let x_conv = if let Some(conv) = &self.conv1d {
@@ -178,26 +193,27 @@ impl<B: Backend> SLSTMLayer<B> {
             x.clone()
         };
 
-        // Gate projections: conv output feeds i, f; raw x feeds z, o
+        // Gate projections
         let i = self.igate.forward(x_conv.clone());
         let f = self.fgate.forward(x_conv);
         let z = self.zgate.forward(x.clone());
         let o = self.ogate.forward(x);
 
-        // Concatenate gates: (B, S, 4*D)
         let gates = Tensor::cat(vec![i, f, z, o], 2);
 
         // sLSTM cell
-        let (y, _state) = self.slstm_cell.forward(gates, None);
+        let (y, new_cell_state) = self.slstm_cell.forward(gates, cell_state);
 
-        // Dropout
+        // Dropout & Group norm
         let y = self.dropout.forward(y);
-
+       
         // Group norm: reshape to (B, NH, S, DH) for MultiHeadLayerNorm
-        let y = y.reshape([b, s, self.num_heads, dh])
-            .swap_dims(1, 2); // (B, NH, S, DH)
-        let y = self.group_norm.forward(y);
+       
+        let y_heads = y.reshape([b, s, self.num_heads, dh]).swap_dims(1, 2);
         // (B, NH, S, DH) → (B, S, NH, DH) → (B, S, D)
-        y.swap_dims(1, 2).reshape([b, s, self.embedding_dim])
+        let y_norm = self.group_norm.forward(y_heads);
+        let output = y_norm.swap_dims(1, 2).reshape([b, s, self.embedding_dim]);
+
+        (output, (new_cell_state, conv_state))
     }
 }

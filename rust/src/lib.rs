@@ -7,6 +7,8 @@ pub mod xlstm_lm_model;
 pub use xlstm_lm_model::{XLSTMLMModel as XLstm, XLSTMLMModelConfig as XLstmConfig};
 pub use xlstm_block_stack::{XLSTMBlockStackState as XLstmState};
 pub use blocks::minrnn::mingru::{MinGru, MinGruConfig, MinGruState};
+pub use blocks::slstm::layer::{SLSTMLayer as SLstm, SLSTMLayerConfig as SLstmConfig};
+pub use blocks::slstm::cell::{SLSTMState as SLstmState};
 
 #[derive(Debug, Clone, Copy)]
 pub enum LstmType {
