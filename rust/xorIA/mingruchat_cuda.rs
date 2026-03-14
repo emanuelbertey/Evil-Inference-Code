@@ -89,21 +89,21 @@ pub struct LanguageModelLayer<B: Backend> {
 
 impl<B: Backend> LanguageModelLayer<B> {
     pub fn forward(&self, x: Tensor<B, 3>, state: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>) {
-        // Lógica exacta del notebook de Jupyter
-        // 1. x = conv(x) + x
+        // Exact logic from Python notebook LanguageModel.forward():
+        // x = conv(x) + x
         let x = self.conv.forward(x.clone()) + x;
-        // 2. x = norm1(x)
+        // x = norm1(x)
         let x = self.norm1.forward(x);
-        // 3. out, h = mingru(x, h)
+        // output, h_0 = mingru(x, h_0); x = x + output
         let (output, next_states) = self.mingru.forward(x.clone(), Some(vec![MinGruState::new(state)]));
-        // 4. x = x + out
         let x = x + output;
-        // 5. x = norm2(x)
+        // x = norm2(x)
         let x = self.norm2.forward(x);
-        // 6. x = mlp(x) + x
+        // x = MLP(x) + x
         let x = self.mlp.forward(x.clone()) + x;
-        // 7. x = dropout(x) + x
-        let x = self.dropout.forward(x.clone()) + x;
+        // x = dropout(x) + x  (notebook: self.dropout(x) + x)
+        let x_dropped = self.dropout.forward(x.clone());
+        let x = x_dropped + x;
         (x, next_states[0].hidden.clone())
     }
 
@@ -116,7 +116,7 @@ impl<B: Backend> LanguageModelLayer<B> {
         let x = x + y_mingru;
         let x = self.norm2.forward(x);
         let x = self.mlp.forward(x.clone()) + x;
-        let x = self.dropout.forward(x.clone()) + x;
+        // No dropout during inference (step is used for generation only)
         (x, next_conv_state, next_mingru_state)
     }
 }
@@ -398,7 +398,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         
         for (b, (x, y)) in batches.iter().enumerate() {
             let logits = model.forward(x.clone());
-            let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
+            // Clamp logits to prevent NaN in softmax/cross-entropy on CUDA
+            let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]).clamp(-100.0, 100.0);
             let targets_flat = y.clone().reshape([batch_size * seq_len]);
             
             let loss = loss_fn.forward(logits_flat, targets_flat);
@@ -413,7 +414,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             
             let grads = loss.backward();
             let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
-            model = optim.step(2e-3, model, grads_p); 
+            model = optim.step(1e-3, model, grads_p); 
             
             if b % 2 == 0 {
                 let elapsed = start_epoch.elapsed().as_secs_f32();
