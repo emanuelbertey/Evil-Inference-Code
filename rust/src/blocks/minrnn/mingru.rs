@@ -21,9 +21,13 @@ fn log_g_3d<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     neg.mask_where(mask, pos)
 }
 
-// torch.logcumsumexp(x, dim=1) — direct translation
+// Equivalente numéricamente estable de torch.logcumsumexp.
+// PyTorch hace este "max trick" internamente en C++, en Burn debemos hacerlo manual
+// para que exp(x) no explote a +infinito a lo largo de los 512 tokens.
 fn logcumsumexp<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
-    x.exp().cumsum(1).log()
+    let m = x.clone().detach().max_dim(1);
+    let shifted = x - m.clone();
+    shifted.exp().cumsum(1).clamp_min(1e-30).log() + m
 }
 
 fn parallel_scan_log<B: Backend>(log_coeffs: Tensor<B, 3>, log_values: Tensor<B, 3>) -> Tensor<B, 3> {
