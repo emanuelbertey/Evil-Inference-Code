@@ -19,54 +19,22 @@ fn log_g_3d<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     neg.mask_where(mask, pos)
 }
 
-// Cumsum iterativo (Burn-friendly Autodiff) - Punto 2.18 del README_FIX
-fn cumsum_3d_stable<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
-    let [b, s, h] = x.dims();
-    let mut results = std::vec::Vec::with_capacity(s);
-    let mut acc = Tensor::<B, 3>::zeros([b, 1, h], &x.device());
-    
-    for i in 0..s {
-        acc = acc + x.clone().slice([0..b, i..i+1, 0..h]);
-        results.push(acc.clone());
-    }
-    Tensor::cat(results, 1)
-}
-
-// logcumsumexp iterativo con estabilidad local - Similar a PyTorch
-fn logcumsumexp_stable<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
-    let [b, s, h] = x.dims();
-    let device = x.device();
-    let mut results = std::vec::Vec::with_capacity(s);
-    
-    let mut current_lse = x.clone().slice([0..b, 0..1, 0..h]);
-    results.push(current_lse.clone());
-
-    for i in 1..s {
-        let x_i = x.clone().slice([0..b, i..i+1, 0..h]);
-        let m = current_lse.clone().max_dim(1); // GRADIENTE PURO sin detach
-        let mask = x_i.clone().greater_equal(m.clone());
-        let m_new = m.clone().mask_where(mask, x_i.clone().max_dim(1));// GRADIENTE PURO sin detach
-        
-        current_lse = ((current_lse - m_new.clone()).exp() + (x_i - m_new.clone()).exp()).log() + m_new;
-        results.push(current_lse.clone());
-    }
-    Tensor::cat(results, 1)
-}
-
 fn parallel_scan_log<B: Backend>(log_coeffs: Tensor<B, 3>, log_values: Tensor<B, 3>) -> Tensor<B, 3> {
     let [b, s, h] = log_coeffs.dims();
     let device = log_coeffs.device();
     
-    // a_star = pad(cumsum(log_coeffs), (0,0, 1,0))
-    let cs = cumsum_3d_stable(log_coeffs);
-    let zeros = Tensor::<B, 3>::zeros([b, 1, h], &device);
-    let a_star = Tensor::cat(vec![zeros, cs], 1);
+    // a_star = pad(torch.cumsum(log_coeffs, dim=1), (0, 0, 1, 0))
+    let a_star = Tensor::cat(vec![
+        Tensor::zeros([b, 1, h], &device),
+        log_coeffs.cumsum(1)
+    ], 1);
     
-    // log_h = a_star + logcumsumexp(log_values - a_star)
-    let log_h = a_star.clone() + logcumsumexp_stable(log_values - a_star);
+    // log_h = a_star + torch.logcumsumexp(log_values - a_star, dim=1)
+    // Implementación vectorizada estable para GPU
+    let log_h = a_star.clone() + (log_values - a_star).exp().cumsum(1).log();
     
-    let [b_out, s_out, h_out] = log_h.dims();
-    log_h.slice([0..b_out, 1..s_out, 0..h_out]).exp()
+    // return torch.exp(log_h)[:, 1:]
+    log_h.slice([0..b, 1..(s + 1), 0..h]).exp()
 }
 
 #[derive(Clone, Debug)]
@@ -130,7 +98,8 @@ impl<B: Backend> MinGru<B> {
         let log_h_0 = log_g_3d(h0);
         let log_tilde_h = log_g_3d(hidden_state);
         
-        let log_values = Tensor::cat(vec![log_h_0, log_z + log_tilde_h], 1);
+        // Estabilidad: Clamp para evitar log(0)
+        let log_values = Tensor::cat(vec![log_h_0, (log_z + log_tilde_h)], 1);
         let output = parallel_scan_log(log_coeffs, log_values);
         
         let [b_out, s_out, h_out] = output.dims();

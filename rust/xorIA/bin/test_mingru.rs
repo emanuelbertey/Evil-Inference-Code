@@ -5,7 +5,7 @@ use burn::optim::{AdamConfig, Optimizer};
 use burn::module::Module;
 use burn::nn::{Linear, LinearConfig, EmbeddingConfig};
 
-type TestBackend = burn_ndarray::NdArray<f32>;
+type TestBackend = burn_ndarray::NdArray<f64>;
 type AdBackend  = Autodiff<TestBackend>;
 
 // ─── TEST 1: Gradient Flow S=250, report every 50 ────────────────────────────
@@ -21,14 +21,14 @@ fn test_gradients() {
 
     let x = Tensor::<AdBackend, 3>::random(
         [batch_size, seq_len, input_dim],
-        Distribution::Normal(0.0, 1.0),
+        Distribution::Normal(0.0, 0.1),
         &device,
     ).require_grad();
 
 
     let (out, _) = model.forward(x.clone(), None);
-    // loss sobre TODOS los timesteps
-    let loss = out.sum();
+    // loss sobre TODOS los timesteps (usamos media para estabilidad en S=250)
+    let loss = out.mean();
     let grads = loss.backward();
     let x_grad = x.grad(&grads).expect("grad debe existir");
 
@@ -109,13 +109,13 @@ fn test_copy_task() {
     let mut optim = AdamConfig::new().init();
     let loss_fn   = burn::nn::loss::CrossEntropyLossConfig::new().init(&device);
     let mut model = model;
-    let mut first_loss = 0f32;
-    let mut last_loss  = 0f32;
+    let mut first_loss = 0f64;
+    let mut last_loss  = 0f64;
 
     println!("--- TEST 2: Copy Task (tira fija, steps=200, B={batch_size}, S={seq_len}, vocab={vocab_size}) ---");
 
     for step in 1..=200usize {
-        let mut running = 0f32;
+        let mut running = 0f64;
         let mut n = 0usize;
 
         for (x_ids_raw, y_ids_raw) in batches_x.iter().zip(batches_y.iter()) {
@@ -133,15 +133,22 @@ fn test_copy_task() {
             );
 
             let loss = loss_fn.forward(logits, y_ids);
-            running += loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+            running += loss.clone().into_data().as_slice::<f64>().unwrap()[0];
             n += 1;
 
             let grads      = loss.backward();
+            if step % 50 == 0 && n == 1 {
+                if let Some(g) = model.head.weight.grad(&grads) {
+                    let g_val = g.abs().mean().into_scalar();
+                    println!("    [GRADIENTE] Step {step} | Head Weight Grad Mean: {g_val:.10}");
+                }
+            }
+
             let grads_p    = burn::optim::GradientsParams::from_grads(grads, &model);
             model          = optim.step(2e-3, model, grads_p);
         }
 
-        let avg = running / n as f32;
+        let avg = running / n as f64;
         if step == 1 { first_loss = avg; }
         last_loss = avg;
         

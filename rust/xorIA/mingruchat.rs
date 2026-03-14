@@ -238,6 +238,9 @@ where <B as Backend>::FloatElem: num_traits::ToPrimitive {
 
     let mut generated = Vec::new();
     let mut last_id = *ids.last().unwrap();
+    
+    println!("--- Generando {} tokens ---", length);
+    let start_gen = Instant::now();
 
     for _ in 0..length {
         let input = Tensor::<B, 1, Int>::from_ints(vec![last_id as i32].as_slice(), device);
@@ -251,18 +254,59 @@ where <B as Backend>::FloatElem: num_traits::ToPrimitive {
         print!("{}", token);
         io::stdout().flush().unwrap();
     }
-    println!();
+    
+    let elapsed = start_gen.elapsed().as_secs_f32();
+    let tps = length as f32 / elapsed;
+    println!("\n\n[Velocidad: {:.2} tokens/s | Tiempo: {:.2}s]", tps, elapsed);
     tokenizer.decode(&generated)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Uso: cargo run --bin mingruchat -- <archivo.txt>");
-        std::process::exit(1);
+    let mut text_file = String::new();
+
+    if args.len() >= 2 {
+        text_file = args[1].clone();
     }
 
-    let text_file = &args[1];
+    println!("=== MinGRU Chat System (Interactive Menu) ===");
+    println!("1. Entrenar nuevo modelo o continuar entrenamiento");
+    println!("2. Solo Generación");
+    print!("Seleccione una opción: ");
+    io::stdout().flush().unwrap();
+    
+    let mut input_op = String::new();
+    io::stdin().read_line(&mut input_op).unwrap();
+    let option = input_op.trim();
+
+    if text_file.is_empty() {
+        print!("Ruta del archivo de texto (ej: input.txt): ");
+        io::stdout().flush().unwrap();
+        let mut text_file_input = String::new();
+        io::stdin().read_line(&mut text_file_input).unwrap();
+        text_file = text_file_input.trim().to_string();
+    }
+
+    let mut gen_len = 0;
+    let mut seed = "The ".to_string();
+
+    if option == "2" {
+        print!("Longitud a generar: ");
+        io::stdout().flush().unwrap();
+        let mut len_str = String::new();
+        io::stdin().read_line(&mut len_str).unwrap();
+        gen_len = len_str.trim().parse().unwrap_or(100);
+
+        print!("Semilla de texto (Enter para 'The '): ");
+        io::stdout().flush().unwrap();
+        let mut seed_str = String::new();
+        io::stdin().read_line(&mut seed_str).unwrap();
+        let trimmed_seed = seed_str.trim();
+        if !trimmed_seed.is_empty() {
+            seed = trimmed_seed.to_string();
+        }
+    }
+
     let model_path = "mingru_stable";
     let text = fs::read_to_string(text_file)?;
     
@@ -304,10 +348,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let model_file = format!("{}.mpk", model_path);
+    let mut model_exists = false;
     if Path::new(&model_file).exists() {
         println!("Cargando modelo...");
         let record = CompactRecorder::new().load(model_file.into(), &device)?;
         model = model.load_record(record);
+        model_exists = true;
+    }
+
+    if gen_len > 0 {
+        if !model_exists {
+            println!("[!] Error: No hay modelo guardado para generar.");
+            return Ok(());
+        }
+        generate_text(&model.valid(), &tokenizer, &seed, gen_len, &device);
+        return Ok(());
     }
 
     let mut optim = AdamConfig::new()
@@ -318,7 +373,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
     let batch_size = 32;
     let seq_len = 128;
-    let stride = 64;
+    let stride = 128;
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
 
     println!("Iniciando entrenamiento ESTABLE (3 capas, Estilo MinGru )...");
@@ -360,6 +415,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         
         let recorder = CompactRecorder::new();
         model.clone().save_file(model_path, &recorder)?;
+
+        if (epoch + 1) % 5 == 0 {
+            let checkpoint_name = format!("{}_epoch_{}", model_path, epoch + 1);
+            model.clone().save_file(&checkpoint_name, &recorder)?;
+            println!(" -> Checkpoint guardado: {}.mpk", checkpoint_name);
+        }
 
         if epoch % 1 == 0 {
             println!("--- Generación de prueba ---");
