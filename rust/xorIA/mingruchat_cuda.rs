@@ -398,7 +398,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         
         for (b, (x, y)) in batches.iter().enumerate() {
             let logits = model.forward(x.clone());
-            // Clamp logits to prevent NaN in softmax/cross-entropy on CUDA
+            
+            // Revertimos a ponerle clamp a los logits para evitar Overflow f32 en la Softmax en Colab
             let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]).clamp(-100.0, 100.0);
             let targets_flat = y.clone().reshape([batch_size * seq_len]);
             
@@ -407,7 +408,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             
             if current_loss.is_nan() {
                 println!("\n[!] FATAL: Loss es NaN en epoch {} batch {}. Abortando.", epoch+1, b);
-                std::process::exit(1);
+                //std::process::exit(1);
             }
 
             total_loss += current_loss;

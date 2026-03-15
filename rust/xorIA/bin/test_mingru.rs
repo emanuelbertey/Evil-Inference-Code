@@ -164,8 +164,51 @@ fn test_copy_task() {
     }
 }
 
+fn test_sequential_mode() {
+    let device = Default::default();
+    let b = 2;
+    let seq_len = 5;
+    let input_features = 4;
+    let expansion_factor = 2;
+    
+    let config = MinGruConfig::new(input_features).with_expansion_factor(expansion_factor);
+    let model: MinGru<TestBackend> = config.init(&device);
+    
+    let x = Tensor::<TestBackend, 3>::random(
+        [b, seq_len, input_features],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    
+    let hidden_size = input_features * expansion_factor;
+    let h0 = Tensor::<TestBackend, 3>::zeros([b, 1, hidden_size], &device);
+    
+    let (out_par, _) = model.forward(x.clone(), None);
+    
+    let mut h_seq = h0.clone();
+    let mut seq_outs = Vec::new();
+    
+    for t in 0..seq_len {
+        let x_t = x.clone().slice([0..b, t..(t + 1), 0..input_features]);
+        let (out_t, h_t) = model.sequential_mode(x_t, h_seq.clone());
+        h_seq = h_t;
+        seq_outs.push(out_t);
+    }
+    
+    let out_seq = Tensor::cat(seq_outs, 1);
+    let diff = (out_par.clone() - out_seq).abs().max().into_scalar();
+    println!("--- TEST 3: Sequential vs Parallel Mode Equivalence ---");
+    println!("Max diff: {}", diff);
+    if diff < 1e-5 {
+        println!("SUCCESS: Sequential mode matches parallel mode logic.\n");
+    } else {
+        println!("FAILURE: Sequential mode differs greatly from parallel ({})\n", diff);
+    }
+}
+
 fn main() {
     println!("=== minGRU Tests (Rust --release) ===\n");
     test_gradients();
     test_copy_task();
+    test_sequential_mode();
 }

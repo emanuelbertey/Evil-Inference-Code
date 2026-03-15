@@ -30,10 +30,11 @@ fn run_equivalence() {
     for t in 0..seq_len {
         let input_t = input_seq
             .clone()
-            .slice([0..batch_size, t..(t + 1), 0..hidden_size]);
+            .slice([0..batch_size, t..(t + 1), 0..hidden_size])
+            .reshape([batch_size, hidden_size]); // A 2D (B, D) para el .step()
             
-        let (h_new, new_state) = slstm.forward_with_state(input_t, Some(state));
-        outputs.push(h_new);
+        let (h_new, new_state) = slstm.step(input_t, state);
+        outputs.push(h_new.unsqueeze_dim(1)); // Lo volvemos a pasar a 3D (B, 1, D)
         state = new_state;
     }
     

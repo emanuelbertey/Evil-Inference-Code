@@ -21,28 +21,27 @@ fn log_g_3d<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     neg.mask_where(mask, pos)
 }
 
-// Equivalente numéricamente estable de torch.logcumsumexp.
-// PyTorch hace este "max trick" internamente en C++, en Burn debemos hacerlo manual
-// para que exp(x) no explote a +infinito a lo largo de los 512 tokens.
+// Equivalente numéricamente estable de torch.logcumsumexp con Max Trick
 fn logcumsumexp<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     let m = x.clone().detach().max_dim(1);
     let shifted = x - m.clone();
+    // clamp_min(1e-30) evita NaNs en el backward pass al prevenir divisiones por 0
     shifted.exp().cumsum(1).clamp_min(1e-30).log() + m
 }
 
 fn parallel_scan_log<B: Backend>(log_coeffs: Tensor<B, 3>, log_values: Tensor<B, 3>) -> Tensor<B, 3> {
-    // a_star = F.pad(torch.cumsum(log_coeffs, dim=1), (0, 0, 1, 0))
     let [b, s, h] = log_coeffs.dims();
     let device = log_coeffs.device();
+    
     let a_star = Tensor::cat(vec![
         Tensor::zeros([b, 1, h], &device),
         log_coeffs.cumsum(1),
     ], 1);
-    // log_h0_plus_b_star = torch.logcumsumexp(log_values - a_star, dim=1)
-    let log_h0_plus_b_star = logcumsumexp(log_values - a_star.clone());
-    // log_h = a_star + log_h0_plus_b_star
+    
+    let x_prime = log_values - a_star.clone();
+    let log_h0_plus_b_star = logcumsumexp(x_prime);
     let log_h = a_star + log_h0_plus_b_star;
-    // return torch.exp(log_h)[:, 1:]
+    
     log_h.slice([0..b, 1..(s + 1), 0..h]).exp()
 }
 
@@ -114,12 +113,12 @@ impl<B: Backend> MinGru<B> {
         (final_output, new_states)
     }
 
-    /// sequential_mode: h_t = (1 - z_t) * h_prev + z_t * g(h_tilde)
+    /// sequential_mode: h_t = (1 - z_t) * h_prev + z_t * h_tilde
     pub fn sequential_mode(&self, x_t: Tensor<B, 3>, h_prev: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>) {
         let z_t = activation::sigmoid(self.linear_z.forward(x_t.clone()));
         let h_tilde = self.linear_h.forward(x_t);
         let one_minus_z_t = z_t.clone().neg().add_scalar(1.0);
-        let h_t = one_minus_z_t * h_prev + z_t * g_3d(h_tilde);
+        let h_t = one_minus_z_t * h_prev + z_t * h_tilde;
         (self.output_projection.forward(h_t.clone()), h_t)
     }
 }
