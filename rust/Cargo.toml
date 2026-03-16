@@ -138,5 +138,9 @@ name = "mingruchat_wgpu"
 path = "xorIA/mingruchat_wgpu.rs"
 
 [[bin]]
+name = "compare_variants"
+path = "xorIA/bin/compare_variants.rs"
+
+[[bin]]
 name = "compare_primitives"
 path = "xorIA/bin/compare_primitives.rs"
