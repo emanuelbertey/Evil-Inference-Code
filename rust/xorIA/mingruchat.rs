@@ -377,7 +377,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
 
     println!("Iniciando entrenamiento ESTABLE (3 capas, Estilo MinGru )...");
-    for epoch in 0..50 {
+    for epoch in 0..25 {
         let mut total_loss = 0.0;
         let start_epoch = Instant::now();
         
