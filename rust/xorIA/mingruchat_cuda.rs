@@ -88,35 +88,40 @@ pub struct LanguageModelLayer<B: Backend> {
 }
 
 impl<B: Backend> LanguageModelLayer<B> {
-    pub fn forward(&self, x: Tensor<B, 3>, state: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>) {
-        // Exact logic from Python notebook LanguageModel.forward():
-        // x = conv(x) + x
+    pub fn forward(&self, x: Tensor<B, 3>, state: Option<Vec<MinGruState<B>>>) -> (Tensor<B, 3>, Vec<MinGruState<B>>) {
+        // Estabilizado: Estilo Pre-Norm Residual (Sync con mingruchat.rs)
+        // 1. Conv + Residual
         let x = self.conv.forward(x.clone()) + x;
-        // x = norm1(x)
-        let x = self.norm1.forward(x);
-        // output, h_0 = mingru(x, h_0); x = x + output
-        let (output, next_states) = self.mingru.forward(x.clone(), Some(vec![MinGruState::new(state)]));
+        
+        // 2. Norm -> MinGru -> Residual
+        let x_norm1 = self.norm1.forward(x.clone());
+        let (output, next_state) = self.mingru.forward(x_norm1, state);
         let x = x + output;
-        // x = norm2(x)
-        let x = self.norm2.forward(x);
-        // x = MLP(x) + x
-        let x = self.mlp.forward(x.clone()) + x;
-        // x = dropout(x) + x  (notebook: self.dropout(x) + x)
-        let x_dropped = self.dropout.forward(x.clone());
-        let x = x_dropped + x;
-        (x, next_states[0].hidden.clone())
+        
+        // 3. Norm -> MLP -> Residual
+        let x_norm2 = self.norm2.forward(x.clone());
+        let x = x + self.mlp.forward(x_norm2);
+        
+        // 4. Dropout final de capa
+        let x = self.dropout.forward(x);
+        
+        (x, next_state)
     }
 
     pub fn step(&self, x_t: Tensor<B, 3>, conv_state: Tensor<B, 3>, mingru_state: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
+        // Modo secuencial estabilizado (Sync con mingruchat.rs)
         let x_t_2d = x_t.clone().reshape([x_t.dims()[0], x_t.dims()[2]]);
         let (y_conv, next_conv_state) = self.conv.step(x_t_2d, conv_state);
         let x = y_conv.unsqueeze_dim(1) + x_t;
-        let x = self.norm1.forward(x);
-        let (y_mingru, next_mingru_state) = self.mingru.sequential_mode(x.clone(), mingru_state);
+        
+        let x_norm1 = self.norm1.forward(x.clone());
+        let (y_mingru, next_mingru_state) = self.mingru.sequential_mode(x_norm1, mingru_state);
         let x = x + y_mingru;
-        let x = self.norm2.forward(x);
-        let x = self.mlp.forward(x.clone()) + x;
-        // No dropout during inference (step is used for generation only)
+        
+        let x_norm2 = self.norm2.forward(x.clone());
+        let x = x + self.mlp.forward(x_norm2);
+        let x = self.dropout.forward(x);
+        
         (x, next_conv_state, next_mingru_state)
     }
 }
@@ -130,42 +135,36 @@ pub struct MinGruChatModel<B: Backend> {
     pub vocab_size: usize,
     pub hidden_size: usize,
     pub num_layers: usize,
-    pub h_0: burn::module::Param<Tensor<B, 3>>,
 }
 
 impl<B: Backend> MinGruChatModel<B> {
-    pub fn forward(&self, input: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+    pub fn forward(&self, input: Tensor<B, 2, Int>, _states: Option<Vec<Vec<MinGruState<B>>>>) -> (Tensor<B, 3>, Vec<Vec<MinGruState<B>>>) {
         let mut x = self.embedding.forward(input);
-        let [b, _, _] = x.dims();
-        let h_0 = self.h_0.val();
-        
-        // Broadcast h_0 to batch size if necessary
-        let mut current_h = h_0.repeat(&[b, 1, 1]);
+        let mut next_states = Vec::new();
         
         for layer in self.layers.iter() {
-            let (out, next_h) = layer.forward(x, current_h);
+            let (out, ns) = layer.forward(x, None);
             x = out;
-            current_h = next_h;
+            next_states.push(ns);
         }
         
-        let x = self.norm.forward(x);
-        self.head.forward(x)
+        x = self.norm.forward(x);
+        let logits = self.head.forward(x);
+        (logits, next_states)
     }
 
-    pub fn step(&self, input: Tensor<B, 1, Int>, conv_states: &mut Vec<Tensor<B, 3>>, mingru_state: &mut Tensor<B, 3>) -> Tensor<B, 2> {
+    pub fn step(&self, input: Tensor<B, 1, Int>, conv_states: &mut Vec<Tensor<B, 3>>, mingru_states: &mut Vec<Tensor<B, 3>>) -> Tensor<B, 2> {
         let [b] = input.dims();
         let mut x = self.embedding.forward(input.reshape([b, 1]));
-        let mut current_h = mingru_state.clone();
         
         for i in 0..self.num_layers {
-            let (out, next_conv, next_h) = self.layers[i].step(x, conv_states[i].clone(), current_h);
+            let (out, next_conv, next_mingru) = self.layers[i].step(x, conv_states[i].clone(), mingru_states[i].clone());
             x = out;
             conv_states[i] = next_conv;
-            current_h = next_h;
+            mingru_states[i] = next_mingru;
         }
         
-        *mingru_state = current_h;
-        let x = self.norm.forward(x);
+        x = self.norm.forward(x);
         self.head.forward(x).reshape([b, self.vocab_size])
     }
 }
@@ -240,12 +239,15 @@ where <B as Backend>::FloatElem: num_traits::ToPrimitive {
     for i in 0..model.num_layers {
         conv_states.push(model.layers[i].conv.empty_state(b, device));
     }
-    let mut mingru_state = Tensor::<B, 3>::zeros([b, 1, model.hidden_size * 2], device);
+    let mut mingru_states = Vec::new();
+    for _ in 0..model.num_layers {
+        mingru_states.push(Tensor::<B, 3>::zeros([b, 1, model.hidden_size * 2], device));
+    }
 
     // Prefill context
     for &id in &ids {
         let input = Tensor::<B, 1, Int>::from_ints(vec![id as i32].as_slice(), device);
-        let _ = model.step(input, &mut conv_states, &mut mingru_state);
+        let _ = model.step(input, &mut conv_states, &mut mingru_states);
     }
 
     let mut generated = Vec::new();
@@ -256,7 +258,7 @@ where <B as Backend>::FloatElem: num_traits::ToPrimitive {
 
     for _ in 0..length {
         let input = Tensor::<B, 1, Int>::from_ints(vec![last_id as i32].as_slice(), device);
-        let logits = model.step(input, &mut conv_states, &mut mingru_state);
+        let logits = model.step(input, &mut conv_states, &mut mingru_states);
         
         let next_id = sample_from_logits(logits, 0.7);
         generated.push(next_id);
@@ -347,9 +349,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    // Jupyter-style persistent h_0
-    let h_0 = burn::module::Param::from_tensor(Tensor::zeros([1, 1, hidden_size * 2], &device));
-
     let mut model: MinGruChatModel<MyBackend> = MinGruChatModel {
         embedding: EmbeddingConfig::new(vocab_size, hidden_size).init(&device),
         layers,
@@ -358,7 +357,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         vocab_size,
         hidden_size,
         num_layers,
-        h_0,
     };
 
     let model_file = format!("{}.mpk", model_path);
@@ -397,10 +395,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let start_epoch = Instant::now();
         
         for (b, (x, y)) in batches.iter().enumerate() {
-            let logits = model.forward(x.clone());
-            
-            // Revertimos a ponerle clamp a los logits para evitar Overflow f32 en la Softmax en Colab
-            let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]).clamp(-100.0, 100.0);
+            let (logits, _) = model.forward(x.clone(), None);
+            let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
             let targets_flat = y.clone().reshape([batch_size * seq_len]);
             
             let loss = loss_fn.forward(logits_flat, targets_flat);
@@ -415,7 +411,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             
             let grads = loss.backward();
             let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
-            model = optim.step(1e-3, model, grads_p); 
+            model = optim.step(2e-3, model, grads_p); // Subido LR a 2e-3 como pediste
             
             if b % 2 == 0 {
                 let elapsed = start_epoch.elapsed().as_secs_f32();

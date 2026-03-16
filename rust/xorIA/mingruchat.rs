@@ -406,7 +406,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             model = optim.step(1e-3, model, grads_p); 
             
             if b % 10 == 0 {
-                print!("\rEpoch {}/50 | Batch {}/{} | Loss: {:.4}", epoch+1, b, num_batches, total_loss / (b+1) as f32);
+                let elapsed = start_epoch.elapsed().as_secs_f32();
+                let batch_time = elapsed / (b + 1) as f32;
+                let tps = ((b + 1) * batch_size * seq_len) as f32 / elapsed;
+                print!("\rEpoch {}/50 | Batch {}/{} | Loss: {:.4} | Time/Batch: {:.3}s | Speed: {:.1} tok/s", 
+                    epoch+1, b, num_batches, total_loss / (b+1) as f32, batch_time, tps);
                 io::stdout().flush().unwrap();
             }
         }

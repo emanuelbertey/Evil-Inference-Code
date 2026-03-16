@@ -132,3 +132,7 @@ path = "xorIA/bin/mingru_equivalence.rs"
 [[bin]]
 name = "mingruchat_cuda"
 path = "xorIA/mingruchat_cuda.rs"
+
+[[bin]]
+name = "mingruchat_wgpu"
+path = "xorIA/mingruchat_wgpu.rs"

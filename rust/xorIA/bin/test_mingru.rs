@@ -181,7 +181,7 @@ fn test_sequential_mode() {
     );
     
     let hidden_size = input_features * expansion_factor;
-    let h0 = Tensor::<TestBackend, 3>::zeros([b, 1, hidden_size], &device);
+    let h0 = Tensor::<TestBackend, 3>::zeros([b, 1, hidden_size], &device).add_scalar(0.5);
     
     let (out_par, _) = model.forward(x.clone(), None);
     
