@@ -21,7 +21,7 @@ fn test_gradients() {
 
     let x = Tensor::<AdBackend, 3>::random(
         [batch_size, seq_len, input_dim],
-        Distribution::Normal(0.0, 0.1),
+        Distribution::Normal(0.0, 1.0),
         &device,
     ).require_grad();
 

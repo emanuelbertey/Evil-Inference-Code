@@ -136,3 +136,7 @@ path = "xorIA/mingruchat_cuda.rs"
 [[bin]]
 name = "mingruchat_wgpu"
 path = "xorIA/mingruchat_wgpu.rs"
+
+[[bin]]
+name = "compare_primitives"
+path = "xorIA/bin/compare_primitives.rs"

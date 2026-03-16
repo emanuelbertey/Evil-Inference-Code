@@ -28,7 +28,7 @@ cargo run --release --bin burn_comparison
 
 cargo run --release --bin dual_test
 
-cargo run --release --bin test_mingru
+
 
 cargo run --release --bin test_slstm
 
@@ -61,6 +61,8 @@ cargo run --release --bin large_chat -- input.txt
 
 cargo run --release --bin xlstm_large_test
 
+cargo run --release --bin large_chat_cuda -- input.txt
+
 cargo run --release --bin main
 
 cargo run --release --bin mingruchat -- input.txt
@@ -77,3 +79,10 @@ cargo run --release --bin mingruchat_wgpu -- input.txt
 
 $env:PYTHONPATH = "."; py tests\slstm_equivalence_gen.py
 
+cargo run --release --bin compare_primitives
+
+
+cargo run --release --bin test_mingru
+
+
+python c:\Users\Emabe\Documents\GitHub\xlstm\tests\compare_primitives.py
