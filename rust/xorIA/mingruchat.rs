@@ -138,12 +138,21 @@ pub struct MinGruChatModel<B: Backend> {
 }
 
 impl<B: Backend> MinGruChatModel<B> {
-    pub fn forward(&self, input: Tensor<B, 2, Int>, _states: Option<Vec<Vec<MinGruState<B>>>>) -> (Tensor<B, 3>, Vec<Vec<MinGruState<B>>>) {
+    pub fn forward(&self, input: Tensor<B, 2, Int>, states: Option<Vec<Vec<MinGruState<B>>>>) -> (Tensor<B, 3>, Vec<Vec<MinGruState<B>>>) {
         let mut x = self.embedding.forward(input);
         let mut next_states = Vec::new();
         
+        // Desempacar estados por capa (o usar vacíos si es None)
+        let mut layer_states = states.unwrap_or_default();
+        while layer_states.len() < self.num_layers {
+            layer_states.push(vec![]);
+        }
+        let mut states_iter = layer_states.into_iter();
+        
         for layer in self.layers.iter() {
-            let (out, ns) = layer.forward(x, None);
+            let st = states_iter.next().unwrap();
+            let state = if st.is_empty() { None } else { Some(st) };
+            let (out, ns) = layer.forward(x, state);
             x = out;
             next_states.push(ns);
         }
@@ -376,10 +385,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stride = 128;
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
 
-    println!("Iniciando entrenamiento ESTABLE (3 capas, Estilo MinGru )...");
+    let hidden_size_expanded = hidden_size * 2; // expansion_factor = 2
+    
+    println!("Iniciando entrenamiento ESTABLE (3 capas, Estilo MinGru con h_0 persistente)...");
+    // Estado h_0 persistente (como self.h_0 en Python notebook)
+    let mut h_states: Option<Vec<Vec<MinGruState<MyBackend>>>> = None;
+    
     for epoch in 0..25 {
         let mut total_loss = 0.0;
         let start_epoch = Instant::now();
+        
+        // Reset h_0 al inicio de cada epoch (como Python: self.h_0 = zeros en __init__)
+        h_states = None;
         
         for b in 0..num_batches {
             let start_idx = b * batch_size * stride;
@@ -387,7 +404,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             
             let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
             
-            let (logits, _) = model.forward(x, None);
+            let (logits, new_states) = model.forward(x, h_states.take());
+            
+            // Persistir h_0 detached para el próximo batch (evita backprop cross-batch)
+            h_states = Some(new_states.into_iter().map(|layer_s| {
+                layer_s.into_iter().map(|s| MinGruState::new(s.hidden.detach())).collect()
+            }).collect());
+            
             let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
             let targets_flat = y.reshape([batch_size * seq_len]);
             
@@ -409,7 +432,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let elapsed = start_epoch.elapsed().as_secs_f32();
                 let batch_time = elapsed / (b + 1) as f32;
                 let tps = ((b + 1) * batch_size * seq_len) as f32 / elapsed;
-                print!("\rEpoch {}/50 | Batch {}/{} | Loss: {:.4} | Time/Batch: {:.3}s | Speed: {:.1} tok/s", 
+                print!("\rEpoch {}/25 | Batch {}/{} | Loss: {:.4} | Time/Batch: {:.3}s | Speed: {:.1} tok/s", 
                     epoch+1, b, num_batches, total_loss / (b+1) as f32, batch_time, tps);
                 io::stdout().flush().unwrap();
             }

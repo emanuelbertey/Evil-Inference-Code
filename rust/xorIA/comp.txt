@@ -84,5 +84,6 @@ cargo run --release --bin compare_primitives
 
 cargo run --release --bin test_mingru
 
+cargo run --release --bin test_mingru_lib
 
 python c:\Users\Emabe\Documents\GitHub\xlstm\tests\compare_primitives.py

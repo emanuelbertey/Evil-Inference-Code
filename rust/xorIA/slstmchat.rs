@@ -245,11 +245,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let text_file = &args[1];
-    let tokenizer_path = "tokenizer.json";
+    let tokenizer_path = "tokenizer_SLSTM.json";
     let model_path = "slstm_chat_model"; 
 
     // Load or create tokenizer
-    let target_vocab_size = 2048;
+    let target_vocab_size = 1024;
     let tokenizer = if Path::new(tokenizer_path).exists() {
         println!("Cargando tokenizador existente...");
         Tokenizer::load(tokenizer_path)?

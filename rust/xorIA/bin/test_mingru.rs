@@ -16,6 +16,14 @@ fn log_g<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     neg.mask_where(mask, pos)
 }
 
+/// g(x) en espacio lineal (paper Eq.): x>=0 → x+0.5, x<0 → sigmoid(x)
+fn g<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
+    let mask = x.clone().greater_equal_elem(0.0);
+    let pos = activation::relu(x.clone()) + 0.5;
+    let neg = activation::sigmoid(x);
+    neg.mask_where(mask, pos)
+}
+
 fn log_cumsum_exp<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     // CENTRADO ÓPTIMO EN F32 (Sin bucles / Sin Apensors):
     // El rango dinámico de exp(f32) es [-87.3, 88.7].
@@ -81,6 +89,27 @@ impl<B: Backend> MinGru<B> {
         
         (self.proj.forward(output), latest_hidden)
     }
+
+    /// Modo secuencial: procesa 1 token con estado recurrente.
+    /// IMPORTANTE: h_prev debe ser g(h_0) en el primer paso (no h_0 crudo),
+    /// porque el forward paralelo aplica log_g(h_0) internamente.
+    /// Para pasos subsiguientes, h_prev es el h_t retornado por el paso anterior.
+    pub fn sequential_mode(&self, x_t: Tensor<B, 3>, h_prev: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        let update_gate = self.linear_z.forward(x_t.clone());
+        let hidden_state = self.linear_h.forward(x_t);
+        
+        let k = activation::softplus(update_gate, 1.0).neg();
+        let log_z = activation::softplus(k.clone().neg(), 1.0).neg();
+        let log_coeffs = activation::softplus(k, 1.0).neg();
+        
+        let log_tilde_h = log_g(hidden_state);
+        
+        // Recurrencia single-step equivalente al parallel_scan_log:
+        // h_t = exp(log_coeffs) * h_prev + exp(log_z + log_tilde_h)
+        let h_t = (log_coeffs.exp() * h_prev) + (log_z + log_tilde_h).exp();
+        
+        (self.proj.forward(h_t.clone()), h_t)
+    }
 }
 
 #[derive(Module, Debug)]
@@ -115,6 +144,70 @@ fn test_gradients() {
     for t in checkpoints {
         let g_t = grad.clone().slice([0..b, t..t+1, 0..d]).abs().mean().into_scalar();
         println!("  t={t:3}  |grad|={g_t:.10}");
+    }
+}
+
+fn test_sequential_equivalence() {
+    let device = Default::default();
+    let b = 2;
+    let d = 16;
+    let expansion = 2;
+    let hidden = d * expansion;
+    let seq_len = 8;
+
+    let model = MinGru::<TestBackend>::init(d, expansion, &device);
+    let x = Tensor::<TestBackend, 3>::random([b, seq_len, d], Distribution::Normal(0.0, 1.0), &device);
+    let h0 = Tensor::<TestBackend, 3>::zeros([b, 1, hidden], &device);
+
+    // ── Parallel forward ──
+    let (out_parallel, _) = model.forward(x.clone(), h0.clone());
+
+    // ── Sequential forward (step by step) ──
+    // CLAVE: h_0 debe pasar por g() para igualar lo que el parallel hace con log_g(h_0)
+    let mut h_prev = g(h0);
+    let mut seq_outputs = Vec::new();
+    
+    for t in 0..seq_len {
+        let x_t = x.clone().slice([0..b, t..t+1, 0..d]);
+        let (out_t, h_next) = model.sequential_mode(x_t, h_prev);
+        seq_outputs.push(out_t);
+        h_prev = h_next;
+    }
+    let out_sequential = Tensor::cat(seq_outputs, 1);
+
+    println!("\n--- TEST 3: Parallel vs Sequential Equivalence (S={seq_len}) ---");
+    let diff = (out_parallel.clone() - out_sequential.clone()).abs();
+    let max_diff = diff.clone().max().into_scalar();
+    let mean_diff = diff.mean().into_scalar();
+    
+    println!("  Max  |parallel - sequential| = {max_diff:.10}");
+    println!("  Mean |parallel - sequential| = {mean_diff:.10}");
+
+    // Verificar con distintas seq_len
+    for test_len in [1, 4, 16, 64] {
+        let x2 = Tensor::<TestBackend, 3>::random([1, test_len, d], Distribution::Normal(0.0, 1.0), &device);
+        let h0_2 = Tensor::<TestBackend, 3>::zeros([1, 1, hidden], &device);
+        
+        let (out_p, _) = model.forward(x2.clone(), h0_2.clone());
+        
+        let mut h = g(h0_2);
+        let mut outs = Vec::new();
+        for t in 0..test_len {
+            let xt = x2.clone().slice([0..1, t..t+1, 0..d]);
+            let (ot, hn) = model.sequential_mode(xt, h);
+            outs.push(ot);
+            h = hn;
+        }
+        let out_s = Tensor::cat(outs, 1);
+        let md = (out_p - out_s).abs().max().into_scalar();
+        let status = if md < 1e-4 { "OK" } else { "FAIL" };
+        println!("  S={test_len:3}  max_diff={md:.10}  [{status}]");
+    }
+
+    if max_diff < 1e-4 {
+        println!("SUCCESS: Parallel ≈ Sequential (max_diff < 1e-4)");
+    } else {
+        println!("FAILURE: Diferencia significativa ({max_diff:.6})");
     }
 }
 
@@ -197,6 +290,15 @@ fn test_copy_task() {
 }
 
 fn main() {
+    println!("============================================");
+    println!("  TEST SUITE: MinGRU (Inline Implementation)");
+    println!("============================================");
+    
     test_gradients();
     test_copy_task();
+    test_sequential_equivalence();
+    
+    println!("\n============================================");
+    println!("  ALL TESTS COMPLETE");
+    println!("============================================");
 }

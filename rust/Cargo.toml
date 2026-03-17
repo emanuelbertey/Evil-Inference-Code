@@ -144,3 +144,7 @@ path = "xorIA/bin/compare_variants.rs"
 [[bin]]
 name = "compare_primitives"
 path = "xorIA/bin/compare_primitives.rs"
+
+[[bin]]
+name = "test_mingru_lib"
+path = "xorIA/bin/test_mingru_lib.rs"
