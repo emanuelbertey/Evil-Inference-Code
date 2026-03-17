@@ -17,8 +17,13 @@ fn log_g<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
 }
 
 fn log_cumsum_exp<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
-   // let m = x.clone().detach().max().reshape([1, 1, 1]);
-    let m = x.clone().detach().max_dim(1);
+    // CENTRADO ÓPTIMO EN F32 (Sin bucles / Sin Apensors):
+    // El rango dinámico de exp(f32) es [-87.3, 88.7].
+    // Centramos toda la secuencia dividiendo el rango a la mitad para evitar t=0 -> log(0) -> NaN
+    let max = x.clone().detach().max_dim(1);
+    let min = x.clone().detach().neg().max_dim(1).neg(); // Equivale a min_dim(1)
+    let m = (max + min) / 2.0;
+    
     (x - m.clone()).exp().cumsum(1).log() + m
 }
 
