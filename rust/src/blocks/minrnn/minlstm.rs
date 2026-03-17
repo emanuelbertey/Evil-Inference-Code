@@ -33,26 +33,28 @@ impl MinLstmConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> MinLstm<B> {
         let hidden_size = self.input_features * self.expansion_factor;
         
-        // Arquitectura idéntica a minGRU: Sin bias en ninguna capa para mantener la estructura estable
-        let l_f = nn::LinearConfig::new(self.input_features, hidden_size).with_bias(false).init(device);
-        let l_i = nn::LinearConfig::new(self.input_features, hidden_size).with_bias(false).init(device);
-        let l_h = nn::LinearConfig::new(self.input_features, hidden_size).with_bias(false).init(device);
-        let proj = nn::LinearConfig::new(hidden_size, self.input_features).with_bias(false).init(device);
+        // PAPEL: MinLSTM usa capas lineales CON BIAS. 
+        // El bias es crucial para que el gate se estabilice sin "rebotes".
+        let l_f = nn::LinearConfig::new(self.input_features, hidden_size).init(device);
+        let l_i = nn::LinearConfig::new(self.input_features, hidden_size).init(device);
+        let l_h = nn::LinearConfig::new(self.input_features, hidden_size).init(device);
+        let proj = nn::LinearConfig::new(hidden_size, self.input_features).init(device);
         
-        let init_weights = |linear: nn::Linear<B>, in_dim: usize| {
+        // Inicialización uniforme estándar
+        let init_params = |linear: nn::Linear<B>, in_dim: usize| {
             let k = (1.0 / in_dim as f32).sqrt();
-            let out_dim = linear.weight.dims()[1];
+            let [in_d, out_d] = linear.weight.dims();
             linear.load_record(nn::LinearRecord {
-                weight: Param::from_tensor(Tensor::random([in_dim, out_dim], Distribution::Uniform(-k as f64, k as f64), device)),
-                bias: None,
+                weight: Param::from_tensor(Tensor::random([in_d, out_d], Distribution::Uniform(-k as f64, k as f64), device)),
+                bias: Some(Param::from_tensor(Tensor::random([out_d], Distribution::Uniform(-k as f64, k as f64), device))),
             })
         };
 
         MinLstm { 
-            linear_f: init_weights(l_f, self.input_features),
-            linear_i: init_weights(l_i, self.input_features),
-            linear_h: init_weights(l_h, self.input_features),
-            output_projection: init_weights(proj, hidden_size) 
+            linear_f: init_params(l_f, self.input_features),
+            linear_i: init_params(l_i, self.input_features),
+            linear_h: init_params(l_h, self.input_features),
+            output_projection: init_params(proj, hidden_size) 
         }
     }
 }
@@ -63,6 +65,7 @@ fn log_cumsum_exp<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     let min = x.clone().detach().neg().max_dim(1).neg(); 
     let m = (max + min) / 2.0;
     
+    // El clamp evita que los valores se salgan del rango de f32 durante el scan
     (x - m.clone()).clamp(-85.0, 85.0).exp().cumsum(1).log() + m
 }
 
@@ -74,7 +77,7 @@ fn log_g<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
 }
 
 fn parallel_scan_log<B: Backend>(log_coeffs: Tensor<B, 3>, log_values: Tensor<B, 3>) -> Tensor<B, 3> {
-    let [b, _s_plus_1, h] = log_values.dims();
+    let [b, s_plus_1, h] = log_values.dims();
     let device = log_values.device();
     
     let a_star = Tensor::cat(vec![
@@ -86,9 +89,8 @@ fn parallel_scan_log<B: Backend>(log_coeffs: Tensor<B, 3>, log_values: Tensor<B,
     let log_h0_plus_b_star = log_cumsum_exp(x);
     
     let log_h = a_star + log_h0_plus_b_star;
-    let dims = log_h.dims();
     
-    log_h.exp().slice([0..b, 1..dims[1], 0..h])
+    log_h.exp().slice([0..b, 1..s_plus_1, 0..h])
 }
 
 impl<B: Backend> MinLstm<B> {
@@ -101,13 +103,15 @@ impl<B: Backend> MinLstm<B> {
         let h_prev = states.pop().map(|s| s.hidden);
         let h_0 = h_prev.unwrap_or_else(|| Tensor::zeros([b, 1, hidden_size], &device));
 
-        // diff = softplus(-W_f(x)) - softplus(-W_i(x))
-        let diff = activation::softplus(self.linear_f.forward(x.clone()).neg(), 1.0) 
-            - activation::softplus(self.linear_i.forward(x.clone()).neg(), 1.0);
+        // PAPEL: diff = log(sigm(f)) - log(sigm(i)) en terminos de log-space
+        // log(sigm(x)) = -softplus(-x)
+        let log_f_raw = activation::softplus(self.linear_f.forward(x.clone()).neg(), 1.0).neg();
+        let log_i_raw = activation::softplus(self.linear_i.forward(x.clone()).neg(), 1.0).neg();
+        
+        let diff = log_i_raw - log_f_raw;
             
-        // log_f = -softplus(diff)
+        // Combinación convexa pura: exp(log_f) + exp(log_i) = 1
         let log_f = activation::softplus(diff.clone(), 1.0).neg();
-        // log_i = -softplus(-diff)
         let log_i = activation::softplus(diff.neg(), 1.0).neg();
         
         let log_h_0 = log_g(h_0);
@@ -121,17 +125,25 @@ impl<B: Backend> MinLstm<B> {
     }
 
     pub fn sequential_mode(&self, x_t: Tensor<B, 3>, h_prev: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>) {
-        let diff = activation::softplus(self.linear_f.forward(x_t.clone()).neg(), 1.0) 
-            - activation::softplus(self.linear_i.forward(x_t.clone()).neg(), 1.0);
-            
-        let log_f = activation::softplus(diff.clone(), 1.0).neg();
-        let log_i = activation::softplus(diff.neg(), 1.0).neg();
+        let f_t = activation::sigmoid(self.linear_f.forward(x_t.clone()));
+        let i_t = activation::sigmoid(self.linear_i.forward(x_t.clone()));
         
-        let log_tilde_h = log_g(self.linear_h.forward(x_t));
-        
-        // h_t = exp(log_f) * h_prev + exp(log_i + log_tilde_h)
-        let h_t = (log_f.exp() * h_prev) + (log_i + log_tilde_h).exp();
+        // g(x) = donde x>=0 ? x+0.5 : sigmoid(x)
+        let tilde_h_t = {
+            let x = self.linear_h.forward(x_t);
+            let mask = x.clone().greater_equal_elem(0.0);
+            let pos = x.clone() + 0.5;
+            let neg = activation::sigmoid(x);
+            neg.mask_where(mask, pos)
+        };
 
+        // f' = f / (f+i), i' = i / (f+i)
+        let sum = f_t.clone() + i_t.clone();
+        let f_prime = f_t / sum.clone();
+        let i_prime = i_t / sum;
+
+        let h_t = (f_prime * h_prev) + (i_prime * tilde_h_t);
+;
         (self.output_projection.forward(h_t.clone()), h_t)
     }
 }
