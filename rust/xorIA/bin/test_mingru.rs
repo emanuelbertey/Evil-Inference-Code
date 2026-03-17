@@ -17,7 +17,9 @@ fn log_g<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
 }
 
 fn log_cumsum_exp<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
-    x.exp().cumsum(1).log()
+   // let m = x.clone().detach().max().reshape([1, 1, 1]);
+    let m = x.clone().detach().max_dim(1);
+    (x - m.clone()).exp().cumsum(1).log() + m
 }
 
 fn parallel_scan_log<B: Backend>(log_coeffs: Tensor<B, 3>, log_values: Tensor<B, 3>) -> Tensor<B, 3> {
