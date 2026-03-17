@@ -57,12 +57,14 @@ impl MinGruConfig {
 
 // Función auxiliar para emular torch.logcumsumexp de forma estable y paralela en f32
 fn log_cumsum_exp<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
-    // Buscamos el máximo de la secuencia para el LSE trick
-    let x_max = x.clone().max_dim(1).detach();
-    // Clamp vital: en f32, exp(x) bajo -80 es underflow. 
-    // Al fijar -60 evitamos que el gradiente 1/sum explote a trillones.
-    let x_stable = (x - x_max.clone()).clamp(-60.0, 0.0);
-    x_stable.exp().cumsum(1).log() + x_max
+    // CENTRADO ÓPTIMO EN F32 (Sin bucles / Sin Apensors):
+    // El rango dinámico de exp(f32) es [-87.3, 88.7].
+    // Centramos toda la secuencia dividiendo el rango a la mitad para evitar t=0 -> log(0) -> NaN
+    let max = x.clone().detach().max_dim(1);
+    let min = x.clone().detach().neg().max_dim(1).neg(); // Equivale a min_dim(1)
+    let m = (max + min) / 2.0;
+    
+    (x - m.clone()).exp().cumsum(1).log() + m
 }
 
 fn log_g<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
@@ -91,7 +93,7 @@ fn parallel_scan_log<B: Backend>(log_coeffs: Tensor<B, 3>, log_values: Tensor<B,
     let dims = log_h.dims();
     
     // Regresamos a espacio lineal (h) quitando el estado inicial t=0
-    log_h.clamp(-60.0, 60.0).exp().slice([0..b, 1..dims[1], 0..h])
+    log_h.exp().slice([0..b, 1..dims[1], 0..h])
 }
 
 impl<B: Backend> MinGru<B> {
