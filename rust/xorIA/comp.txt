@@ -86,4 +86,8 @@ cargo run --release --bin test_mingru
 
 cargo run --release --bin test_mingru_lib
 
+cargo run --release --bin test_minlstm_lib
+
+cargo run --release --bin minlstmchat -- input.txt
+
 python c:\Users\Emabe\Documents\GitHub\xlstm\tests\compare_primitives.py
