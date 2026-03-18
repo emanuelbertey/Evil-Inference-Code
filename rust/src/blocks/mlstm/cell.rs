@@ -65,7 +65,7 @@ impl MLSTMCellConfig {
 }
 
 impl<B: Backend> MLSTMCell<B> {
-    fn reset_parameters(&mut self, device: &B::Device) {
+    pub fn reset_parameters(&mut self, device: &B::Device) {
         // Forget gate bias: linspace(3.0, 6.0) para asegurar que el olvido sea lento al inicio
         let fgate_bias = bias_linspace_init::<B>(3.0, 6.0, self.num_heads, device);
         self.fgate.bias = Some(burn::module::Param::from_tensor(fgate_bias));

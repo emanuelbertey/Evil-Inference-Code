@@ -270,7 +270,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Model configuration
     let embedding_dim = 256;
-    let num_blocks = 2;
+    let num_blocks = 3;
     let seq_length = 256;
     let batch_size = 16;
     let num_epochs = 50;

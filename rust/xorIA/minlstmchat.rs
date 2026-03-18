@@ -271,47 +271,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         text_file = args[1].clone();
     }
 
-    println!("=== MinLSTM Chat System (Interactive Menu) ===");
-    println!("1. Entrenar nuevo modelo o continuar entrenamiento");
-    println!("2. Solo Generación");
-    print!("Seleccione una opción: ");
-    io::stdout().flush().unwrap();
-    
-    let mut input_op = String::new();
-    io::stdin().read_line(&mut input_op).unwrap();
-    let option = input_op.trim();
+    let model_path = "minlstm_stable";
+    let model_file = format!("{}.mpk", model_path);
+    let model_exists = Path::new(&model_file).exists();
 
-    if text_file.is_empty() {
-        print!("Ruta del archivo de texto (ej: input.txt): ");
-        io::stdout().flush().unwrap();
-        let mut text_file_input = String::new();
-        io::stdin().read_line(&mut text_file_input).unwrap();
-        text_file = text_file_input.trim().to_string();
-    }
-
-    let mut gen_len = 0;
-    let mut seed = "The ".to_string();
-
-    if option == "2" {
-        print!("Longitud a generar: ");
-        io::stdout().flush().unwrap();
-        let mut len_str = String::new();
-        io::stdin().read_line(&mut len_str).unwrap();
-        gen_len = len_str.trim().parse().unwrap_or(100);
-
-        print!("Semilla de texto (Enter para 'The '): ");
-        io::stdout().flush().unwrap();
-        let mut seed_str = String::new();
-        io::stdin().read_line(&mut seed_str).unwrap();
-        let trimmed_seed = seed_str.trim();
-        if !trimmed_seed.is_empty() {
-            seed = trimmed_seed.to_string();
+    let mut modo_inferencia = false;
+    if model_exists {
+        loop {
+            print!("¡Modelo MinLSTM encontrado! ¿Deseas (e)ntrenar o (i)nferir solamente? [e/i]: ");
+            io::stdout().flush()?;
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice)?;
+            let choice = choice.trim().to_lowercase();
+            match choice.as_str() {
+                "i" => { modo_inferencia = true; break; }
+                "e" => { break; }
+                _ => {
+                    if choice.is_empty() { continue; }
+                    println!("  → Opción no reconocida. Escribe 'e' para entrenar o 'i' para solo inferencia.");
+                }
+            }
         }
     }
 
-    let model_path = "minlstm_stable";
     let text = fs::read_to_string(text_file)?;
-    
     let tokenizer = CharTokenizer::from_text(&text);
     let vocab_size = tokenizer.vocab_size();
     println!("Vocab size (Characters): {}", vocab_size);
@@ -349,21 +332,51 @@ fn main() -> Result<(), Box<dyn Error>> {
         num_layers,
     };
 
-    let model_file = format!("{}.mpk", model_path);
-    let mut model_exists = false;
-    if Path::new(&model_file).exists() {
-        println!("Cargando modelo...");
+    if model_exists {
+        println!("Cargando pesos del modelo...");
         let record = CompactRecorder::new().load(model_file.into(), &device)?;
         model = model.load_record(record);
-        model_exists = true;
+    } else {
+        println!("No se encontró un modelo previo. Iniciando desde cero.");
     }
 
-    if gen_len > 0 {
-        if !model_exists {
-            println!("[!] Error: No hay modelo guardado para generar.");
-            return Ok(());
+    if modo_inferencia {
+        println!("\n╔════════════════════════════════════════════════════════╗");
+        println!("║        MODO INTERACTIVO - MinLSTM Chat System         ║");
+        println!("╚════════════════════════════════════════════════════════╝\n");
+        println!("Comandos:");
+        println!("  - Escribe tu semilla para generar texto.");
+        println!("  - 'len <n>': Cambia la cantidad de tokens a generar.");
+        println!("  - 'salir' o 'exit' para terminar.\n");
+
+        let mut current_len = 100;
+        loop {
+            print!("Semilla [len: {}] > ", current_len);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim();
+
+            if input.eq_ignore_ascii_case("salir") || input.eq_ignore_ascii_case("exit") {
+                break;
+            }
+
+            if input.to_lowercase().starts_with("len ") {
+                if let Ok(new_len) = input[4..].trim().parse::<usize>() {
+                    current_len = new_len;
+                    println!("  -> Longitud cambiada a: {} tokens.\n", current_len);
+                    continue;
+                }
+            }
+
+            if input.is_empty() {
+                continue;
+            }
+
+            println!("\n--- TEXTO GENERADO ---");
+            generate_text(&model.valid(), &tokenizer, input, current_len, &device);
+            println!("----------------------\n");
         }
-        generate_text(&model.valid(), &tokenizer, &seed, gen_len, &device);
         return Ok(());
     }
 

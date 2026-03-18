@@ -52,16 +52,11 @@ fn main() {
         let grads = loss.backward();
         let grads_params = burn::optim::GradientsParams::from_grads(grads, &layer);
         
-        // Check grad existence and nan (simplified check by looking at some grad)
-        let mut total_grad_norm = 0.0;
-        // In Burn we can't easily iterate all params and their grads like PyTorch without more boilerplate,
-        // but we can check the loss and see if the update makes it NaN.
-        
         // Update
         layer = optim.step(lr, layer, grads_params);
         
         if i % 10 == 0 {
-            println!("Step {:3}: Loss: {:8.6} | ✅ STABLE (Update applied)", i, loss_val);
+            println!("Step {:3}: Loss: {:8.6} | OK (Update applied)", i, loss_val);
         }
     }
     

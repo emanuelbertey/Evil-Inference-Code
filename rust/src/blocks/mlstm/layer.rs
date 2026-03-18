@@ -118,7 +118,7 @@ impl MLSTMLayerConfig {
             .init(device);
         let dropout = nn::DropoutConfig::new(self.dropout).init();
 
-        MLSTMLayer {
+        let mut mlstm_layer = MLSTMLayer {
             proj_up,
             q_proj,
             k_proj,
@@ -130,7 +130,54 @@ impl MLSTMLayerConfig {
             dropout,
             inner_dim,
             embedding_dim: self.embedding_dim,
+        };
+
+        // Correct initialization matching Python's mLSTMLayer.reset_parameters()
+        mlstm_layer.reset_parameters(self.embedding_dim, 1, device); // Assuming 1 block for layer test
+
+        mlstm_layer
+    }
+}
+
+impl<B: Backend> MLSTMLayer<B> {
+    pub fn reset_parameters(&mut self, embedding_dim: usize, num_blocks: usize, device: &B::Device) {
+        use crate::components::init::{small_init_std, wang_init_std};
+        
+        // 1. Proj Up: small_init_init_
+        let proj_up_std = small_init_std(embedding_dim);
+        self.proj_up.weight = burn::module::Param::from_tensor(
+            Tensor::random(self.proj_up.weight.dims(), burn::tensor::Distribution::Normal(0.0, proj_up_std), device)
+        );
+        if let Some(bias) = &self.proj_up.bias {
+            self.proj_up.bias = Some(burn::module::Param::from_tensor(Tensor::zeros(bias.dims(), device)));
         }
+
+        // 2. QKV Projs: small_init_init_
+        let qkv_std = small_init_std(embedding_dim);
+        self.q_proj.weight = burn::module::Param::from_tensor(
+            Tensor::random(self.q_proj.weight.dims(), burn::tensor::Distribution::Normal(0.0, qkv_std), device)
+        );
+        self.k_proj.weight = burn::module::Param::from_tensor(
+            Tensor::random(self.k_proj.weight.dims(), burn::tensor::Distribution::Normal(0.0, qkv_std), device)
+        );
+        self.v_proj.weight = burn::module::Param::from_tensor(
+            Tensor::random(self.v_proj.weight.dims(), burn::tensor::Distribution::Normal(0.0, qkv_std), device)
+        );
+
+        // 3. Proj Down: wang_init_
+        let proj_down_std = wang_init_std(embedding_dim, num_blocks);
+        self.proj_down.weight = burn::module::Param::from_tensor(
+            Tensor::random(self.proj_down.weight.dims(), burn::tensor::Distribution::Normal(0.0, proj_down_std), device)
+        );
+        if let Some(bias) = &self.proj_down.bias {
+            self.proj_down.bias = Some(burn::module::Param::from_tensor(Tensor::zeros(bias.dims(), device)));
+        }
+
+        // 4. Skip connection: init to 1.0
+        self.learnable_skip = burn::module::Param::from_tensor(Tensor::ones([self.inner_dim], device));
+
+        // 5. MLSTM Cell: Propagate reset_parameters (essential for gates!)
+        self.mlstm_cell.reset_parameters(device);
     }
 }
 
