@@ -22,7 +22,7 @@ fn main() {
         .with_conv1d_kernel_size(4)
         .with_qkv_proj_blocksize(4)
         .with_proj_factor(2.0)
-        .with_bias(true);
+        .with_bias(true); 
         
     let mut layer: MLSTMLayer<MyBackend> = config.init(&device);
     
@@ -56,7 +56,7 @@ fn main() {
         layer = optim.step(lr, layer, grads_params);
         
         if i % 10 == 0 {
-            println!("Step {:3}: Loss: {:8.6} | OK (Update applied)", i, loss_val);
+            println!("Step {:3}: Loss: {:8.6} | ✅ STABLE (Update applied)", i, loss_val);
         }
     }
     

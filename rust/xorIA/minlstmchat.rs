@@ -429,7 +429,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             
             let grads = loss.backward();
             let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
-            model = optim.step(1e-3, model, grads_p); 
+            model = optim.step(3e-3, model, grads_p); 
             
             if b % 10 == 0 {
                 let elapsed = start_epoch.elapsed().as_secs_f32();

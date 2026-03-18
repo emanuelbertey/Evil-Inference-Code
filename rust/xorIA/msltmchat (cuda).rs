@@ -273,7 +273,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let model_path = "xlstm_chat_model_cuda"; 
 
     // Load or create tokenizer
-    let target_vocab_size = 8192;
+    let target_vocab_size = 2048;
     let tokenizer = if Path::new(tokenizer_path).exists() {
         println!("Cargando tokenizador existente...");
         Tokenizer::load(tokenizer_path)?
@@ -292,15 +292,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokens = tokenizer.encode(&text);
     println!("Tokens totales: {}\n", tokens.len());
 
-    let mut embedding_dim = 512;
-    let mut num_blocks = 5;
+    let mut embedding_dim = 256;
+    let mut num_blocks = 3;
     let mut num_heads = 4;
     let mut lr = 1e-3;
     let mut num_epochs = 40;
     let mut batch_size = 16;
     let mut temperature = 0.5;
     let mut r_penalty = 1.9;
-    let seq_length = 512;
+    let seq_length = 256;
 
     let device = CudaDevice::default();
     let model_file = format!("{}.mpk", model_path);
