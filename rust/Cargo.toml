@@ -156,3 +156,7 @@ path = "xorIA/bin/test_minlstm_lib.rs"
 [[bin]]
 name = "minlstmchat"
 path = "xorIA/minlstmchat.rs"
+
+[[bin]]
+name = "burn_comparison_mingru"
+path = "xorIA/bin/burn_device_comparison_mingru.rs"

@@ -59,9 +59,10 @@ impl MinGruConfig {
 fn log_cumsum_exp<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     // CENTRADO ÓPTIMO EN F32 (Sin bucles / Sin Apensors):
     // El rango dinámico de exp(f32) es [-87.3, 88.7].
-    // Centramos toda la secuencia dividiendo el rango a la mitad para evitar t=0 -> log(0) -> NaN
+    // Centramos la secuencia (max+min)/2 para evitar underflow severo que resulte en `1/eps`
+    // explosivo o log(0)=NaN durante el backward pass en secuencias largas.
     let max = x.clone().detach().max_dim(1);
-    let min = x.clone().detach().neg().max_dim(1).neg(); // Equivale a min_dim(1)
+    let min = x.clone().detach().neg().max_dim(1).neg();
     let m = (max + min) / 2.0;
     
     (x - m.clone()).exp().cumsum(1).log() + m
@@ -112,7 +113,10 @@ impl<B: Backend> MinGru<B> {
         let log_z = activation::softplus(k.clone().neg(), 1.0).neg();
         let log_coeffs = activation::softplus(k, 1.0).neg();
         
-        let log_h_0 = log_g(h_0);
+        // Para minGRU no se aplica `g()` al estado h_0. 
+        // Si h_0 es 0, su logaritmo debe tender a negativo infinito para que exp(log_h0) = 0.
+        // minLSTM lo usa porque minLSTM saca g() en su formulación, pero minGRU no.
+        let log_h_0 = h_0.clone().clamp_min(1e-15).log();
         let log_tilde_h = log_g(self.linear_h.forward(x));
         
         let log_values = Tensor::cat(vec![log_h_0, log_z + log_tilde_h], 1);
