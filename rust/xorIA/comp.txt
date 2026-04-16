@@ -93,3 +93,12 @@ cargo run --release --bin minlstmchat -- input.txt
 python c:\Users\Emabe\Documents\GitHub\xlstm\tests\compare_primitives.py
 
 cargo run --release --bin burn_comparison_mingru
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_model.py
+cargo run --release --bin test_large_binary
+
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_model.py train
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_model.py chat
+
