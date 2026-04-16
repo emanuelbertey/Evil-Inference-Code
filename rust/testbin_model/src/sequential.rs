@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use_bias: false, norm_eps: 1e-6, norm_reduction_force_float32: true,
         add_out_norm: true, qk_dim_factor: 0.5, v_dim_factor: 1.0,
         mlstm_backend: xlstm::blocks::xlstm_large::config::MLSTMBackendConfig::new(),
-        ffn_proj_factor: 2.6667, ffn_round_up_to_multiple_of: 64,
+        ffn_proj_factor: 2.6666666666666665, ffn_round_up_to_multiple_of: 64,
         gate_soft_cap: Some(15.0), output_logit_soft_cap: Some(30.0),
         weight_mode: "single".to_string(),
     };
@@ -173,7 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n==========================================");
     println!("Diferencia Máxima Acumulada Final: {:.10}", max_diff_global);
-    if max_diff_global < 1e-2 {
+    if max_diff_global < 0.01 {
         println!("✅ SECUENCIAL PASSED (La memoria es estable)");
     } else {
         println!("❌ SECUENCIAL FAILED (El error está divergiendo)");

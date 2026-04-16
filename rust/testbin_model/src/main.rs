@@ -86,13 +86,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         num_heads: 2,
         num_blocks: 2,
         vocab_size,
-        use_bias: false,
+        use_bias: true,
         norm_eps: 1e-6,
         norm_reduction_force_float32: true,
         add_out_norm: true,
         qk_dim_factor: 0.5,
         v_dim_factor: 1.0,
-        mlstm_backend: xlstm::blocks::xlstm_large::config::MLSTMBackendConfig::new(),
+        mlstm_backend: xlstm::blocks::xlstm_large::config::MLSTMBackendConfig::new().with_chunk_size(16),
         ffn_proj_factor: 2.6667,
         ffn_round_up_to_multiple_of: 64,
         gate_soft_cap: Some(15.0),
@@ -151,8 +151,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..config.num_blocks {
         let b_rec = &mut record.blocks[i];
         
-        load_norm_weight!(b_rec.norm_mlstm, format!("backbone.blocks.{}.norm_mlstm", i));
-        load_norm_weight!(b_rec.norm_ffn, format!("backbone.blocks.{}.norm_ffn", i));
+        load_norm_weight_bias!(b_rec.norm_mlstm, format!("backbone.blocks.{}.norm_mlstm", i));
+        load_norm_weight_bias!(b_rec.norm_ffn, format!("backbone.blocks.{}.norm_ffn", i));
         
         // FFN
         if let FeedForwardWeightsRecord::Single(single) = &mut b_rec.ffn.weights {
@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Si out_norm existe 
     if let Some(rn) = &mut record.out_norm {
-        load_norm_weight!(rn, "backbone.out_norm");
+        load_norm_weight_bias!(rn, "backbone.out_norm");
     }
 
     let model = XLSTMLarge::<MyBackend>::init(&config, &device).load_record(record);

@@ -203,9 +203,10 @@ def train_and_export_mini_large():
         num_heads=2,
         num_blocks=2,
         vocab_size=vocab_size,
-        use_bias=False, 
+        use_bias=True, 
         norm_reduction_force_float32=True,
         weight_mode="single",
+        gate_soft_cap=15.0,
         chunk_size=16
     )
 
@@ -228,11 +229,17 @@ def train_and_export_mini_large():
     seq_len = 32
     batch_size = 4
 
+    mode = "ENTRENAR"
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].lower()
+        if arg == "chat": mode = "CHAT"
+        elif arg == "test": mode = "TEST"
+        # Si es 'train' o cualquier otra cosa, se queda en 'ENTRENAR'
+
     print("\n-------------------------------------------")
-    print("Modo de ejecución: " + ("CHAT" if len(sys.argv) > 1 and sys.argv[1].lower() == "chat" else "ENTRENAR"))
+    print(f"Modo de ejecución: {mode}")
     
-    # En powershell a veces el input es salteado brutalmente, usamos argumentos
-    if len(sys.argv) > 1 and sys.argv[1].lower() == "chat":
+    if mode == "CHAT":
         print("\n--- ¡MODO CHAT! (Pulsa Ctrl+C para salir) ---")
         while True:
             try:
@@ -246,8 +253,13 @@ def train_and_export_mini_large():
 
     # Si entramos en modo entrenamiento:
     num_epochs = 2
+    if mode == "TEST":
+        print(f"\n[!] MODO TEST ACTIVADO: Usando solo 50k tokens y 3 épocas.")
+        tokens = tokens[:50000]
+        num_epochs = 3
+    
     steps_per_epoch = len(tokens) // (seq_len * batch_size)
-    print(f"\nEmpezando el entrenamiento masivo ({num_epochs} épocas, {steps_per_epoch} batch/época)...")
+    print(f"\nEmpezando el entrenamiento ({num_epochs} épocas, {steps_per_epoch} batch/época)...")
     
     model.train()
     for epoch in range(num_epochs):

@@ -85,9 +85,23 @@ def export_sequential():
     vocab_size = tokenizer.get_vocab_size()
     
     config = xLSTMLargeConfig(
-        embedding_dim=128, num_heads=2, num_blocks=2, vocab_size=vocab_size,
-        use_bias=False, weight_mode="single", chunk_size=16,
-        return_last_states=True # <--- CRITICO para que devuelva el state
+        embedding_dim=128,
+        num_heads=2,
+        num_blocks=2,
+        vocab_size=vocab_size,
+        use_bias=False,
+        norm_eps=1e-6,
+        norm_reduction_force_float32=True,
+        add_out_norm=True,
+        qk_dim_factor=0.5,
+        v_dim_factor=1.0,
+        ffn_proj_factor=2.6667,
+        ffn_round_up_to_multiple_of=64,
+        gate_soft_cap=None,
+        output_logit_soft_cap=30.0,
+        weight_mode="single",
+        chunk_size=16,
+        return_last_states=True
     )
 
     model = xLSTMLarge(config).to(device)
