@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from dataclasses import dataclass
 import random
+import time
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
@@ -80,26 +81,29 @@ def generate_text(model, tokenizer, prompt, max_new_tokens, device):
     encoded = tokenizer.encode(prompt)
     input_ids = torch.tensor([encoded.ids], dtype=torch.long, device=device)
     
+    start_time = time.perf_counter()
     with torch.no_grad():
         for _ in range(max_new_tokens):
             logits = model(input_ids)
             if isinstance(logits, tuple): logits = logits[0]
             
-            # Cogemos el último token generado
             last_logits = logits[:, -1, :] 
             
-            # En lugar de agarrar el más probable estáticamente (lo que causa repetición infinita "MENENIUS: MENENIUS:"), 
-            # hacemos un pequeño "sampling" con temperatura.
             temperature = 0.8
             probs = torch.softmax(last_logits / temperature, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             
             input_ids = torch.cat([input_ids, next_token], dim=1)
             
-    # Volvemos a modo entrenamiento!
+    end_time = time.perf_counter()
     model.train()
+    
     out_ids = input_ids[0].tolist()
-    return tokenizer.decode(out_ids, True)
+    output_str = tokenizer.decode(out_ids, True)
+    
+    delta = end_time - start_time
+    tps = max_new_tokens / delta if delta > 0 else 0.0
+    return f"{output_str}\n\n[--- Rendimiento Python ---]\n[Velocidad: {tps:.2f} tokens/segundo | Tiempo: {delta:.2f}s]"
 
 def export_bin(model, device, bin_path, tokens, seq_len):
     print(f"\n[Guardando Binario Exportable para Rust en {bin_path} ...]")

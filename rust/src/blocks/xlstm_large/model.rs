@@ -188,22 +188,58 @@ impl<B: Backend> XLSTMLarge<B> {
         (logits, next_state)
     }
 
+    fn sample_token(
+        logits: Tensor<B, 3>,
+        temperature: f64,
+        device: &B::Device,
+    ) -> Tensor<B, 2, Int> {
+        let [batch_size, seq_len, vocab_size] = logits.dims();
+        let last_log = logits.slice([0..batch_size, (seq_len-1)..seq_len, 0..vocab_size]).reshape([batch_size, vocab_size]);
+        
+        let probs = burn::tensor::activation::softmax(last_log.div_scalar(temperature), 1);
+        let probs_vec = probs.into_data().as_slice::<f32>().unwrap().to_vec();
+        
+        let mut next_tokens = Vec::with_capacity(batch_size);
+        let mut rng = rand::rng();
+        
+        for b in 0..batch_size {
+            let start = b * vocab_size;
+            let end = start + vocab_size;
+            let p = &probs_vec[start..end];
+            
+            use rand::Rng;
+            let mut rand_val: f32 = rng.random();
+            let mut selected = vocab_size - 1; 
+            for (i, &prob) in p.iter().enumerate() {
+                rand_val -= prob;
+                if rand_val <= 0.0 {
+                    selected = i;
+                    break;
+                }
+            }
+            next_tokens.push(selected as i64);
+        }
+        
+        Tensor::<B, 1, Int>::from_data(
+            burn::tensor::TensorData::new(next_tokens, [batch_size]), device
+        ).reshape([batch_size, 1])
+    }
+
     pub fn generate(
         &self,
         mut tokens: Tensor<B, 2, Int>,
         max_new_tokens: usize,
         device: &B::Device,
     ) -> Tensor<B, 2, Int> {
-        let [batch_size, seq_len] = tokens.dims();
+        let [batch_size, _seq_len] = tokens.dims();
         let mut state = self.empty_state(batch_size, device);
 
         // Prefill
         let (logits, next_state) = self.forward(tokens.clone(), Some(state));
         state = next_state.unwrap();
         
-        let mut last_token = logits.slice([0..batch_size, (seq_len-1)..seq_len])
-            .argmax(2)
-            .reshape([batch_size, 1]);
+        let temperature = 0.8;
+        let mut last_token = Self::sample_token(logits, temperature, device);
         
         tokens = Tensor::cat(vec![tokens, last_token.clone()], 1);
 
@@ -211,7 +247,7 @@ impl<B: Backend> XLSTMLarge<B> {
             let (logits, next_state) = self.forward(last_token, Some(state));
             state = next_state.unwrap();
             
-            last_token = logits.argmax(2).reshape([batch_size, 1]);
+            last_token = Self::sample_token(logits, temperature, device);
             tokens = Tensor::cat(vec![tokens, last_token.clone()], 1);
         }
 

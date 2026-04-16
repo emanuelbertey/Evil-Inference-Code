@@ -164,3 +164,7 @@ path = "xorIA/bin/burn_device_comparison_mingru.rs"
 [[bin]]
 name = "test_large_binary"
 path = "testbin_model/src/main.rs"
+
+[[bin]]
+name = "sequential_test"
+path = "testbin_model/src/sequential.rs"

@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use burn::prelude::*;
 use burn_ndarray::NdArray;
-use burn_autodiff::Autodiff;
 use burn::module::{Module, Param};
 
 use xlstm::blocks::xlstm_large::{XLSTMLarge, XLSTMLargeConfig};
@@ -12,7 +11,7 @@ use xlstm::blocks::xlstm_large::model::FeedForwardWeightsRecord;
 use xlstm::blocks::xlstm_large::layer::WeightModeRecord;
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
 
-type MyBackend = Autodiff<NdArray<f32>>;
+type MyBackend = NdArray<f32>;
 
 fn read_u32(file: &mut File) -> std::io::Result<u32> {
     let mut buf = [0u8; 4];
@@ -215,13 +214,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         burn::tensor::TensorData::new(tokens_ids.clone(), [tokens_ids.len()]), &device
     ).reshape([1, tokens_ids.len()]);
 
-    let generated_tensor = model.generate(input_tensor, 1000, &device);
+    println!("Generando 300 tokens...");
+    let start_time = std::time::Instant::now();
+    let generated_tensor = model.generate(input_tensor, 300 , &device);
+    let duration = start_time.elapsed();
+    let tps = 300.0 / duration.as_secs_f64();
 
     let gen_ids: Vec<u32> = generated_tensor.into_data().as_slice::<i64>().unwrap().iter().map(|&v| v as u32).collect();
     let output_text = tokenizer.decode(&gen_ids, true).unwrap();
     
     println!("Input: '{}'", input_text);
-    println!("Generado (10 tokens): '{}'", output_text);
+    println!("Generado: '{}'", output_text);
+    println!("--- Rendimiento Rust ---");
+    println!("Velocidad: {:.2} tokens/segundo | Tiempo total: {:.2?}", tps, duration);
 
     Ok(())
 }

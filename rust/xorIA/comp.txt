@@ -102,3 +102,8 @@ $env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe
 
 $env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_model.py chat
 
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\verify_bin.py
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_sequential.py
+
+cargo run --release --bin sequential_test
