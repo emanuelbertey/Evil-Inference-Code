@@ -113,3 +113,7 @@ cargo run --release --bin sequential_test
 $env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_model.py test
 
 cargo run --release --bin xlstm_flex_test
+
+cargo run --release --bin test_large_binary_flex
+
+cargo run --release --bin bitlinear_comparison

@@ -184,3 +184,7 @@ path = "testbin_model/src/main_flex.rs"
 [[bin]]
 name = "sequential_test"
 path = "testbin_model/src/sequential.rs"
+
+[[bin]]
+name = "bitlinear_comparison"
+path = "xorIA/bin/bitlinear_comparison.rs"

@@ -10,8 +10,10 @@ use xlstm::blocks::xlstm_large::{XLSTMLarge, XLSTMLargeConfig};
 use xlstm::blocks::xlstm_large::model::FeedForwardWeightsRecord;
 use xlstm::blocks::xlstm_large::layer::WeightModeRecord;
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
-
 type MyBackend = Flex<f32>;
+//type MyBackend = Flex<f16>;
+use burn::tensor::f16;
+//type MyBackend = Flex;
 
 fn read_u32(file: &mut File) -> std::io::Result<u32> {
     let mut buf = [0u8; 4];
@@ -70,7 +72,7 @@ fn load_test_data(filepath: &str) -> std::io::Result<(Vec<usize>, Vec<i32>, Vec<
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== xLSTMLarge FLEX EQUIVALENCE TEST (Burn v0.21.0-pre.4) ===");
+    println!("=== xLSTMLarge FLEX 16-BIT EQUIVALENCE TEST (Burn v0.21.0-pre.4) ===");
     let filepath = "../xlstm/testbin_model/test_data.bin";
     let device = Default::default();
 
@@ -181,7 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let model = XLSTMLarge::<MyBackend>::init(&config, &device).load_record(record);
-    println!("¡Modelo inyectado con los pesos exactos de Python a Rust (FLEX)!");
+    println!("¡Modelo inyectado con los pesos exactos de Python a Rust (FLEX 16-BIT)!");
 
     // PARTE 1: VERIFICAR EQUIVALENCIA LOGITS
     let b = x_shape[0];
@@ -196,6 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (logits, _) = model.forward(x_tensor.clone(), None);
 
     let diff = (logits.clone() - expected_y.clone()).abs().max().into_scalar();
+
     println!("Max Diff entre Logits (Python vs Rust - FLEX): {:.10}", diff);
     
     if diff < 1e-4 {
@@ -205,7 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // PARTE 2: GENERACIÓN DE TEXTO
-    println!("\nGenerando texto en Rust usando 'xLSTMLarge::generate' (FLEX)...");
+    println!("\nGenerando texto en Rust usando 'xLSTMLarge::generate' (FLEX 16-BIT)...");
     let input_text = "The";
     let encoding = tokenizer.encode(input_text, false).unwrap();
     let tokens_ids: Vec<i32> = encoding.get_ids().iter().map(|&id| id as i32).collect();
@@ -225,7 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("Input: '{}'", input_text);
     println!("Generado: '{}'", output_text);
-    println!("--- Rendimiento Rust (FLEX) ---");
+    println!("--- Rendimiento Rust (FLEX 16-BIT) ---");
     println!("Velocidad: {:.2} tokens/segundo | Tiempo total: {:.2?}", tps, duration);
 
     Ok(())
