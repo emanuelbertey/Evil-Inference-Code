@@ -12,14 +12,14 @@ path = "src/lib.rs"
 #burn = { version = "0.20.1", features = ["ndarray", "wgpu", "autodiff", "train"] }
 #burn-autodiff = "0.20.1"
 #burn-ndarray = "0.20.1"
-burn-wgpu = "0.20.1"
-burn-cuda = "0.20.1"
+#burn-wgpu = "0.20.1"
+#burn-cuda = "0.20.1"
 
 burn = { version = "0.21.0-pre.4", features = ["autodiff", "train"] }
 burn-autodiff = "0.21.0-pre.4"
 burn-flex = "0.21.0-pre.4"
-#burn-wgpu = "0.21.0-pre.4"
-#burn-cuda = "0.21.0-pre.4"
+burn-wgpu = "0.21.0-pre.4"
+burn-cuda = "0.21.0-pre.4"
 tokenizers = "0.20"
 rand = "0.9"
 num-traits = "0.2"

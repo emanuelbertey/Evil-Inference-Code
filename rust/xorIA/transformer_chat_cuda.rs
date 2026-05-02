@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 // ─── Transformer Chat CUDA: BPE-Level Language Model ─────────────────────────
 //
 // Uses the custom Transformer module with GQA + RoPE + SwiGLU for
