@@ -43,7 +43,7 @@ pub mod layer;
 // Re-export main types for convenient access
 pub use rope::{RoPE, RoPEConfig};
 pub use heads::{HeadConfig, QKVProjection, OutputProjection, repeat_kv};
-pub use attention::{Attention, AttentionConfig};
+pub use attention::{Attention, AttentionConfig, KVCache};
 pub use feedforward::{FeedForwardBlock, FeedForwardConfig, FeedForward, SwiGLUFeedForward};
 pub use layer::{
     TransformerLayer, TransformerLayerConfig,

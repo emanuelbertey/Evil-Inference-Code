@@ -140,8 +140,20 @@ impl AttentionConfig {
     }
 }
 
+/// KV cache for a single attention layer.
+///
+/// Stores the accumulated Key and Value tensors from previous positions,
+/// enabling O(1) computation per new token during autoregressive generation.
+///
+/// Shape of cached_k and cached_v: (batch, accumulated_seq_len, num_kv_groups, head_dim)
+#[derive(Clone, Debug)]
+pub struct KVCache<B: Backend> {
+    pub cached_k: Tensor<B, 4>,
+    pub cached_v: Tensor<B, 4>,
+}
+
 impl<B: Backend> Attention<B> {
-    /// Full attention forward pass.
+    /// Full attention forward pass (original, no cache).
     ///
     /// Input:  x of shape (batch, seq_len, d_model)
     /// Output: (batch, seq_len, d_model)
@@ -199,6 +211,87 @@ impl<B: Backend> Attention<B> {
         self.o_proj.forward(attn_output)
     }
 
+    /// Attention forward pass **with KV cache** for efficient autoregressive generation.
+    ///
+    /// When `cache` is `None`, this behaves like a full prefill (processes the entire sequence).
+    /// When `cache` is `Some(...)`, it appends the new K/V to the cache and only computes
+    /// attention for the new query positions against all accumulated keys/values.
+    ///
+    /// Input:  x of shape (batch, new_seq_len, d_model)
+    /// Returns: (output, updated_cache)
+    ///   output:        (batch, new_seq_len, d_model)
+    ///   updated_cache: KVCache with accumulated K, V
+    pub fn forward_with_cache(
+        &self,
+        x: Tensor<B, 3>,
+        offset: usize,
+        cache: Option<KVCache<B>>,
+    ) -> (Tensor<B, 3>, KVCache<B>) {
+        let [_batch, _new_seq_len, _d] = x.dims();
+
+        // 1. Project to Q, K, V
+        let (q, k_new, v_new) = self.qkv.forward(x);
+
+        // 2. Apply RoPE to Q and K (with offset for position tracking)
+        let (q, k_new) = self.rope.forward(q, k_new, offset);
+
+        // 3. Concatenate with cached K, V if available
+        let (k_full, v_full) = if let Some(prev) = cache {
+            // Concatenate along the sequence dimension (dim 1)
+            // prev.cached_k: (B, prev_len, num_kv_groups, head_dim)
+            // k_new:         (B, new_len,  num_kv_groups, head_dim)
+            let k_cat = Tensor::cat(vec![prev.cached_k, k_new.clone()], 1);
+            let v_cat = Tensor::cat(vec![prev.cached_v, v_new.clone()], 1);
+            (k_cat, v_cat)
+        } else {
+            (k_new.clone(), v_new.clone())
+        };
+
+        // 4. Store the updated cache (before GQA expansion, to save memory)
+        let new_cache = KVCache {
+            cached_k: k_full.clone(),
+            cached_v: v_full.clone(),
+        };
+
+        // 5. Expand KV groups for GQA
+        let k_expanded = repeat_kv(k_full, self.num_heads, self.num_kv_groups);
+        let v_expanded = repeat_kv(v_full, self.num_heads, self.num_kv_groups);
+
+        // 6. Transpose: (B, S, H, D) → (B, H, S, D)
+        let q = q.swap_dims(1, 2);
+        let k = k_expanded.swap_dims(1, 2);
+        let v = v_expanded.swap_dims(1, 2);
+
+        // 7. Scaled dot-product attention
+        let scale = (self.head_dim as f64).sqrt();
+        let mut scores = q.matmul(k.transpose()) / scale;
+        // scores: (B, H, new_seq_len, total_seq_len)
+
+        // 8. Optional logit soft-capping
+        if let Some(cap) = self.attn_logit_cap {
+            scores = scores.div_scalar(cap).tanh().mul_scalar(cap);
+        }
+
+        // 9. Causal mask (only needed during prefill when new_seq_len > 1)
+        let [_, _, q_len, kv_len] = scores.dims();
+        if self.causal && q_len > 1 {
+            scores = self.apply_causal_mask_with_offset(scores, q_len, kv_len);
+        }
+
+        // 10. Softmax + Dropout
+        let attn_weights = burn::tensor::activation::softmax(scores, 3);
+        let attn_weights = self.dropout.forward(attn_weights);
+
+        // 11. Weighted sum
+        let attn_output = attn_weights.matmul(v);
+
+        // 12. Transpose back and project
+        let attn_output = attn_output.swap_dims(1, 2);
+        let output = self.o_proj.forward(attn_output);
+
+        (output, new_cache)
+    }
+
     /// Apply lower-triangular causal mask to attention scores.
     ///
     /// Sets future positions to -infinity so softmax assigns them zero weight.
@@ -223,6 +316,42 @@ impl<B: Backend> Attention<B> {
         let neg_inf = mask.clone() * (-1e9);
         let keep = (mask * (-1.0)) + 1.0; // Invert: 0→1, 1→0
 
+        scores * keep + neg_inf
+    }
+
+    /// Causal mask for cached attention where query length ≠ key/value length.
+    ///
+    /// During cached generation:
+    ///   - q_len = new tokens being processed (often 1 during generation, or full seq during prefill)
+    ///   - kv_len = total accumulated sequence length (cached + new)
+    ///
+    /// Each query position i can attend to key positions 0..=(kv_len - q_len + i).
+    fn apply_causal_mask_with_offset(
+        &self,
+        scores: Tensor<B, 4>,
+        q_len: usize,
+        kv_len: usize,
+    ) -> Tensor<B, 4> {
+        let device = scores.device();
+        let offset = kv_len - q_len;
+
+        let mut mask_data = vec![0.0f32; q_len * kv_len];
+        for i in 0..q_len {
+            let max_attend = offset + i; // last position this query can attend to
+            for j in (max_attend + 1)..kv_len {
+                mask_data[i * kv_len + j] = 1.0;
+            }
+        }
+
+        let mask = Tensor::<B, 2>::from_data(
+            burn::tensor::TensorData::new(mask_data, [q_len, kv_len]),
+            &device,
+        )
+        .unsqueeze_dim::<3>(0)
+        .unsqueeze_dim::<4>(0);
+
+        let neg_inf = mask.clone() * (-1e9);
+        let keep = (mask * (-1.0)) + 1.0;
         scores * keep + neg_inf
     }
 }

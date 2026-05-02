@@ -18,7 +18,7 @@ use burn::config::Config;
 use burn::module::{Module, Param};
 use burn::nn::Dropout;
 
-use super::attention::{Attention, AttentionConfig};
+use super::attention::{Attention, AttentionConfig, KVCache};
 use super::feedforward::{FeedForwardBlock, FeedForwardConfig};
 
 // ─── RMSNorm (local copy for the transformer module) ────────────────────────
@@ -174,6 +174,31 @@ impl<B: Backend> TransformerLayer<B> {
         let h = self.residual_dropout.forward(h);
         residual + h
     }
+
+    /// Forward pass with KV cache for efficient autoregressive generation.
+    ///
+    /// Input:  (batch, new_seq_len, d_model)
+    /// Returns: (output, updated_kv_cache)
+    pub fn forward_with_cache(
+        &self,
+        x: Tensor<B, 3>,
+        offset: usize,
+        cache: Option<KVCache<B>>,
+    ) -> (Tensor<B, 3>, KVCache<B>) {
+        // 1. Pre-Norm → Attention with cache → Residual
+        let residual = x.clone();
+        let h = self.attn_norm.forward(x);
+        let (h, new_cache) = self.attention.forward_with_cache(h, offset, cache);
+        let h = self.residual_dropout.forward(h);
+        let x = residual + h;
+
+        // 2. Pre-Norm → FFN → Residual
+        let residual = x.clone();
+        let h = self.ffn_norm.forward(x);
+        let h = self.ffn.forward(h);
+        let h = self.residual_dropout.forward(h);
+        (residual + h, new_cache)
+    }
 }
 
 // ─── Transformer Stack Config ───────────────────────────────────────────────
@@ -223,5 +248,28 @@ impl<B: Backend> Transformer<B> {
             x = layer.forward(x, offset);
         }
         self.final_norm.forward(x)
+    }
+
+    /// Forward through all layers with per-layer KV caches.
+    ///
+    /// `caches`: One `Option<KVCache>` per layer. Pass `None` for each layer on first call (prefill).
+    /// Returns: (output, updated_caches)
+    ///   - output: (batch, new_seq_len, d_model)
+    ///   - updated_caches: Vec of KVCache, one per layer (pass back on next call)
+    pub fn forward_with_cache(
+        &self,
+        mut x: Tensor<B, 3>,
+        offset: usize,
+        caches: Vec<Option<KVCache<B>>>,
+    ) -> (Tensor<B, 3>, Vec<KVCache<B>>) {
+        let mut new_caches = Vec::with_capacity(self.num_layers);
+
+        for (layer, cache) in self.layers.iter().zip(caches.into_iter()) {
+            let (out, new_cache) = layer.forward_with_cache(x, offset, cache);
+            x = out;
+            new_caches.push(new_cache);
+        }
+
+        (self.final_norm.forward(x), new_caches)
     }
 }

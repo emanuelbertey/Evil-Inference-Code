@@ -8,7 +8,11 @@
 // Architecture:
 //   Embedding → Transformer(N layers × GQA+RoPE+SwiGLU) → Linear → logits
 //
-// Backend: CUDA (GPU acceleration via burn-cuda)
+// Features:
+//   - KV Cache for fast autoregressive generation
+//   - Top-K / Top-P sampling
+//   - Repetition Penalty
+//   - CUDA backend (GPU acceleration via burn-cuda)
 //
 // Usage:
 //   cargo run --bin transformer_chat_cuda --release -- xorIA/input.txt
@@ -42,6 +46,7 @@ use tokenizers::models::TrainerWrapper;
 use xlstm::blocks::trasformer::layer::{
     Transformer, TransformerConfig, TransformerLayerConfig,
 };
+use xlstm::blocks::trasformer::attention::KVCache;
 
 // Use CUDA backend with Autodiff
 type MyBackend = Autodiff<Cuda<f32, i32>>;
@@ -110,6 +115,10 @@ impl Tokenizer {
     pub fn vocab_size(&self) -> usize {
         self.tokenizer.get_vocab_size(true)
     }
+
+    pub fn id_to_token(&self, id: usize) -> Option<String> {
+        self.tokenizer.id_to_token(id as u32)
+    }
 }
 
 // ─── Language Model ─────────────────────────────────────────────────────────
@@ -121,17 +130,33 @@ pub struct TransformerLM<B: Backend> {
     pub head: Linear<B>,
     pub vocab_size: usize,
     pub d_model: usize,
+    pub num_layers: usize,
 }
 
 impl<B: Backend> TransformerLM<B> {
+    /// Standard forward (for training, no cache)
     pub fn forward(&self, input: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let x = self.embedding.forward(input);
         let x = self.transformer.forward(x, 0);
         self.head.forward(x)
     }
+
+    /// Forward with KV cache (for efficient autoregressive generation)
+    ///
+    /// Returns: (logits, updated_caches)
+    pub fn forward_with_cache(
+        &self,
+        input: Tensor<B, 2, Int>,
+        offset: usize,
+        caches: Vec<Option<KVCache<B>>>,
+    ) -> (Tensor<B, 3>, Vec<KVCache<B>>) {
+        let x = self.embedding.forward(input);
+        let (x, new_caches) = self.transformer.forward_with_cache(x, offset, caches);
+        (self.head.forward(x), new_caches)
+    }
 }
 
-// ─── Batch Creation ─────────────────────────────────────────────────────────
+// ─── Batch Creation (for training) ──────────────────────────────────────────
 
 fn create_batch<B: Backend>(
     tokens: &[usize],
@@ -157,70 +182,155 @@ fn create_batch<B: Backend>(
     (x, y)
 }
 
-// ─── Sampling ───────────────────────────────────────────────────────────────
+// ─── Advanced Sampling ──────────────────────────────────────────────────────
 
-fn sample_from_logits<B: Backend>(logits: Tensor<B, 2>, temperature: f32) -> usize {
-    let probs = softmax(logits / temperature, 1);
-    let probs_vec: Vec<f32> = probs.into_data().as_slice::<f32>().unwrap().to_vec();
+fn sample_from_logits<B: Backend>(
+    logits: Tensor<B, 2>,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    repetition_penalty: f32,
+    previous_tokens: &[usize],
+) -> usize {
+    let probs = softmax(logits, 1);
+    let mut probs_vec: Vec<(usize, f32)> = probs.into_data()
+        .as_slice::<f32>()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| (i, x))
+        .collect();
 
-    let mut rng = rand::rng();
-    use rand::Rng;
-    let sample: f32 = rng.random::<f32>();
-    let mut cumulative = 0.0;
-    for (i, &p) in probs_vec.iter().enumerate() {
-        cumulative += p;
-        if sample <= cumulative { return i; }
+    // Apply repetition penalty
+    if repetition_penalty != 1.0 {
+        for (id, prob) in probs_vec.iter_mut() {
+            if previous_tokens.contains(id) {
+                *prob /= repetition_penalty;
+            }
+        }
     }
-    0
+
+    // Sort by probability (descending)
+    probs_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Top-K + Top-P filtering
+    let k = top_k.min(probs_vec.len()).max(1);
+    let mut filtered_probs = Vec::with_capacity(k);
+    let mut cumulative_prob = 0.0;
+    for (i, p) in probs_vec.into_iter() {
+        filtered_probs.push((i, p));
+        cumulative_prob += p;
+        if filtered_probs.len() >= k || cumulative_prob >= top_p {
+            break;
+        }
+    }
+
+    let indices: Vec<usize> = filtered_probs.iter().map(|(i, _)| *i).collect();
+    let mut weights: Vec<f32> = filtered_probs.iter().map(|(_, p)| *p).collect();
+
+    // Greedy if temperature is ~0
+    if temperature <= 1e-6 {
+        return indices[0];
+    }
+
+    // Apply temperature to log-probs
+    for p in weights.iter_mut() {
+        *p = (p.max(1e-10).ln() / temperature).exp();
+    }
+
+    // Weighted random sampling
+    let sum: f32 = weights.iter().sum();
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let sample: f32 = rng.random::<f32>() * sum;
+    let mut cumulative = 0.0;
+    for (i, &p) in weights.iter().enumerate() {
+        cumulative += p;
+        if sample <= cumulative {
+            return indices[i];
+        }
+    }
+    indices[0]
 }
 
-// ─── Text Generation ────────────────────────────────────────────────────────
+// ─── Text Generation with KV Cache ─────────────────────────────────────────
 
-fn generate_text<B: Backend>(
+fn generate_text_cached<B: Backend>(
     model: &TransformerLM<B>,
     tokenizer: &Tokenizer,
     seed_text: &str,
     length: usize,
     device: &B::Device,
-) -> String {
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    repetition_penalty: f32,
+    mut caches: Vec<Option<KVCache<B>>>,
+    mut current_offset: usize,
+) -> (String, usize, f32, Vec<KVCache<B>>, usize) {
     let ids = tokenizer.encode(seed_text);
-    if ids.is_empty() { return seed_text.to_string(); }
+    if ids.is_empty() { return (seed_text.to_string(), 0, 0.0, Vec::new(), current_offset); }
 
-    let mut context: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
-    let max_ctx = 512; 
-
-    let mut generated = Vec::new();
-
-    println!("--- Generando {} tokens ---", length);
     let start_gen = Instant::now();
 
+    // ── PHASE 1: Prefill ─ Process new seed sequence ──
+    let seed_len = ids.len();
+    let input = Tensor::<B, 2, Int>::from_data(
+        TensorData::new(ids.iter().map(|&id| id as i64).collect(), [1, seed_len]),
+        device,
+    );
+
+    let (logits, updated_caches) = model.forward_with_cache(input, current_offset, caches);
+    let mut caches = updated_caches;
+
+    let [_, s_len, v_dim] = logits.dims();
+    let last_logits = logits.slice([0..1, (s_len - 1)..s_len, 0..v_dim])
+        .reshape([1, v_dim]);
+
+    let mut history: Vec<usize> = ids.clone();
+    let mut generated = Vec::new();
+    current_offset += seed_len;
+
+    let mut next_id = sample_from_logits(
+        last_logits, temperature, top_k, top_p, repetition_penalty, &history,
+    );
+
+    // ── PHASE 2: Autoregressive generation ──
     for _ in 0..length {
-        let ctx_start = if context.len() > max_ctx { context.len() - max_ctx } else { 0 };
-        let ctx = &context[ctx_start..];
-        let ctx_len = ctx.len();
+        if let Some(token) = tokenizer.id_to_token(next_id) {
+            if token == "<|endoftext|>" { break; }
+        }
+
+        generated.push(next_id);
+        history.push(next_id);
+        if history.len() > 64 { history.remove(0); }
+
+        let token_str = tokenizer.decode(&[next_id]);
+        print!("{}", token_str);
+        io::stdout().flush().unwrap();
 
         let input = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(ctx.to_vec(), [1, ctx_len]),
+            TensorData::new(vec![next_id as i64], [1, 1]),
             device,
         );
 
-        let logits = model.forward(input);
-        let last_logits = logits.slice([0..1, (ctx_len - 1)..ctx_len, 0..tokenizer.vocab_size()])
-            .reshape([1, tokenizer.vocab_size()]);
+        let cache_input: Vec<Option<KVCache<B>>> = caches.into_iter().map(|c| Some(c)).collect();
+        let (logits, new_caches) = model.forward_with_cache(input, current_offset, cache_input);
+        caches = new_caches;
+        current_offset += 1;
 
-        let next_id = sample_from_logits(last_logits, 0.7);
-        generated.push(next_id);
-        context.push(next_id as i64);
+        let [_, _, v] = logits.dims();
+        let logits_2d = logits.reshape([1, v]);
 
-        let token = tokenizer.decode(&[next_id]);
-        print!("{}", token);
-        io::stdout().flush().unwrap();
+        next_id = sample_from_logits(
+            logits_2d, temperature, top_k, top_p, repetition_penalty, &history,
+        );
     }
 
     let elapsed = start_gen.elapsed().as_secs_f32();
-    let tps = length as f32 / elapsed;
-    println!("\n\n[Velocidad: {:.2} tokens/s | Tiempo: {:.2}s]", tps, elapsed);
-    tokenizer.decode(&generated)
+    let text = tokenizer.decode(&generated);
+    println!();
+    (text, generated.len(), elapsed, caches, current_offset)
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
@@ -229,6 +339,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("╔════════════════════════════════════════════════════════════════╗");
     println!("║     Transformer Chat CUDA — GQA + RoPE + SwiGLU             ║");
     println!("║     BPE-Level Language Model (Hugging Face) [CUDA]          ║");
+    println!("║     + KV Cache + Top-K/P + Repetition Penalty               ║");
     println!("╚════════════════════════════════════════════════════════════════╝");
 
     let args: Vec<String> = std::env::args().collect();
@@ -245,7 +356,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let text = fs::read_to_string(&text_file)?;
     
-    let target_vocab_size = 2000; // Configurable BPE vocab size
+    let target_vocab_size = 2000;
     let tokenizer = if Path::new(&tokenizer_file).exists() {
         println!("Cargando tokenizer BPE desde {}...", tokenizer_file);
         Tokenizer::load(&tokenizer_file)?
@@ -258,6 +369,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let vocab_size = tokenizer.vocab_size();
     println!("Vocab size (BPE): {}", vocab_size);
+
+    // ── Sampling configuration ──
+    let mut temperature = 0.8;
+    let mut top_k: usize = 40;
+    let mut top_p: f32 = 0.95;
+    let mut repetition_penalty: f32 = 1.1;
 
     let mut modo_inferencia = false;
     if model_exists {
@@ -295,7 +412,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  head_dim:      {}", d_model / num_heads);
     println!("  FFN:           SwiGLU");
     println!("  Positional:    RoPE");
-    println!("  Backend:       CUDA\n");
+    println!("  Backend:       CUDA");
+    println!("  KV Cache:      Enabled");
+    println!("  Sampling:      Top-K={}, Top-P={}, Temp={}, RepPen={}\n",
+        top_k, top_p, temperature, repetition_penalty);
 
     let transformer_config = TransformerConfig {
         num_layers,
@@ -326,6 +446,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         head: LinearConfig::new(d_model, vocab_size).with_bias(false).init(&device),
         vocab_size,
         d_model,
+        num_layers,
     };
 
     let num_params = model.num_params();
@@ -340,17 +461,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if modo_inferencia {
-        println!("\n╔════════════════════════════════════════════════════════╗");
-        println!("║     MODO INTERACTIVO — Transformer Chat CUDA         ║");
-        println!("╚════════════════════════════════════════════════════════╝\n");
+        println!("\n╔════════════════════════════════════════════════════════════════╗");
+        println!("║     MODO INTERACTIVO — Transformer Chat CUDA                 ║");
+        println!("║     KV Cache + Top-K/P + Repetition Penalty                  ║");
+        println!("╚════════════════════════════════════════════════════════════════╝\n");
         println!("Comandos:");
         println!("  - Escribe tu semilla para generar texto.");
-        println!("  - 'len <n>': Cambia la cantidad de tokens.");
+        println!("  - 'len <n>':    Cambia la cantidad de tokens.");
+        println!("  - 'temp <f>':   Cambia la temperatura (ej: temp 0.7).");
+        println!("  - 'topk <n>':   Cambia el Top-K (ej: topk 20).");
+        println!("  - 'topp <f>':   Cambia el Top-P (ej: topp 0.9).");
+        println!("  - 'rpen <f>':   Cambia el Repetition Penalty (ej: rpen 1.2).");
         println!("  - 'salir' o 'exit' para terminar.\n");
 
-        let mut current_len = 50; // Fewer tokens needed for BPE
+        let mut current_len = 50;
+        let mut session_caches: Vec<Option<KVCache<Cuda<f32, i32>>>> = (0..num_layers).map(|_| None).collect();
+        let mut session_offset = 0;
+
         loop {
-            print!("Semilla CUDA [len: {}] > ", current_len);
+            print!("CUDA [len:{} t:{} k:{} p:{} rp:{}] > ",
+                current_len, temperature, top_k, top_p, repetition_penalty);
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
@@ -361,22 +491,67 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
 
             if input.to_lowercase().starts_with("len ") {
-                if let Ok(new_len) = input[4..].trim().parse::<usize>() {
-                    current_len = new_len;
+                if let Ok(v) = input[4..].trim().parse::<usize>() {
+                    current_len = v;
                     println!("  -> Longitud: {} tokens.\n", current_len);
                     continue;
                 }
             }
+            if input.to_lowercase().starts_with("temp ") {
+                if let Ok(v) = input[5..].trim().parse::<f32>() {
+                    temperature = v;
+                    println!("  -> Temperatura: {}.\n", temperature);
+                    continue;
+                }
+            }
+            if input.to_lowercase().starts_with("topk ") {
+                if let Ok(v) = input[5..].trim().parse::<usize>() {
+                    top_k = v;
+                    println!("  -> Top-K: {}.\n", top_k);
+                    continue;
+                }
+            }
+            if input.to_lowercase().starts_with("topp ") {
+                if let Ok(v) = input[5..].trim().parse::<f32>() {
+                    top_p = v;
+                    println!("  -> Top-P: {}.\n", top_p);
+                    continue;
+                }
+            }
+            if input.to_lowercase().starts_with("rpen ") {
+                if let Ok(v) = input[5..].trim().parse::<f32>() {
+                    repetition_penalty = v;
+                    println!("  -> Repetition Penalty: {}.\n", repetition_penalty);
+                    continue;
+                }
+            }
+            if input.eq_ignore_ascii_case("reset") {
+                session_caches = (0..num_layers).map(|_| None).collect();
+                session_offset = 0;
+                println!("  -> Memoria de sesión reiniciada.\n");
+                continue;
+            }
 
             if input.is_empty() { continue; }
 
-            println!("\n--- TEXTO GENERADO (CUDA) ---");
-            generate_text(&model.valid(), &tokenizer, input, current_len, &device);
-            println!("----------------------\n");
+            println!("\n--- TEXTO GENERADO (CUDA + KV Cache Persistente) ---");
+            let (text, tokens_count, elapsed, updated_caches, updated_offset) = generate_text_cached(
+                &model.valid(), &tokenizer, input, current_len, &device,
+                temperature, top_k, top_p, repetition_penalty,
+                session_caches, session_offset,
+            );
+            session_caches = updated_caches.into_iter().map(Some).collect();
+            session_offset = updated_offset;
+
+            let tps = tokens_count as f32 / elapsed.max(0.001);
+            println!("---");
+            println!("Tokens: {} | Tiempo: {:.2}s | Velocidad: {:.2} tok/s | Offset Total: {}\n",
+                tokens_count, elapsed, tps, session_offset);
         }
         return Ok(());
     }
 
+    // ── Training Mode ──
     let mut optim = AdamConfig::new()
         .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
         .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
@@ -384,7 +559,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
     let batch_size = 16;
-    let seq_len = 64; // BPE handles more content per token
+    let seq_len = 64;
     let stride = 64;
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
     let num_epochs = 50;
@@ -403,6 +578,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
 
+            // Training uses standard forward (no cache needed)
             let logits = model.forward(x);
             let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
             let targets_flat = y.reshape([batch_size * seq_len]);
@@ -446,9 +622,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         if (epoch + 1) % 2 == 0 {
-            println!("--- Generación de prueba (CUDA) ---");
-            generate_text(&model.clone().valid(), &tokenizer, "The world ", 30, &device);
-            println!("\n---------------------------");
+            println!("--- Generación de prueba (CUDA + KV Cache Persistente) ---");
+            let empty_caches: Vec<Option<KVCache<Cuda<f32, i32>>>> = (0..num_layers).map(|_| None).collect();
+            let (_, tokens_count, elapsed, _, _) = generate_text_cached(
+                &model.clone().valid(), &tokenizer, "The world ", 30, &device,
+                temperature, top_k, top_p, repetition_penalty,
+                empty_caches, 0,
+            );
+            let tps = tokens_count as f32 / elapsed.max(0.001);
+            println!("[{:.1} tok/s]\n---------------------------", tps);
         }
     }
 
