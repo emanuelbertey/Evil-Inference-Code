@@ -117,3 +117,7 @@ cargo run --release --bin xlstm_flex_test
 cargo run --release --bin test_large_binary_flex
 
 cargo run --release --bin bitlinear_comparison
+
+cargo build --release --bin transformer_chat 2>&1
+
+cargo run --release --bin transformer_chat -- xorIA/input.txt

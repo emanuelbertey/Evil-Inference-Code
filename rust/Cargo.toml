@@ -188,3 +188,11 @@ path = "testbin_model/src/sequential.rs"
 [[bin]]
 name = "bitlinear_comparison"
 path = "xorIA/bin/bitlinear_comparison.rs"
+
+[[bin]]
+name = "lstm_chat_test_dual"
+path = "xorIA/bin/lstm_chat_test_dual.rs"
+
+[[bin]]
+name = "transformer_chat"
+path = "xorIA/transformer_chat.rs"
