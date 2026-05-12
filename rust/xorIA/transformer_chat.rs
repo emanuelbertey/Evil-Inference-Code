@@ -64,8 +64,8 @@ impl Tokenizer {
             .map_err(|e| format!("Error building BPE: {}", e))?;
             
         let mut tokenizer = HFTokenizer::new(model);
-        tokenizer.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, true)));
-        tokenizer.with_decoder(Some(MetaspaceDecoder::new('▁', PrependScheme::Always, true)));
+        tokenizer.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, false)));
+        tokenizer.with_decoder(Some(MetaspaceDecoder::new('▁', PrependScheme::Always, false)));
 
         let special_token = "<|endoftext|>";
         tokenizer.add_special_tokens(&[AddedToken::from(special_token, true)]);
@@ -96,7 +96,7 @@ impl Tokenizer {
 
     pub fn load(path: &str) -> Result<Self, Box<dyn Error>> {
         let mut tokenizer = HFTokenizer::from_file(path).map_err(|e| format!("{}", e))?;
-        tokenizer.with_decoder(Some(MetaspaceDecoder::new('▁', PrependScheme::Always, true)));
+        tokenizer.with_decoder(Some(MetaspaceDecoder::new('▁', PrependScheme::Always, false)));
         Ok(Self { tokenizer })
     }
 
@@ -293,8 +293,9 @@ fn generate_text_cached<B: Backend>(
         history.push(next_id);
         if history.len() > 64 { history.remove(0); }
 
-        let token_str = tokenizer.decode(&[next_id]);
-        print!("{}", token_str);
+        let token_raw = tokenizer.id_to_token(next_id).unwrap_or_default();
+        let clean_str = token_raw.replace('▁', " ").replace(' ', " ");
+        print!("{}", clean_str);
         io::stdout().flush().unwrap();
 
         let input = Tensor::<B, 2, Int>::from_data(

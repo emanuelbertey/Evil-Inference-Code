@@ -125,3 +125,7 @@ cargo run --release --bin transformer_chat -- xorIA/input.txt
 cargo build --release --bin transformer_chat_cuda 2>&1
 
 cargo run --release --bin transformer_chat_cuda -- xorIA/input.txt
+
+python main.py
+
+python load_and_infer_bonsai.py
