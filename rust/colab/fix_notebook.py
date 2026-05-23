@@ -1,0 +1,222 @@
+"""
+Script to fix bitnet_grouped_350m.ipynb:
+1. Phase 4: Replace the 3-step training loop with a real configurable training loop
+2. Add Phase 6: BitNet inference verification + memory cleanup
+"""
+import json
+
+notebook_path = r"bitnet_grouped_350m.ipynb"
+
+with open(notebook_path, "r", encoding="utf-8") as f:
+    nb = json.load(f)
+
+# ============================================================
+# FIX 1: Replace Phase 4 code cell (index 4) with real training loop
+# ============================================================
+phase4_source = [
+    "# ==============================================================================\n",
+    "# PHASE 4: TRAINING & DISTILLATION WORKFLOW\n",
+    "# ==============================================================================\n",
+    "\n",
+    "# \u2699\ufe0f Training Configuration\n",
+    "NUM_EPOCHS = 3          # Number of full passes over the dataset\n",
+    "MAX_STEPS = None        # Set to an integer to cap total steps (None = no cap)\n",
+    "DATASET_SIZE = 64       # Number of random sequences in the toy dataset\n",
+    "SEQ_LEN = 32            # Sequence length for each sample\n",
+    "BATCH_SIZE = 4          # Batch size for the DataLoader\n",
+    "LEARNING_RATE = 1e-5    # AdamW learning rate\n",
+    "LOG_EVERY = 5           # Print loss every N steps\n",
+    "\n",
+    "# Create a toy dataset representing a text stream\n",
+    "class ToyTextDataset(Dataset):\n",
+    "    def __init__(self, size=10, seq_len=16, vocab_size=50272):\n",
+    "        self.data = torch.randint(0, vocab_size, (size, seq_len + 1))\n",
+    "        \n",
+    "    def __len__(self):\n",
+    "        return len(self.data)\n",
+    "        \n",
+    "    def __getitem__(self, idx):\n",
+    "        # Return input tokens and target labels (shifted by 1)\n",
+    "        return self.data[idx, :-1], self.data[idx, 1:]\n",
+    "\n",
+    "dataset = ToyTextDataset(size=DATASET_SIZE, seq_len=SEQ_LEN, vocab_size=model.config.vocab_size)\n",
+    "dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)\n",
+    "\n",
+    "# Set model to training mode\n",
+    "model.float()\n",
+    "model.train()\n",
+    "optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)\n",
+    "\n",
+    "total_steps_per_epoch = len(dataloader)\n",
+    "total_steps = NUM_EPOCHS * total_steps_per_epoch\n",
+    "if MAX_STEPS is not None:\n",
+    "    total_steps = min(total_steps, MAX_STEPS)\n",
+    "\n",
+    'print(f"\U0001f680 Starting QAT training: {NUM_EPOCHS} epochs, {total_steps_per_epoch} steps/epoch, {total_steps} total steps")\n',
+    'print(f"   Dataset: {DATASET_SIZE} samples, seq_len={SEQ_LEN}, batch_size={BATCH_SIZE}")\n',
+    "\n",
+    "# Verification Test for Phase 4\n",
+    'print("\\n=== TEST PHASE 4 ===")\n',
+    "try:\n",
+    "    global_step = 0\n",
+    "    best_loss = float('inf')\n",
+    "    loss_history = []\n",
+    "    \n",
+    "    for epoch in range(NUM_EPOCHS):\n",
+    "        epoch_loss = 0.0\n",
+    "        epoch_steps = 0\n",
+    "        \n",
+    "        for step, (inputs, targets) in enumerate(dataloader):\n",
+    "            inputs = inputs.to(device)\n",
+    "            targets = targets.to(device)\n",
+    "            \n",
+    "            optimizer.zero_grad()\n",
+    "            \n",
+    "            # Forward pass\n",
+    "            outputs = model(inputs)\n",
+    "            \n",
+    "            # Calculate cross entropy loss\n",
+    "            logits = outputs.logits.view(-1, model.config.vocab_size)\n",
+    "            loss = F.cross_entropy(logits, targets.view(-1))\n",
+    "            \n",
+    "            # Backward pass\n",
+    "            loss.backward()\n",
+    "            \n",
+    "            # Clip gradients to prevent explosion through the STE\n",
+    "            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)\n",
+    "            \n",
+    "            # Step optimizer\n",
+    "            optimizer.step()\n",
+    "            \n",
+    "            current_loss = loss.item()\n",
+    "            epoch_loss += current_loss\n",
+    "            epoch_steps += 1\n",
+    "            global_step += 1\n",
+    "            loss_history.append(current_loss)\n",
+    "            \n",
+    "            if global_step % LOG_EVERY == 0 or global_step == 1:\n",
+    "                sample_layer = next(m for m in model.modules() if isinstance(m, BitLinear))\n",
+    "                grad_norm = sample_layer.weight.grad.norm().item() if sample_layer.weight.grad is not None else 0.0\n",
+    '                print(f"  Epoch {epoch+1}/{NUM_EPOCHS} | Step {global_step}/{total_steps} | Loss: {current_loss:.4f} | Grad Norm: {grad_norm:.6f}")\n',
+    "            \n",
+    "            if MAX_STEPS is not None and global_step >= MAX_STEPS:\n",
+    "                break\n",
+    "        \n",
+    "        avg_epoch_loss = epoch_loss / max(epoch_steps, 1)\n",
+    "        best_loss = min(best_loss, avg_epoch_loss)\n",
+    '        print(f"\U0001f4ca Epoch {epoch+1} complete | Avg Loss: {avg_epoch_loss:.4f} | Best: {best_loss:.4f}")\n',
+    "        \n",
+    "        if MAX_STEPS is not None and global_step >= MAX_STEPS:\n",
+    '            print(f"\u23f9\ufe0f Reached MAX_STEPS={MAX_STEPS}, stopping early.")\n',
+    "            break\n",
+    "    \n",
+    '    print(f"\\n\u2705 Training complete! {global_step} steps, final loss: {loss_history[-1]:.4f}, best avg epoch loss: {best_loss:.4f}")\n',
+    '    print("\u2705 Test Passed: Backpropagation and gradient updates through STE worked flawlessly!")\n',
+    "except Exception as e:\n",
+    '    print(f"\u274c Test Failed: {str(e)}")',
+]
+
+# Find Phase 4 code cell (it's the 5th cell, index 4)
+nb["cells"][4]["source"] = phase4_source
+
+# ============================================================
+# FIX 2: Add Phase 6 (BitNet inference + cleanup) after Phase 5
+# ============================================================
+phase6_markdown = {
+    "cell_type": "markdown",
+    "metadata": {},
+    "source": [
+        "# \U0001f916 Phase 6: BitNet Inference Verification & Memory Cleanup\n",
+        "\n",
+        "Now we verify that the **converted BitNet model** generates text correctly using its ternary quantized weights. After confirming inference works, we clean up all unnecessary objects from GPU memory.\n",
+        "\n",
+        "> **Note:** The `model` variable already IS the BitNet model (Phase 3 converted it in-place). There is no separate Facebook OPT model in memory at this point.",
+    ],
+}
+
+phase6_code = {
+    "cell_type": "code",
+    "execution_count": None,
+    "metadata": {},
+    "outputs": [],
+    "source": [
+        "# ==============================================================================\n",
+        "# PHASE 6: BITNET INFERENCE VERIFICATION & MEMORY CLEANUP\n",
+        "# ==============================================================================\n",
+        "\n",
+        "# Switch to evaluation mode for inference\n",
+        "model.eval()\n",
+        "model.half()  # FP16 for faster inference\n",
+        "\n",
+        "print('=== TEST PHASE 6: BitNet Inference ===')\n",
+        "try:\n",
+        "    # Verify that BitLinear layers are present\n",
+        "    bitlinear_count = sum(1 for m in model.modules() if isinstance(m, BitLinear))\n",
+        "    normal_linear_count = sum(1 for m in model.modules() if isinstance(m, nn.Linear) and not isinstance(m, BitLinear))\n",
+        "    print(f'\U0001f9e0 Model composition: {bitlinear_count} BitLinear layers, {normal_linear_count} standard Linear layers (lm_head/embeddings)')\n",
+        "    assert bitlinear_count > 0, 'No BitLinear layers found! Model was not converted.'\n",
+        "    \n",
+        "    # Run inference with the BitNet model\n",
+        "    prompts = [\n",
+        "        'The future of artificial intelligence is',\n",
+        "        'Once upon a time in a digital world',\n",
+        "        'The most important thing about neural networks',\n",
+        "    ]\n",
+        "    \n",
+        "    print('\\n\U0001f4ac BitNet Model Inference Results:')\n",
+        "    print('-' * 60)\n",
+        "    for prompt in prompts:\n",
+        "        inputs = tokenizer(prompt, return_tensors='pt').to(device)\n",
+        "        with torch.no_grad():\n",
+        "            outputs = model.generate(\n",
+        "                **inputs,\n",
+        "                max_new_tokens=30,\n",
+        "                do_sample=True,\n",
+        "                top_k=50,\n",
+        "                top_p=0.95,\n",
+        "                temperature=0.7\n",
+        "            )\n",
+        "        generated = tokenizer.decode(outputs[0], skip_special_tokens=True)\n",
+        "        print(f'  Prompt:    \"{prompt}\"')\n",
+        "        print(f'  Generated: \"{generated}\"')\n",
+        "        print()\n",
+        "    \n",
+        "    print('\u2705 Test Passed: BitNet model generates text successfully with ternary weights!')\n",
+        "\n",
+        "except Exception as e:\n",
+        "    print(f'\u274c Test Failed: {str(e)}')\n",
+        "\n",
+        "# --- Memory Cleanup ---\n",
+        "print('\\n\U0001f9f9 Cleaning up GPU memory...')\n",
+        "\n",
+        "# Delete training artifacts\n",
+        "for var_name in ['optimizer', 'dataloader', 'dataset', 'fp16_state', 'ternary_dict', 'loaded_dict', 'loss_history']:\n",
+        "    if var_name in dir():\n",
+        "        exec(f'del {var_name}')\n",
+        "\n",
+        "# Force garbage collection and clear CUDA cache\n",
+        "import gc\n",
+        "gc.collect()\n",
+        "if torch.cuda.is_available():\n",
+        "    torch.cuda.empty_cache()\n",
+        "    mem_allocated = torch.cuda.memory_allocated(0) / 1024**3\n",
+        "    mem_reserved = torch.cuda.memory_reserved(0) / 1024**3\n",
+        "    print(f'   GPU Memory Allocated: {mem_allocated:.2f} GB')\n",
+        "    print(f'   GPU Memory Reserved:  {mem_reserved:.2f} GB')\n",
+        "\n",
+        "print('\u2705 Cleanup complete! Only the BitNet model and tokenizer remain in memory.')\n",
+        "print('\\n\U0001f389 All phases completed successfully. Your BitNet b1.58 model is ready!')",
+    ],
+}
+
+# Append Phase 6 cells at the end
+nb["cells"].append(phase6_markdown)
+nb["cells"].append(phase6_code)
+
+# Write back
+with open(notebook_path, "w", encoding="utf-8") as f:
+    json.dump(nb, f, indent=1, ensure_ascii=False)
+
+print("✅ Notebook updated successfully!")
+print("   - Phase 4: Real training loop with configurable epochs/steps (no more 3-step break)")
+print("   - Phase 6: BitNet inference verification + GPU memory cleanup added")

@@ -3,11 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 def apply_rope(x: torch.Tensor, freqs: torch.Tensor, offset: int = 0):
-    B, H, S, D = x.shape
-    x_complex = torch.view_as_complex(x.float().reshape(B, H, S, D // 2, 2))
+    _, _, S, D = x.shape
     freqs = freqs[offset:offset + S].view(1, 1, S, D // 2)
-    x_rotated = torch.view_as_real(x_complex * freqs).reshape(B, H, S, D)
-    return x_rotated.type_as(x)
+    cos = freqs.real.to(dtype=x.dtype, device=x.device)
+    sin = freqs.imag.to(dtype=x.dtype, device=x.device)
+    x1 = x[..., : D // 2]
+    x2 = x[..., D // 2 :]
+    return torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
 
 def unpack_tq2_0(qs: torch.Tensor) -> torch.Tensor:
     chunks = qs.view(*qs.shape[:-1], qs.shape[-1] // 32, 32)
@@ -71,26 +73,26 @@ class RMSNorm(nn.Module):
         return x * norm * self.weight
 
 class TernaryEmbedding(nn.Module):
-    QK = 256
+    QK = 128
     def __init__(self, vocab_size: int, dim: int):
         super().__init__()
         self.vocab_size = vocab_size
         self.dim = dim
         self.num_blocks = (vocab_size * dim) // self.QK
         self.register_buffer('blocks_d', torch.zeros(self.num_blocks))
-        self.register_buffer('blocks_qs', torch.zeros((self.num_blocks, 64), dtype=torch.uint8))
+        self.register_buffer('blocks_qs', torch.zeros((self.num_blocks, 32), dtype=torch.uint8))
 
     def forward(self, x):
         blocks_per_row = self.dim // self.QK
         d = self.blocks_d.view(self.vocab_size, blocks_per_row)[x]
-        qs = self.blocks_qs.view(self.vocab_size, blocks_per_row, 64)[x]
+        qs = self.blocks_qs.view(self.vocab_size, blocks_per_row, 32)[x]
         w = unpack_tq2_0(qs)
         return (w * d.unsqueeze(-1)).view(*x.shape, self.dim)
 
     def dequant_rows(self, start: int, end: int) -> torch.Tensor:
         blocks_per_row = self.dim // self.QK
         d = self.blocks_d.view(self.vocab_size, blocks_per_row, 1)[start:end]
-        qs = self.blocks_qs.view(self.vocab_size, blocks_per_row, 64)[start:end]
+        qs = self.blocks_qs.view(self.vocab_size, blocks_per_row, 32)[start:end]
         return (unpack_tq2_0(qs) * d).view(end - start, self.dim)
 
     def linear(self, x: torch.Tensor, chunk_size: int = 4096) -> torch.Tensor:
@@ -102,7 +104,7 @@ class TernaryEmbedding(nn.Module):
         return torch.cat(pieces, dim=-1).view(*x.shape[:-1], self.vocab_size)
 
 class TQ2_0_Linear(nn.Module):
-    QK = 256
+    QK = 128
     def __init__(self, in_features: int, out_features: int, bias: bool = False, lazy=True):
         super().__init__()
         self.in_features = in_features
@@ -110,12 +112,12 @@ class TQ2_0_Linear(nn.Module):
         self.num_blocks_per_row = in_features // self.QK
         self.num_blocks = out_features * self.num_blocks_per_row
         self.register_buffer('blocks_d', torch.zeros(self.num_blocks))
-        self.register_buffer('blocks_qs', torch.zeros((self.num_blocks, 64), dtype=torch.uint8))
+        self.register_buffer('blocks_qs', torch.zeros((self.num_blocks, 32), dtype=torch.uint8))
         self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
 
     def forward(self, x):
         d = self.blocks_d.view(self.out_features, self.num_blocks_per_row, 1)
-        qs = self.blocks_qs.view(self.out_features, self.num_blocks_per_row, 64)
+        qs = self.blocks_qs.view(self.out_features, self.num_blocks_per_row, 32)
         w_bits = unpack_tq2_0(qs)
         w = (w_bits * d).view(self.out_features, self.in_features)
         return F.linear(x, w, self.bias)

@@ -26,6 +26,47 @@
 use burn::prelude::*;
 use burn::module::{Module, Param};
 use burn::config::Config;
+use burn::tensor::TensorData;
+use super::kernel::{I2SKernel, TL1Kernel, TL2Kernel};
+
+// ─── Pure Raw Inference State ───────────────────────────────────────────────
+/// State completely detached from Burn Tensors for maximum CPU inference speed
+#[derive(Clone)]
+pub struct BitLinearInferenceState {
+    pub packed_w: Vec<u32>,
+    pub scale: f32,
+    pub in_features: usize,
+    pub out_features: usize,
+    pub bias: Option<Vec<f32>>,
+    // Note: for a full implementation, you'd also export the RMSNorm weights here
+    // pub rms_weight: Vec<f32>,
+}
+
+impl BitLinearInferenceState {
+    /// Pure raw slice inference
+    pub fn forward_raw(&self, x_quant_data: &[f32], batch: usize) -> Vec<f32> {
+        let mut out = I2SKernel::forward_raw(
+            x_quant_data,
+            batch,
+            &self.packed_w,
+            self.out_features,
+            self.in_features,
+            self.scale
+        );
+        
+        // Add bias if present
+        if let Some(b) = &self.bias {
+            for batch_idx in 0..batch {
+                let offset = batch_idx * self.out_features;
+                for i in 0..self.out_features {
+                    out[offset + i] += b[i];
+                }
+            }
+        }
+        
+        out
+    }
+}
 
 // ─── RMSNorm (Sub-LN) ──────────────────────────────────────────────────────
 // Simplified normalization: RMSNorm(x) = x / sqrt(mean(x²) + ε)
@@ -293,6 +334,75 @@ impl<B: Backend> BitLinear<B> {
             }
         }
         (neg, zero, pos, total)
+    }
+
+    /// Export to a pure raw inference struct, completely detached from Burn
+    pub fn export_inference_layer(&self, device: &B::Device) -> BitLinearInferenceState {
+        let (w_ternary, scale_tensor) = self.get_ternary_weights(device);
+        let scale = scale_tensor.into_data().as_slice::<f32>().unwrap()[0];
+        let w_data = w_ternary.into_data();
+        let w_slice = w_data.as_slice::<f32>().unwrap();
+        
+        let packed_w = I2SKernel::pack_weights(w_slice);
+        
+        let bias = self.bias.as_ref().map(|b| {
+            b.val().into_data().as_slice::<f32>().unwrap().to_vec()
+        });
+
+        BitLinearInferenceState {
+            packed_w,
+            scale,
+            in_features: self.in_features,
+            out_features: self.out_features,
+            bias,
+        }
+    }
+
+    /// Forward pass for inference using CPU I2_S Kernel
+    /// This avoids floating point multiplications for the main matrix multiplication
+    pub fn forward_inference(&self, x: Tensor<B, 3>, device: &B::Device) -> Tensor<B, 3> {
+        let [batch, seq, _d_in] = x.dims();
+
+        // 1. Sub-LN: RMSNorm
+        let x_norm = self.rms_norm.forward(x);
+
+        // 2. Quantize activations (8-bit)
+        let x_quant = quantize_activations_8bit(x_norm);
+
+        // 3. Get ternary weights and scale
+        let (w_ternary, scale_tensor) = self.get_ternary_weights(device);
+        
+        // Need to extract data for custom CPU kernel
+        // Note: In a production setting, weights would be pre-packed
+        let scale = scale_tensor.into_data().as_slice::<f32>().unwrap()[0];
+        let w_data = w_ternary.into_data();
+        let w_slice = w_data.as_slice::<f32>().unwrap();
+        
+        // Pack weights (16 weights per u32)
+        let packed_w = I2SKernel::pack_weights(w_slice);
+
+        // 4. Custom MatMul using addition/subtraction kernel
+        let x_flat = x_quant.reshape([batch * seq, self.in_features]);
+        let x_flat_data = x_flat.into_data();
+        let x_slice = x_flat_data.as_slice::<f32>().unwrap();
+        
+        let out_data = I2SKernel::forward_raw(
+            x_slice,
+            batch * seq,
+            &packed_w,
+            self.out_features,
+            self.in_features,
+            scale
+        );
+        let output_flat = Tensor::<B, 2>::from_data(TensorData::new(out_data, [batch * seq, self.out_features]), device);
+        let mut output = output_flat.reshape([batch, seq, self.out_features]);
+
+        // 5. Add bias
+        if let Some(b) = &self.bias {
+            output = output + b.val().unsqueeze::<2>().unsqueeze::<3>();
+        }
+
+        output
     }
 }
 

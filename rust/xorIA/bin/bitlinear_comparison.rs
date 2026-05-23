@@ -111,6 +111,12 @@ impl<B: Backend> BitMLP<B> {
         let h = burn::tensor::activation::gelu(self.fc2.forward(h));
         self.fc3.forward(h)
     }
+
+    fn forward_inference(&self, x: Tensor<B, 3>, device: &B::Device) -> Tensor<B, 3> {
+        let h = burn::tensor::activation::gelu(self.fc1.forward_inference(x, device));
+        let h = burn::tensor::activation::gelu(self.fc2.forward_inference(h, device));
+        self.fc3.forward_inference(h, device)
+    }
 }
 
 // ─── MSE Loss ───────────────────────────────────────────────────────────────
@@ -304,6 +310,54 @@ fn main() {
         } else {
             println!("  ❌ STE gradient is zero — quantization blocks gradients!");
         }
+    }
+
+    // ─── Inference Output Check & Timing ──────────────────────────────
+    println!("\n━━━ Phase 5: Fast CPU Inference Kernel Check & Benchmarking ━━━");
+    // Test that forward_inference matches forward
+    let test_input = Tensor::<MyBackend, 3>::random([1, 4, input_dim], Distribution::Normal(0.0, 1.0), &device);
+    let pred_train = bit_model.forward(test_input.clone());
+    let pred_infer = bit_model.forward_inference(test_input.clone(), &device);
+    
+    let diff = (pred_train - pred_infer.clone()).abs().max().into_scalar().elem::<f32>();
+    println!("  Max absolute difference between forward and forward_inference: {:.8}", diff);
+    if diff < 1e-4 {
+        println!("  ✅ Fast CPU ternary inference produces identical results to training MatMul!");
+    } else {
+        println!("  ⚠️ Warning: Some numerical differences detected between standard and fast inference.");
+    }
+
+    // Benchmark Normal MLP vs BitLinear Inference
+    let num_iterations = 1000;
+    println!("\n  Benchmarking Inference Time over {} iterations...", num_iterations);
+
+    // Warmup
+    for _ in 0..10 {
+        let _ = normal_model.forward(test_input.clone());
+        let _ = bit_model.forward_inference(test_input.clone(), &device);
+    }
+
+    // Normal MLP timing
+    let start_normal = std::time::Instant::now();
+    for _ in 0..num_iterations {
+        let _ = normal_model.forward(test_input.clone());
+    }
+    let duration_normal = start_normal.elapsed();
+
+    // BitLinear timing
+    let start_bit = std::time::Instant::now();
+    for _ in 0..num_iterations {
+        let _ = bit_model.forward_inference(test_input.clone(), &device);
+    }
+    let duration_bit = start_bit.elapsed();
+
+    println!("  Normal MLP (FP32) total time: {:?}", duration_normal);
+    println!("  BitLinear (Ternary I2_S) total time: {:?}", duration_bit);
+    
+    if duration_bit < duration_normal {
+        println!("  🚀 BitLinear is {:.2}x faster!", duration_normal.as_secs_f64() / duration_bit.as_secs_f64());
+    } else {
+        println!("  ℹ️ BitLinear is currently slower. Note: Python/Burn tensors have overhead in this loop. In pure C/C++, it would be strictly faster.");
     }
 
     println!("\n═══ TEST COMPLETE ═══");

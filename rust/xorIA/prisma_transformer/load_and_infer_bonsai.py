@@ -6,6 +6,11 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerFast
+from tokenizers import Tokenizer
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+from tokenizers.models import BPE
+from tokenizers.pre_tokenizers import ByteLevel
 
 from config import PrismaConfig
 from transformer import PrismaTransformer
@@ -74,6 +79,21 @@ class GGUFLoader:
     def _parse_value(self, f, value_type: int):
         if value_type == 8:
             return self._read_string(f)
+        if value_type == 9:
+            item_type = struct.unpack("<I", f.read(4))[0]
+            count = struct.unpack("<Q", f.read(8))[0]
+            if item_type == 8:
+                return [self._read_string(f) for _ in range(count)]
+            if item_type == 4:
+                return list(struct.unpack(f"<{count}I", f.read(count * 4)))
+            if item_type == 5:
+                return list(struct.unpack(f"<{count}i", f.read(count * 4)))
+            if item_type == 6:
+                return list(struct.unpack(f"<{count}f", f.read(count * 4)))
+            if item_type == 7:
+                return list(struct.unpack(f"<?", f.read(1))[0] for _ in range(count))
+            self._skip_value(f, item_type)
+            return None
         if value_type == 4:
             return struct.unpack("<I", f.read(4))[0]
         if value_type == 5:
@@ -135,17 +155,17 @@ def _copy_norm(f, target, info: TensorInfo):
 
 def _copy_tq2(f, target, info: TensorInfo):
     rows = int(info.shape[1]) if len(info.shape) > 1 else 1
-    blocks_per_row = int(info.shape[0]) // 256
-    row_bytes = blocks_per_row * 66
-    stride = align(row_bytes)
+    blocks_per_row = int(info.shape[0]) // target.QK
+    block_stride = 34
+    row_bytes = blocks_per_row * block_stride
+    stride = row_bytes
     raw = f.read(rows * stride)
     if len(raw) != rows * stride:
         raise ValueError(f"Lectura corta en {info.name}: {len(raw)} != {rows * stride}")
-    arr = np.frombuffer(raw, dtype=np.uint8).reshape(rows, stride)[:, :row_bytes]
-    blocks = arr.reshape(target.num_blocks, 66)
+    blocks = np.frombuffer(raw, dtype=np.uint8).reshape(target.num_blocks, block_stride)
     d = blocks[:, :2].copy().view(dtype=np.float16).astype(np.float32).reshape(-1)
     target.blocks_d.copy_(torch.from_numpy(d))
-    target.blocks_qs.copy_(torch.from_numpy(blocks[:, 2:66].copy()))
+    target.blocks_qs.copy_(torch.from_numpy(blocks[:, 2:34].copy()))
 
 def _copy_q1(f, target, info: TensorInfo):
     expected = target.num_blocks * 6
@@ -208,6 +228,35 @@ def load_weights_into_model(model: PrismaTransformer, loader: GGUFLoader):
             print(f"OK: {name}", flush=True)
     print(f">>> [CARGA] {loaded}/{len(mapping)} tensores cargados.", flush=True)
 
+def tokenizer_from_gguf(loader: GGUFLoader) -> PreTrainedTokenizerFast:
+    tokens = loader.metadata.get("tokenizer.ggml.tokens")
+    merges = loader.metadata.get("tokenizer.ggml.merges")
+    token_types = loader.metadata.get("tokenizer.ggml.token_type") or []
+    if not tokens or not merges:
+        raise ValueError("El GGUF no contiene tokenizer.ggml.tokens/merges")
+
+    vocab = {token: idx for idx, token in enumerate(tokens)}
+    bpe_merges = [tuple(merge.split(" ", 1)) for merge in merges]
+    tokenizer = Tokenizer(BPE(vocab=vocab, merges=bpe_merges, fuse_unk=False))
+    tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False, use_regex=True)
+    tokenizer.decoder = ByteLevelDecoder()
+
+    added_tokens = [
+        token
+        for token, token_type in zip(tokens, token_types)
+        if token_type in {3, 4}
+    ]
+    fast = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        chat_template=loader.metadata.get("tokenizer.chat_template"),
+        eos_token=tokens[int(loader.metadata["tokenizer.ggml.eos_token_id"])],
+        pad_token=tokens[int(loader.metadata["tokenizer.ggml.padding_token_id"])],
+        bos_token=None,
+        add_bos_token=bool(loader.metadata.get("tokenizer.ggml.add_bos_token")),
+    )
+    fast.add_special_tokens({"additional_special_tokens": added_tokens})
+    return fast
+
 def config_from_gguf(loader: GGUFLoader) -> PrismaConfig:
     emb = loader.tensors_info["token_embd.weight"]
     dim = int(emb.shape[0])
@@ -233,7 +282,7 @@ def config_from_gguf(loader: GGUFLoader) -> PrismaConfig:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=r"D:\Ternary-Bonsai-1.7B-Q2_0.gguf")
-    parser.add_argument("--tokenizer", default="Qwen/Qwen2-1.5B-Instruct")
+    parser.add_argument("--tokenizer", default="gguf")
     parser.add_argument("--max-new-tokens", type=int, default=128)
     args = parser.parse_args()
 
@@ -242,15 +291,35 @@ def main():
     config = config_from_gguf(loader)
     print(f">>> [CONFIG] {config}", flush=True)
     model = PrismaTransformer(config, lazy=True).eval()
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    if args.tokenizer.lower() == "gguf":
+        tokenizer = tokenizer_from_gguf(loader)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     load_weights_into_model(model, loader)
     print("\n>>> [CHAT] Bonsai 1.7B listo.", flush=True)
 
     while True:
         try:
             user = input("\nUsuario > ")
-            prompt = f"<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n"
-            toks = tokenizer.encode(prompt, return_tensors="pt")
+            messages = [{"role": "user", "content": user}]
+            try:
+                toks = tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_tensors="pt",
+                )
+                if hasattr(toks, "input_ids"):
+                    toks = toks.input_ids
+                elif isinstance(toks, dict) and "input_ids" in toks:
+                    toks = toks["input_ids"]
+                elif isinstance(toks, str):
+                    toks = tokenizer.encode(toks, return_tensors="pt")
+                elif not isinstance(toks, torch.Tensor):
+                    toks = torch.tensor([toks], dtype=torch.long)
+            except Exception:
+                prompt = f"<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n"
+                toks = tokenizer.encode(prompt, return_tensors="pt")
             kv, offset = None, 0
             print("Bonsai > ", end="", flush=True)
             for _ in range(args.max_new_tokens):

@@ -127,5 +127,13 @@ cargo build --release --bin transformer_chat_cuda 2>&1
 cargo run --release --bin transformer_chat_cuda -- xorIA/input.txt
 
 python main.py
-
+ 
 python load_and_infer_bonsai.py
+
+cargo build --release --bin bitlinear_comparison
+
+cargo run --release --bin bitlinear_comparisons
+
+cargo run --release --bin lstm_chat_test_dual
+
+cargo run --release --bin bitlinear_comparison
