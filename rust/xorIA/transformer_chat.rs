@@ -386,8 +386,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokens = tokenizer.encode(&text);
     let device = Default::default();
 
-    let d_model = 256;
-    let num_layers = 4;
+    let d_model = 512;
+    let num_layers = 8;
     let num_heads = 8;
     let num_kv_groups = 2; 
 

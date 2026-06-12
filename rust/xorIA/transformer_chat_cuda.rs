@@ -305,8 +305,9 @@ fn generate_text_cached<B: Backend>(
         history.push(next_id);
         if history.len() > 64 { history.remove(0); }
 
-        let token_str = tokenizer.decode(&[next_id]);
-        print!("{}", token_str);
+        let token_raw = tokenizer.id_to_token(next_id).unwrap_or_default();
+        let clean_str = token_raw.replace('▁', " ").replace(' ', " ");
+        print!("{}", clean_str);
         io::stdout().flush().unwrap();
 
         let input = Tensor::<B, 2, Int>::from_data(
