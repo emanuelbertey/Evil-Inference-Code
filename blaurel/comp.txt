@@ -1,0 +1,8 @@
+python compare_methods.py
+
+
+python train_pepita.py
+
+python train_ff.py
+
+

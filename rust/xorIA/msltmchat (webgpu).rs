@@ -200,12 +200,14 @@ fn sample_from_logits<B: Backend>(
 }
 
 /// Stateful text generation
-fn generate_text<B: Backend>(
+fn generate_text_typed<B: Backend>(
     model: &XLstm<B>,
     tokenizer: &Tokenizer,
     seed_text: &str,
     length: usize,
     device: &B::Device,
+    temp: f32,
+    r_penalty: f32,
 ) -> (String, usize, f32) {
     let seed_ids = tokenizer.encode(seed_text);
     if seed_ids.is_empty() {
@@ -230,10 +232,8 @@ fn generate_text<B: Backend>(
     let mut history = seed_ids.clone();
 
     // Parámetros limpios para evitar que se rompan las palabras con vocab=2048
-    let temp = 0.4;
     let top_k = 20;
     let top_p = 1.0;
-    let r_penalty = 1.0; // Apagado
 
     // Primer token: samplear desde los logits del último paso
     let mut next_id = if let Some(logits) = last_logits {
@@ -292,19 +292,95 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokens = tokenizer.encode(&text);
     println!("Tokens totales: {}\n", tokens.len());
 
-    // Model configuration (Optimized for 1 block as requested)
-    let embedding_dim = 320;
-    let num_blocks = 2;
+    let mut embedding_dim = 256;
+    let mut num_blocks = 5;
+    let mut num_heads = 4;
+    let mut lr = 1e-3;
+    let mut num_epochs = 40;
+    let mut batch_size = 16;
+    let mut temperature = 0.5;
+    let mut r_penalty = 1.9;
     let seq_length = 256;
-    let batch_size = 16;
-    let num_epochs = 5;
 
     let device = WgpuDevice::default();
+    let model_file = format!("{}.mpk", model_path);
+    let existe_modelo = Path::new(&model_file).exists();
+    
+    let mut modo_inferencia = false;
+    
+    loop {
+        println!("\n--- CONFIGURACIÓN ACTUAL ---");
+        println!("  (1) Bloques: {}", num_blocks);
+        println!("  (2) Heads:   {}", num_heads);
+        println!("  (3) LR:      {}", lr);
+        println!("  (4) Épocas:  {}", num_epochs);
+        println!("  (5) Batch:   {}", batch_size);
+        println!("  (6) Temp:    {}", temperature);
+        println!("  (7) R-Pen:   {}", r_penalty);
+        println!("----------------------------");
+        print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
+        io::stdout().flush()?;
+        
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim().to_lowercase();
+        
+        if choice == "i" {
+            modo_inferencia = true;
+            break;
+        } else if choice == "e" {
+            break;
+        } else if choice == "s" {
+            println!("\nAjustar parámetros (Enter para mantener actual):");
+            
+            print!("Cant. Bloques [{}]: ", num_blocks);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if let Ok(v) = input.trim().parse() { num_blocks = v; }
+
+            print!("Cant. Heads [{}]: ", num_heads);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if let Ok(v) = input.trim().parse() { num_heads = v; }
+
+            print!("Learning Rate [{}]: ", lr);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if let Ok(v) = input.trim().parse() { lr = v; }
+
+            print!("Épocas [{}]: ", num_epochs);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if let Ok(v) = input.trim().parse() { num_epochs = v; }
+
+            print!("Batch Size [{}]: ", batch_size);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if let Ok(v) = input.trim().parse() { batch_size = v; }
+
+            print!("Temperatura [{}]: ", temperature);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if let Ok(v) = input.trim().parse() { temperature = v; }
+
+            print!("Repetition Penalty [{}]: ", r_penalty);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if let Ok(v) = input.trim().parse() { r_penalty = v; }
+        }
+    }
 
     let mlstm_cfg = MLSTMBlockConfig {
         mlstm: MLSTMLayerConfig {
             embedding_dim,
-            num_heads: 4,
+            num_heads,
             conv1d_kernel_size: 4,
             qkv_proj_blocksize: 4,
             proj_factor: 2.0,
@@ -317,7 +393,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let slstm_cfg = SLSTMBlockConfig {
         slstm: SLSTMLayerConfig {
             embedding_dim,
-            num_heads: 4,
+            num_heads,
             conv1d_kernel_size: 4,
             dropout: 0.1,
         },
@@ -344,32 +420,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             slstm_at: vec![], // Only mLSTM
         },
     };
-
-    let model_file = format!("{}.mpk", model_path);
-    let existe_modelo = Path::new(&model_file).exists();
-    
-    let mut modo_inferencia = false;
-    if existe_modelo {
-        // Drenar cualquier byte residual en stdin (típico al lanzar con `cargo run` en Windows)
-        loop {
-            print!("¡Modelo GPU encontrado! ¿Deseas (e)ntrenar o (i)nferir solamente? [e/i]: ");
-            io::stdout().flush()?;
-            let mut choice = String::new();
-            io::stdin().read_line(&mut choice)?;
-            let choice = choice.trim().to_lowercase();
-            match choice.as_str() {
-                "i" => { modo_inferencia = true; break; }
-                "e" => { break; }
-                _ => {
-                    // Si llegó vacío o con basura (residuo de cargo run), reintentar
-                    if choice.is_empty() {
-                        continue;
-                    }
-                    println!("  → Opción no reconocida '{}'. Por favor escribe 'e' o 'i'.", choice);
-                }
-            }
-        }
-    }
 
     let mut model: xlstm::XLstm<MyBackend> = if existe_modelo {
         println!("Cargando pesos del modelo GPU...");
@@ -416,10 +466,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let grads = loss.backward();
                 let grads = GradientsParams::from_grads(grads, &model);
                 
-                let lr = 1e-3; // GPU can usually handle a bit higher LR than CPU for stable training
-                model = optim.step(lr, model, grads);
-
-                if batch_idx % 5 == 0 || batch_idx == num_batches - 1 {
+                model = optim.step(lr as f64, model, grads);
+                if batch_idx % 1 == 0 || batch_idx == num_batches - 1 {
                     let elapsed_total = total_start.elapsed().as_secs_f32();
                     let batches_done = epoch * num_batches + batch_idx + 1;
                     let total_batches = num_epochs * num_batches;
@@ -431,14 +479,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let batch_loss = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
                     let avg_loss = total_loss / (batch_idx + 1) as f32;
 
-                    println!("  Epoch [{}/{}] Batch [{}/{}] Loss Batch: {:.4} | Avg: {:.4} | Speed: {:.1} tok/s | Total ETA: {:.1}h", 
+                    print!("\r  Epoch [{}/{}] Batch [{}/{}] Loss: {:.4} | Avg: {:.4} | Speed: {:.1} tok/s | ETA: {:.1}h      ", 
                         epoch+1, num_epochs, batch_idx+1, num_batches, batch_loss, avg_loss, tps, eta_min / 60.0);
                     io::stdout().flush()?;
                 }
             }
+            println!(); // Salto de línea al final de la época
 
             println!("\n  Epoch completada en {:.2}s. Generando ejemplo...", epoch_start.elapsed().as_secs_f32());
-            let (generated, _, _) = generate_text(&model.valid(), &tokenizer, "El ", 64, &device);
+            let (generated, _, _) = generate_text_typed(&model.valid(), &tokenizer, "El ", 64, &device, temperature, r_penalty);
             println!("  Generado: {}\n", generated);
 
             let recorder = CompactRecorder::new();
@@ -483,7 +532,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             continue;
         }
 
-        let (generated, tokens_count, elapsed) = generate_text(&model.valid(), &tokenizer, input, current_len, &device);
+        let (generated, tokens_count, elapsed) = generate_text_typed(&model.valid(), &tokenizer, input, current_len, &device, temperature, r_penalty);
         let tps = tokens_count as f32 / elapsed;
         
         println!("\n--- TEXTO GENERADO (GPU) ---");

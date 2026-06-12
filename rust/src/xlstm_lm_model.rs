@@ -13,7 +13,7 @@ use burn::nn;
 
 use crate::xlstm_block_stack::{XLSTMBlockStack, XLSTMBlockStackConfig, XLSTMBlockStackState};
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct XLSTMLMModelConfig {
     pub vocab_size: usize,
     #[config(default = false)]

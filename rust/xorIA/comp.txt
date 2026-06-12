@@ -1,0 +1,139 @@
+cargo run --release --bin msltmchat -- input.txt
+
+
+
+cargo run --release --bin slstmchat -- input.txt
+
+cargo run --release --bin msltmchat_gpu -- input.txt
+
+cargo run --release --bin msltmchat_cuda -- input.txt
+
+cargo run --release --bin xlstm-bin
+
+cargo run --release --bin mlstm_equivalence 
+
+cargo run --release --bin mlstm_copy_test 
+
+cargo run --release --bin mlstm_grad_stability 
+
+cargo run --release --bin mlstm_stability_test 
+
+cargo run --release --bin test_cumsum
+
+cargo run --release --bin test_conv
+
+cargo run --release --bin slstm_equivalence
+
+cargo run --release --bin burn_comparison
+
+cargo run --release --bin dual_test
+
+
+
+cargo run --release --bin test_slstm
+
+$env:PYTHONPATH = "."; py tests\xlstm_large_test.py
+
+$env:PYTHONPATH = "."; py tests\mlstm_equivalence.py
+
+$env:PYTHONPATH = "."; py tests\test_conv.py
+
+$env:PYTHONPATH = "."; py tests\mlstm_copy_test.py
+
+$env:PYTHONPATH = "."; py tests\mlstm_grad_stability.py
+
+$env:PYTHONPATH = "."; py tests\mlstm_stability_test.py
+
+$env:RUST_BACKTRACE=1; cargo run --release --bin pro_trainer -- "C:/Repos/"
+
+$env:RUST_BACKTRACE=1; cargo run --release --bin pro_trainer -- C:/Windows.old/Users/emabertey/Downloads/dataset/wikitext-103-raw
+
+C:/Windows.old/Users/emabertey/Downloads/dataset/wikitext-103-raw
+
+cargo run --release --bin wiki_mlstm -- input.txt
+
+cargo run --release --bin wiki_mlstm -- C:/Windows.old/Users/emabertey/Downloads/dataset/TinyStoriesV2-GPT4-train.txt
+
+
+cargo run --release --bin wiki_mlstm -- input.txt
+
+cargo run --release --bin large_chat -- input.txt
+
+cargo run --release --bin xlstm_large_test
+
+cargo run --release --bin large_chat_cuda -- input.txt
+
+cargo run --release --bin main
+
+cargo run --release --bin mingruchat -- input.txt
+
+$env:PYTHONPATH = "."; py tests\mingru_equivalence.py
+
+cargo run --release --bin mingru_equivalence
+
+cargo run --release --bin mingruchat_cuda -- input.txt
+
+cargo run --release --bin test_slstm2
+
+cargo run --release --bin mingruchat_wgpu -- input.txt
+
+$env:PYTHONPATH = "."; py tests\slstm_equivalence_gen.py
+
+cargo run --release --bin compare_primitives
+
+
+cargo run --release --bin test_mingru
+
+cargo run --release --bin test_mingru_lib
+
+cargo run --release --bin test_minlstm_lib
+
+cargo run --release --bin minlstmchat -- input.txt
+
+python c:\Users\Emabe\Documents\GitHub\xlstm\tests\compare_primitives.py
+
+cargo run --release --bin burn_comparison_mingru
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_model.py
+cargo run --release --bin test_large_binary
+cargo run --release --bin test_large_binary
+
+
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_model.py train
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_model.py chat
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\verify_bin.py
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_sequential.py
+
+cargo run --release --bin sequential_test
+
+$env:PYTHONPATH = "c:\Users\Emabe\Documents\GitHub\xlstm"; python c:\Users\Emabe\Documents\GitHub\xlstm\xlstm\testbin_model\export_model.py test
+
+cargo run --release --bin xlstm_flex_test
+
+cargo run --release --bin test_large_binary_flex
+
+cargo run --release --bin bitlinear_comparison
+
+cargo build --release --bin transformer_chat 2>&1
+
+cargo run --release --bin transformer_chat -- xorIA/input.txt
+
+cargo build --release --bin transformer_chat_cuda 2>&1
+
+cargo run --release --bin transformer_chat_cuda -- xorIA/input.txt
+
+python main.py
+ 
+python load_and_infer_bonsai.py
+
+cargo build --release --bin bitlinear_comparison
+
+cargo run --release --bin bitlinear_comparisons
+
+cargo run --release --bin lstm_chat_test_dual
+
+cargo run --release --bin bitlinear_comparison

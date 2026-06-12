@@ -1,144 +1,191 @@
-#![recursion_limit = "256"]
-
-/*!
-Text Generation with xLSTM using Character-Level Tokenization
-
-This example demonstrates how to use xLSTM for text generation
-using a simple character-level tokenizer that can be saved/loaded as JSON.
-
-Author: Based on xlstm-rs project
-Date: January 2026
-*/
-
-
-
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::decay::WeightDecayConfig;
 use burn::{
-    module::AutodiffModule,
-    module::Module,
-    optim::AdamConfig,
+    module::{Module, AutodiffModule},
+    optim::{AdamConfig, Optimizer},
     record::{CompactRecorder, Recorder},
-    tensor::{activation::softmax, Tensor, backend::{AutodiffBackend, Backend}},
+    tensor::{activation::softmax, Tensor, backend::Backend, TensorData, Int},
     nn::loss::CrossEntropyLossConfig,
+    nn::{Linear, LinearConfig, Embedding, EmbeddingConfig},
 };
-use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
-//use burn_wgpu::{Wgpu, WgpuDevice};
+use burn_ndarray::NdArray;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::collections::{HashMap, BTreeSet};
 use std::time::Instant;
-use burn_ndarray::NdArray;
-use tokenizers::decoders::metaspace::Metaspace as MetaspaceDecoder;
-use tokenizers::models::bpe::{BpeTrainerBuilder, BPE};
-use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
-use tokenizers::tokenizer::Tokenizer as HFTokenizer;
-use tokenizers::models::TrainerWrapper;
 
-use xlstm::{LearningRateConfig, LstmType, XLstm, XLstmconfig};
+use xlstm::{MinGru, MinGruConfig, MinGruState};
+use xlstm::components::conv::{CausalConv1d, CausalConv1dConfig};
+use xlstm::blocks::xlstm_large::components::RMSNorm;
+
 type MyBackend = Autodiff<NdArray<f32>>;
-//type MyBackend = Autodiff<Wgpu<f32, i32>>;
 
-/// Tokenizador profesional usando la librería 'tokenizers' de Hugging Face
-pub struct Tokenizer {
-    tokenizer: HFTokenizer,
+/// Tokenizador de caracteres simple (Igual al de Jupyter)
+pub struct CharTokenizer {
+    char_to_idx: HashMap<char, usize>,
+    idx_to_char: HashMap<usize, char>,
+    vocab_size: usize,
 }
 
-impl Tokenizer {
-    /// Crea un nuevo tokenizador BPE entrenado desde un texto
-    pub fn from_text(text: &str, vocab_size: usize) -> Result<Self, Box<dyn Error>> {
-        let model = BPE::builder()
-            .byte_fallback(true)
-            .build()
-            .map_err(|e| format!("Error building BPE: {}", e))?;
-            
-        let mut tokenizer = HFTokenizer::new(model);
+impl CharTokenizer {
+    pub fn from_text(text: &str) -> Self {
+        let mut chars = BTreeSet::new();
+        for c in text.chars() {
+            chars.insert(c);
+        }
         
-        // Usar Metaspace (como en GPT-2/RoBERTa) para preservar espacios
-        tokenizer.with_pre_tokenizer(Some(Metaspace::new(
-            '▁', 
-            PrependScheme::Always,
-            true,
-        )));
-
-        // AGREGAR DECODER PARA QUE 'decode' NO META ESPACIOS ENTRE SUB-TOKENS
-        tokenizer.with_decoder(Some(MetaspaceDecoder::new('▁', PrependScheme::Always, true)));
-
-        let trainer = BpeTrainerBuilder::default()
-            .show_progress(true)
-            .vocab_size(vocab_size)
-            .min_frequency(2)
-            .build();
-
-        // Envolver el entrenador de manera genérica usando el trait From
-        let mut trainer_wrapper = TrainerWrapper::from(trainer);
-
-        // Entrenar desde el archivo temporal
-        let temp_file = "temp_train.txt";
-        fs::write(temp_file, text)?;
-        tokenizer.train_from_files(&mut trainer_wrapper, vec![temp_file.to_string()])
-            .map_err(|e| format!("Error en entrenamiento: {}", e))?;
-        fs::remove_file(temp_file)?;
-
-        Ok(Self { tokenizer })
-    }
-
-    /// Guarda el tokenizador en un archivo
-    pub fn save(&self, path: &str) -> Result<(), Box<dyn Error>> {
-        self.tokenizer.save(path, true)
-            .map_err(|e| format!("Error al guardar: {}", e))?;
-        println!("Tokenizador guardado en: {}", path);
-        Ok(())
-    }
-
-    /// Carga el tokenizador desde un archivo
-    pub fn load(path: &str) -> Result<Self, Box<dyn Error>> {
-        let mut tokenizer = HFTokenizer::from_file(path)
-            .map_err(|e| format!("Error al cargar: {}", e))?;
-            
-        // Asegurar el decoder al cargar
-        tokenizer.with_decoder(Some(MetaspaceDecoder::new('▁', PrependScheme::Always, true)));
+        let char_list: Vec<char> = chars.into_iter().collect();
+        let mut char_to_idx = HashMap::new();
+        let mut idx_to_char = HashMap::new();
         
-        println!("Tokenizador cargado desde: {}", path);
-        Ok(Self { tokenizer })
+        for (i, &c) in char_list.iter().enumerate() {
+            char_to_idx.insert(c, i);
+            idx_to_char.insert(i, c);
+        }
+        
+        let vocab_size = char_list.len();
+        Self { char_to_idx, idx_to_char, vocab_size }
     }
 
-    /// Convierte texto a índices
     pub fn encode(&self, text: &str) -> Vec<usize> {
-        let encoding = self.tokenizer.encode(text, false).unwrap();
-        encoding.get_ids().iter().map(|&id| id as usize).collect()
+        text.chars().map(|c| *self.char_to_idx.get(&c).unwrap_or(&0)).collect()
     }
 
-    /// Convierte índices a texto
     pub fn decode(&self, indices: &[usize]) -> String {
-        let u32_indices: Vec<u32> = indices.iter().map(|&idx| idx as u32).collect();
-        self.tokenizer.decode(&u32_indices, true).unwrap()
+        indices.iter().map(|i| *self.idx_to_char.get(i).unwrap_or(&' ')).collect()
     }
 
-    /// Obtiene el tamaño del vocabulario
     pub fn vocab_size(&self) -> usize {
-        self.tokenizer.get_vocab_size(true)
-    }
-
-    /// Obtiene el string de un token por su índice
-    pub fn id_to_token(&self, id: usize) -> Option<String> {
-        self.tokenizer.id_to_token(id as u32)
+        self.vocab_size
     }
 }
 
+#[derive(Module, Debug)]
+pub struct MLP<B: Backend> {
+    pub l1: Linear<B>,
+    pub l2: Linear<B>,
+}
 
-/// Crea un batch de entrenamiento (one-hot) de forma eficiente usando una matriz identidad
-fn create_batch<B: AutodiffBackend>(
+impl<B: Backend> MLP<B> {
+    pub fn forward<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
+        let x = self.l1.forward(x);
+        let x = burn::tensor::activation::gelu(x);
+        self.l2.forward(x)
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct LanguageModelLayer<B: Backend> {
+    pub conv: CausalConv1d<B>,
+    pub norm1: RMSNorm<B>,
+    pub mingru: MinGru<B>,
+    pub norm2: RMSNorm<B>,
+    pub mlp: MLP<B>,
+    pub dropout: burn::nn::Dropout,
+}
+
+impl<B: Backend> LanguageModelLayer<B> {
+    pub fn forward(&self, x: Tensor<B, 3>, state: Option<Vec<MinGruState<B>>>) -> (Tensor<B, 3>, Vec<MinGruState<B>>) {
+        // Estabilizado: Estilo Pre-Norm Residual
+        // 1. Conv + Residual
+        let x = self.conv.forward(x.clone()) + x;
+        
+        // 2. Norm -> MinGru -> Residual
+        let x_norm1 = self.norm1.forward(x.clone());
+        let (output, next_state) = self.mingru.forward(x_norm1, state);
+        let x = x + output;
+        
+        // 3. Norm -> MLP -> Residual
+        let x_norm2 = self.norm2.forward(x.clone());
+        let x = x + self.mlp.forward(x_norm2);
+        
+        // 4. Dropout final de capa
+        let x = self.dropout.forward(x);
+        
+        (x, next_state)
+    }
+
+    pub fn step(&self, x_t: Tensor<B, 3>, conv_state: Tensor<B, 3>, mingru_state: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
+        // Modo secuencial estabilizado
+        let x_t_2d = x_t.clone().reshape([x_t.dims()[0], x_t.dims()[2]]);
+        let (y_conv, next_conv_state) = self.conv.step(x_t_2d, conv_state);
+        let x = y_conv.unsqueeze_dim(1) + x_t;
+        
+        let x_norm1 = self.norm1.forward(x.clone());
+        let (y_mingru, next_mingru_state) = self.mingru.sequential_mode(x_norm1, mingru_state);
+        let x = x + y_mingru;
+        
+        let x_norm2 = self.norm2.forward(x.clone());
+        let x = x + self.mlp.forward(x_norm2);
+        let x = self.dropout.forward(x);
+        
+        (x, next_conv_state, next_mingru_state)
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct MinGruChatModel<B: Backend> {
+    pub embedding: Embedding<B>,
+    pub layers: Vec<LanguageModelLayer<B>>,
+    pub norm: RMSNorm<B>,
+    pub head: Linear<B>,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub num_layers: usize,
+}
+
+impl<B: Backend> MinGruChatModel<B> {
+    pub fn forward(&self, input: Tensor<B, 2, Int>, states: Option<Vec<Vec<MinGruState<B>>>>) -> (Tensor<B, 3>, Vec<Vec<MinGruState<B>>>) {
+        let mut x = self.embedding.forward(input);
+        let mut next_states = Vec::new();
+        
+        // Desempacar estados por capa (o usar vacíos si es None)
+        let mut layer_states = states.unwrap_or_default();
+        while layer_states.len() < self.num_layers {
+            layer_states.push(vec![]);
+        }
+        let mut states_iter = layer_states.into_iter();
+        
+        for layer in self.layers.iter() {
+            let st = states_iter.next().unwrap();
+            let state = if st.is_empty() { None } else { Some(st) };
+            let (out, ns) = layer.forward(x, state);
+            x = out;
+            next_states.push(ns);
+        }
+        
+        x = self.norm.forward(x);
+        let logits = self.head.forward(x);
+        (logits, next_states)
+    }
+
+    pub fn step(&self, input: Tensor<B, 1, Int>, conv_states: &mut Vec<Tensor<B, 3>>, mingru_states: &mut Vec<Tensor<B, 3>>) -> Tensor<B, 2> {
+        let [b] = input.dims();
+        let mut x = self.embedding.forward(input.reshape([b, 1]));
+        
+        for i in 0..self.num_layers {
+            let (out, next_conv, next_mingru) = self.layers[i].step(x, conv_states[i].clone(), mingru_states[i].clone());
+            x = out;
+            conv_states[i] = next_conv;
+            mingru_states[i] = next_mingru;
+        }
+        
+        x = self.norm.forward(x);
+        self.head.forward(x).reshape([b, self.vocab_size])
+    }
+}
+
+fn create_batch<B: Backend>(
     tokens: &[usize],
     start_idx: usize,
     batch_size: usize,
     seq_length: usize,
     stride: usize,
-    vocab_size: usize,
     device: &B::Device,
-) -> (Tensor<B, 3>, Tensor<B, 2, burn::tensor::Int>) {
+) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
     let mut x_indices = Vec::with_capacity(batch_size * seq_length);
     let mut y_indices = Vec::with_capacity(batch_size * seq_length);
 
@@ -150,576 +197,276 @@ fn create_batch<B: AutodiffBackend>(
         }
     }
 
-    let eye = Tensor::<B::InnerBackend, 2>::eye(vocab_size, device);
-    let indices_inner = Tensor::<B::InnerBackend, 1, burn::tensor::Int>::from_data(
-        TensorData::new(x_indices, [batch_size * seq_length]),
-        device,
-    );
-
-    let x = Tensor::<B, 3>::from_inner(
-        eye.select(0, indices_inner)
-           .reshape([batch_size, seq_length, vocab_size])
-    );
-    
-    let y = Tensor::<B, 2, burn::tensor::Int>::from_data(
-        TensorData::new(y_indices, [batch_size, seq_length]),
-        device,
-    );
-
+    let x = Tensor::<B, 2, Int>::from_data(TensorData::new(x_indices, [batch_size, seq_length]), device);
+    let y = Tensor::<B, 2, Int>::from_data(TensorData::new(y_indices, [batch_size, seq_length]), device);
     (x, y)
 }
 
-/// Selecciona un token usando muestreo estocástico con Top-K, Top-P (Nucleus) y temperatura
-fn sample_from_logits<B: Backend>(
-    logits: Tensor<B, 2>, 
-    temperature: f32,
-    top_k: usize,
-    top_p: f32
-) -> usize
-where
-    <B as Backend>::FloatElem: num_traits::ToPrimitive,
-{
-    // Aplicar softmax para obtener probabilidades base
-    let probs = softmax(logits, 1);
-    let mut probs_vec: Vec<(usize, f32)> = probs.to_data()
-        .as_slice::<<B as Backend>::FloatElem>()
-        .unwrap()
-        .iter()
-        .enumerate()
-        .map(|(i, &x)| (i, num_traits::ToPrimitive::to_f32(&x).unwrap_or(0.0)))
-        .collect();
-
-    // Ordenar de mayor a menor probabilidad
-    probs_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+fn sample_from_logits<B: Backend>(logits: Tensor<B, 2>, temperature: f32) -> usize 
+where <B as Backend>::FloatElem: num_traits::ToPrimitive {
+    let probs = softmax(logits / temperature, 1);
+    let probs_vec: Vec<f32> = probs.into_data().as_slice::<<B as Backend>::FloatElem>().unwrap().iter().map(|&x| num_traits::ToPrimitive::to_f32(&x).unwrap()).collect();
     
-    // --- TOP-K ---
-    let k = top_k.min(probs_vec.len()).max(1);
-    let mut filtered_probs: Vec<(usize, f32)> = Vec::with_capacity(k);
-    
-    // --- TOP-P (Nucleus Sampling) ---
-    let mut cumulative_prob = 0.0;
-    for (i, p) in probs_vec.into_iter() {
-        filtered_probs.push((i, p));
-        cumulative_prob += p;
-        if filtered_probs.len() >= k || cumulative_prob >= top_p {
-            break;
-        }
-    }
-
-    // Extraer solo los pesos para el muestreo
-    let indices: Vec<usize> = filtered_probs.iter().map(|(i, _)| *i).collect();
-    let mut weights: Vec<f32> = filtered_probs.iter().map(|(_, p)| *p).collect();
-
-    // Si la temperatura es muy baja, actuar de forma determinista (Greedy)
-    if temperature <= 1e-6 {
-        return indices[0];
-    }
-
-    // Aplicar temperatura
-    for p in weights.iter_mut() {
-        *p = (p.max(1e-10).ln() / temperature).exp();
-    }
-
-    let sum: f32 = weights.iter().sum();
+    let mut rng = rand::rng();
     use rand::Rng;
-    let mut rng = rand::rng(); 
-    let sample: f32 = rng.random::<f32>() * sum; 
-
+    let sample: f32 = rng.random::<f32>();
     let mut cumulative = 0.0;
-
-    for (i, &p) in weights.iter().enumerate() {
+    for (i, &p) in probs_vec.iter().enumerate() {
         cumulative += p;
-        if sample <= cumulative {
-            return indices[i];
-        }
+        if sample <= cumulative { return i; }
     }
-
-    indices[0]
+    0
 }
 
-
-
-/// Genera texto de forma recurrente manteniendo el estado interno del modelo
-/// Genera texto de forma recurrente manteniendo el estado interno de la mLSTM
-/// Genera texto de forma recurrente manteniendo el estado interno de la mLSTM
 fn generate_text<B: Backend>(
-    model: &XLstm<B>,
-    tokenizer: &Tokenizer,
+    model: &MinGruChatModel<B>,
+    tokenizer: &CharTokenizer,
     seed_text: &str,
     length: usize,
-    vocab_size: usize,
     device: &B::Device,
 ) -> String
-where
-    <B as Backend>::FloatElem: num_traits::ToPrimitive + num_traits::FromPrimitive,
-{
-    let mut generated_ids = tokenizer.encode(seed_text);
-    let seed_tokens = generated_ids.clone();
-    
-    if seed_tokens.is_empty() {
-        return seed_text.to_string();
+where <B as Backend>::FloatElem: num_traits::ToPrimitive {
+    let ids = tokenizer.encode(seed_text);
+    if ids.is_empty() { return seed_text.to_string(); }
+
+    let mut conv_states = Vec::new();
+    let mut mingru_states = Vec::new();
+    let b = 1;
+
+    for i in 0..model.num_layers {
+        conv_states.push(model.layers[i].conv.empty_state(b, device));
+        let mg_hidden_size = model.hidden_size * 2;
+        mingru_states.push(Tensor::<B, 3>::zeros([b, 1, mg_hidden_size], device));
     }
 
-    let eye = Tensor::<B, 2>::eye(vocab_size, device);
-    
-    let mut current_state = None; 
-    let mut current_tokens = seed_tokens.clone();
-
-    for i in 0..length {
-        let tokens_to_process = if i == 0 {
-            current_tokens.clone()
-        } else {
-            vec![*current_tokens.last().unwrap()]
-        };
-
-        let seq_len = tokens_to_process.len();
-        let indices = Tensor::<B, 1, burn::tensor::Int>::from_data(
-            TensorData::new(tokens_to_process.iter().map(|&t| t as i64).collect(), [seq_len]),
-            device,
-        );
-
-        let input = eye.clone()
-            .select(0, indices)
-            .reshape([1, seq_len, vocab_size]);
-
-        let (output, next_state) = model.forward(input, current_state);
-        current_state = Some(next_state);
-
-        let dims = output.dims();
-        let last_logits = output
-            .slice([0..1, (dims[1] - 1)..dims[1], 0..dims[2]])
-            .reshape([1, dims[2]]);
-
-        // 5. Muestreo con temperatura y Top-P/ Top-K
-        // Muestreo equilibrado (Top-P 0.9 para evitar repeticiones, Temp 0.4 para fluidez)
-        let next_token = sample_from_logits(last_logits, 0.4, 40, 0.9);
-
-        current_tokens.push(next_token);
-        generated_ids.push(next_token);
-
-        if let Some(t) = tokenizer.id_to_token(next_token) {
-            if t.contains('Ċ') {
-                print!("\n"); 
-            }
-        }
+    // Prefill context
+    for &id in &ids {
+        let input = Tensor::<B, 1, Int>::from_ints(vec![id as i32].as_slice(), device);
+        let _ = model.step(input, &mut conv_states, &mut mingru_states);
     }
 
-    tokenizer.decode(&generated_ids[seed_tokens.len()..])
+    let mut generated = Vec::new();
+    let mut last_id = *ids.last().unwrap();
+    
+    println!("--- Generando {} tokens ---", length);
+    let start_gen = Instant::now();
+
+    for _ in 0..length {
+        let input = Tensor::<B, 1, Int>::from_ints(vec![last_id as i32].as_slice(), device);
+        let logits = model.step(input, &mut conv_states, &mut mingru_states);
+        
+        let next_id = sample_from_logits(logits, 0.7);
+        generated.push(next_id);
+        last_id = next_id;
+        
+        let token = tokenizer.decode(&[next_id]);
+        print!("{}", token);
+        io::stdout().flush().unwrap();
+    }
+    
+    let elapsed = start_gen.elapsed().as_secs_f32();
+    let tps = length as f32 / elapsed;
+    println!("\n\n[Velocidad: {:.2} tokens/s | Tiempo: {:.2}s]", tps, elapsed);
+    tokenizer.decode(&generated)
 }
 
-
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("xLSTM Text Generation con Tokenizador");
-    println!("======================================\n");
-
-    // Parsear argumentos
     let args: Vec<String> = std::env::args().collect();
-    
-    if args.len() < 2 {
-        eprintln!("Uso: cargo run --bin mainchat -- <archivo.txt>");
-        eprintln!("Ejemplo: cargo run --bin mainchat -- input.txt");
-        std::process::exit(1);
+    let mut text_file = String::new();
+
+    if args.len() >= 2 {
+        text_file = args[1].clone();
     }
 
-
-    let text_file = &args[1];
-    let tokenizer_path = "tokenizer_mingru.json";
-    let model_path = "mingru_chat_model_mingru";
-
-    // Intentar leer vocab_size de argumentos o usar 2000 por defecto
-    let target_vocab_size = 1024;
-
-    // Cargar o crear tokenizador
-    let tokenizer = if Path::new(tokenizer_path).exists() {
-        println!("Cargando tokenizador existente...");
-        Tokenizer::load(tokenizer_path)?
-    } else {
-        println!("Entrenando nuevo tokenizador profesional (BPE) desde {}...", text_file);
-        let text = fs::read_to_string(text_file)?;
-        let tokenizer = Tokenizer::from_text(&text, target_vocab_size)?;
-        tokenizer.save(tokenizer_path)?;
-        tokenizer
-    };
-
-    println!("Tamaño del vocabulario: {}\n", tokenizer.vocab_size());
-
-    // Cargar texto de entrenamiento
-    println!("Cargando texto de entrenamiento...");
-    let text = fs::read_to_string(text_file)?;
-    let tokens = tokenizer.encode(&text);
-    println!("Tokens totales: {}\n", tokens.len());
-
-    // Hiperparámetros - PROTECCIÓN DE RAM
-    let vocab_size = tokenizer.vocab_size();
-    let hidden_size = 256; // Suficiente para BPE
-    let num_layers = 1;//let num_layers = 2;
-    let num_blocks = 3; //let num_blocks = 4;
-    let output_size = vocab_size; 
-    let dropout = 0.1;
-
-    let seq_length = 128; //32 Reducido para evitar explosión de memoria
-    let batch_size = 16; // Mucho más seguro para CPU
-    let stride = 128;     //seq_length 64 Salto igual al contexto
-    let num_epochs = 50;
-    let num_heads = 4;
-    // Learning rates por bloque (igual que main.rs)
-    let lr_config = LearningRateConfig::per_block_type(
-        1e-4, // sLSTM learning rate
-        1e-4, // mLSTM learning rate
-        3e-3, // minGRU learning rate
-        1e-4, // Other components learning rate
-    );
-
-    println!("Configuración del modelo:");
-    println!("  Bloques: {}", num_blocks);
-    println!("  Hidden size: {}", hidden_size);
-    println!("  Seq length: {}", seq_length);
-    println!("  Batch size: {}", batch_size);
-    println!("  Epochs: {}\n", num_epochs);
-
-    // Device
-   // let device = WgpuDevice::default();
-    let device = Default::default();
-    // Configuración del modelo - vocab_size es el input_size (one-hot)
-   // let config = XLstmconfig::new(vocab_size, hidden_size, num_layers, num_blocks, output_size)
-     //   .with_dropout(dropout)
-      //  .with_lstm_type(LstmType::Alternate)
-       // .with_use_projection(true);
-
-
-// Configuración
-     let config = XLstmconfig::new(vocab_size, hidden_size, num_layers, num_blocks, output_size)
-        .with_dropout(dropout)
-        .with_num_heads(num_heads)
-        //.with_lstm_type(LstmType::Alternate)
-        .with_lstm_type(LstmType::MINGRU) //::SLSTM ::SLSTM<--- Forzar solo mLSTM
-        .with_use_projection(true);   
-
-    // Verificar si existe un modelo guardado (una sola vez)
+    let model_path = "mingru_stable";
     let model_file = format!("{}.mpk", model_path);
-    let existe_modelo = Path::new(&model_file).exists();
-    
-    let mut continuar_entrenamiento = false;
-    if existe_modelo {
-        print!("¿Deseas seguir entrenando el modelo cargado? (s/n): ");
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        if input.trim().to_lowercase() == "s" {
-            continuar_entrenamiento = true;
+    let model_exists = Path::new(&model_file).exists();
+
+    let mut modo_inferencia = false;
+    if model_exists {
+        loop {
+            print!("¡Modelo MinGRU encontrado! ¿Deseas (e)ntrenar o (i)nferir solamente? [e/i]: ");
+            io::stdout().flush()?;
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice)?;
+            let choice = choice.trim().to_lowercase();
+            match choice.as_str() {
+                "i" => { modo_inferencia = true; break; }
+                "e" => { break; }
+                _ => {
+                    if choice.is_empty() { continue; }
+                    println!("  → Opción no reconocida. Escribe 'e' para entrenar o 'i' para solo inferencia.");
+                }
+            }
         }
     }
 
-    let model = if existe_modelo && !continuar_entrenamiento {
-        println!("¡Modelo encontrado! Cargando pesos para generación...");
-        let recorder = CompactRecorder::new();
-        let record = recorder
-            .load(model_file.into(), &device)
-            .map_err(|e| format!("Error al cargar modelo: {}", e))?;
-        
-        let loaded_model = config.init::<MyBackend>(&device).load_record(record);
-        println!("Modelo cargado exitosamente!\n");
-        loaded_model
-    } else {
-        let mut model = if continuar_entrenamiento {
-            println!("Cargando modelo previo para continuar entrenamiento...");
-            let recorder = CompactRecorder::new();
-            let record = recorder
-                .load(model_file.into(), &device)
-                .map_err(|e| format!("Error al cargar modelo: {}", e))?;
-            config.init::<MyBackend>(&device).load_record(record)
-        } else {
-            println!("No se encontró modelo guardado. Iniciando entrenamiento desde cero...\n");
-            config.init::<MyBackend>(&device)
-        };
+    let text = fs::read_to_string(text_file)?;
+    let tokenizer = CharTokenizer::from_text(&text);
+    let vocab_size = tokenizer.vocab_size();
+    println!("Vocab size (Characters): {}", vocab_size);
 
-        // Imprimir el primer embedding (one-hot vector) para inspección ANTES de procesar todo el texto
-        if !tokens.is_empty() {
-            let first_token_idx = tokens[0];
-            let first_token_str = tokenizer.id_to_token(first_token_idx).unwrap_or("?".to_string());
-            
-            println!("--- INSPECCIÓN DE EMBEDDING PROFESIONAL (BPE) ---");
-            println!("  Token (BPE): '{}'", first_token_str);
-            println!("  Token Index: {}", first_token_idx);
-            println!("  Dimensión del vector (Vocab size): {}", vocab_size);
-            println!("----------------------------------------------------\n");
-        }
+    let tokens = tokenizer.encode(&text);
+    let hidden_size = 256;
+    let num_layers = 3;
+    let mlp_expansion = 4;
+    let device = Default::default();
 
-        let num_sequences = tokens.len().saturating_sub(seq_length);
-        // Ajustar num_sequences según el stride
-        let num_actual_sequences = (num_sequences + stride - 1) / stride;
-        
-        println!("Tokens para procesar: {}", tokens.len());
-        println!("Secuencias únicas calculadas (Stride {}): {}\n", stride, num_actual_sequences);
+    let mut layers = Vec::new();
+    for _ in 0..num_layers {
+        layers.push(LanguageModelLayer {
+            conv: CausalConv1dConfig::new(hidden_size, 4).init(&device),
+            norm1: RMSNorm::init(hidden_size, true, false, 1e-4, true, &device),
+            mingru: MinGruConfig { input_features: hidden_size, expansion_factor: 2 }.init(&device),
+            norm2: RMSNorm::init(hidden_size, true, false, 1e-4, true, &device),
+            mlp: MLP {
+                l1: LinearConfig::new(hidden_size, hidden_size * mlp_expansion).init(&device),
+                l2: LinearConfig::new(hidden_size * mlp_expansion, hidden_size).init(&device),
+            },
+            dropout: burn::nn::DropoutConfig::new(0.1).init(),
+        });
+    }
 
-        // Crear modelo
-        println!("Creando modelo xLSTM con bloques alternados sLSTM/mLSTM...");
-        //let mut model = config.init::<MyBackend>(&device);
-        model.print_architecture();
-        println!();
+    let head = LinearConfig::new(hidden_size, vocab_size).with_bias(false).init(&device);
 
-        // Crear optimizador
-        let mut optim = AdamConfig::new()
-            .with_beta_1(0.9)
-            .with_beta_2(0.999)
-            .with_epsilon(1e-8)
-            .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
-            .init();
-
-        println!("Iniciando entrenamiento...\n");
-
-        // Training loo
-        let num_batches = num_actual_sequences.div_ceil(batch_size);
-
-        // Initialize Loss
-        let loss_fn = CrossEntropyLossConfig::new().init(&device);
-
-        for epoch in 0..num_epochs {
-            let mut total_loss = 0.0f32;
-            let mut num_losses = 0;
-            let mut correct = 0;
-            let mut total = 0;
-
-            for batch_idx in 0..num_batches {
-                let current_batch_start_seq = batch_idx * batch_size;
-                let current_batch_size = (batch_size).min(num_actual_sequences - current_batch_start_seq);
-                let epoch_start = Instant::now();
-                if current_batch_size == 0 {
-                    break;
-                }
-
-                // Generar batch instantáneo (usando Inner Backend para ahorrar RAM)
-                let (input_batch, target_batch) = create_batch::<MyBackend>(
-                    &tokens,
-                    current_batch_start_seq * stride,
-                    current_batch_size,
-                    seq_length,
-                    stride,
-                    vocab_size,
-                    &device,
-                );
-
-                // Forward pass
-                let (logits, _) = model.forward(input_batch.clone(), None);
-
-                // --- OPTIMIZACIÓN: COSTE Y ACCURACY NATIVOS ---
-                
-                // Aplanar para cálculo eficiente
-                let logits_flat: Tensor<MyBackend, 2> = logits.reshape([current_batch_size * seq_length, vocab_size]);
-                let target_flat = target_batch.reshape::<1, _>([current_batch_size * seq_length]);
-
-                // Usar CrossEntropyLoss nativo de Burn (evita one-hot y es más estable)
-                let loss_tensor = loss_fn.forward(logits_flat.clone(), target_flat.clone());
-                
-                let loss_f32 = loss_tensor.clone().into_data().as_slice::<f32>().unwrap()[0];
-                total_loss += loss_f32;
-                num_losses += 1;
-
-                // 3. Calcular Accuracy nativo sobre toda la secuencia
-                let predicted_indices = logits_flat.argmax(1).reshape([current_batch_size * seq_length]);
-                let matches = predicted_indices.equal(target_flat);
-                let correct_batch = matches.int().sum().into_data().as_slice::<i64>().unwrap()[0];
-                
-                correct += correct_batch as usize;
-                total += current_batch_size * seq_length;
-
-                // --- FIN OPTIMIZACIÓN ---
-
-                let grads = loss_tensor.backward();
-                model = model.optimizer_step(&lr_config, &mut optim, grads);
-
-                // Reportar progreso cada 10 batches para que se vea el movimiento fluido
-                if batch_idx % 1 == 0 || batch_idx == num_batches - 1 {
-                    let elapsed = epoch_start.elapsed().as_secs_f32();
-                    print!("\r  -> Batch [{}/{}] Loss: {:.4}  Acc: {:.2}% ({:.1}s)    ", 
-                        batch_idx + 1, num_batches, total_loss / (batch_idx + 1) as f32,
-                       100.0 * correct as f32 / total as f32, elapsed);
-                    io::stdout().flush().unwrap();
-                }
-            }
-            println!(); 
-
-            let avg_loss = total_loss / num_losses as f32;
-            let accuracy = 100.0 * correct as f32 / total as f32;
-
-            if epoch % 1 == 0 {
-                println!(
-                    "Epoch [{:3}/{}], Loss: {:.4}, Accuracy: {:.2}%",
-                    epoch + 1,
-                    num_epochs,
-                    avg_loss,
-                    accuracy
-                );
-
-                // GUARDADO POR ÉPOCA (ADICIONAL)
-                let recorder = CompactRecorder::new();
-                let _ = model.clone().save_file(model_path, &recorder);
-
-                // Generar texto de ejemplo con temperatura y SEMILLA ALEATORIA
-                if epoch % 1 == 0 {
-                    use rand::Rng;
-                    let mut rng = rand::rng();
-                    
-                    // Elegir un punto de inicio al azar para la semilla (dejando espacio para 5 tokens)
-                    let start_random = if tokens.len() > 10 {
-                        rng.random_range(0..tokens.len() - 6)
-                    } else {
-                        0
-                    };
-                    
-                    let seed_tokens: Vec<usize> = tokens[start_random..start_random + 5].to_vec();
-                    let seed = tokenizer.decode(&seed_tokens)
-                        .replace('▁', " ")
-                        .replace('Ġ', " ")
-                        .replace('Ċ', "\n")
-                        .replace("  ", " ");
-                    
-                    println!("  -> Generando con semilla al azar: '{}'", seed.trim());
-                    let gen_start = Instant::now();
-                    let generated = generate_text(
-                        &model, // Pasamos referencia sin clonar
-                        &tokenizer,
-                        &seed,
-                        100, // Generar 100 palabras para ver la capacidad real
-                        vocab_size,
-                        &device,
-                    );
-                    println!("  Generado ({:.2}s): {}\n", gen_start.elapsed().as_secs_f32(), generated);
-
-                    // --- LOGGER: Guardar en archivo para ver la evolución ---
-                    let log_path = "training_history_mlstm.txt";
-                    let mut file = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(log_path)?;
-                    
-                    let (sl_lr, ml_lr, mg_lr, ot_lr) = match &lr_config {
-                        LearningRateConfig::PerBlockType { slstm_lr, mlstm_lr, mingru_lr, other_lr } => 
-                            (*slstm_lr, *mlstm_lr, *mingru_lr, *other_lr),
-                        LearningRateConfig::Uniform(lr) => (*lr, *lr, *lr, *lr),
-                        LearningRateConfig::PerBlock { block_lrs, other_lr } => {
-                            (block_lrs.first().copied().unwrap_or(0.0), 
-                             block_lrs.get(1).copied().unwrap_or(0.0),
-                             0.0, 
-                             *other_lr)
-                        }
-                    };
-
-                    writeln!(file, "====================================================")?;
-                    writeln!(file, "Config: {:?}", config)?;
-                    writeln!(file, "Config: vocab_size={}, hidden_size={}, num_layers={}, num_blocks={}, output_size={}, dropout={}, seq_length={}, batch_size={}, stride={}, num_epochs={}, num_heads={}
-                    ====================================================
-                    Learning rates: sLSTM={}, mLSTM={}, minGRU={}, other={}
-                    ====================================================", 
-                    vocab_size, hidden_size, num_layers, num_blocks, output_size, dropout, 
-                    seq_length, batch_size, stride, num_epochs, num_heads,
-                    sl_lr, ml_lr, mg_lr, ot_lr)?;
-
-                    
-                    writeln!(file, "====================================================")?;
-                    writeln!(file, "ÉPOCA: {} | LOSS: {:.4} | ACC: {:.2}%", epoch + 1, avg_loss, accuracy)?;
-                    writeln!(file, "SEMILLA: {}", seed)?;
-                    writeln!(file, "----------------------------------------------------")?;
-                    writeln!(file, "{}", generated)?;
-                    writeln!(file, "====================================================\n\n")?;
-                }
-            }
-        }
-
-        println!("\n¡Entrenamiento completado!");
-
-        // Guardar modelo
-        println!("Guardando modelo...");
-        let recorder = CompactRecorder::new();
-        model
-            .clone()
-            .save_file(model_path, &recorder)
-            .map_err(|e| format!("Error al guardar modelo: {}", e))?;
-        println!("Modelo guardado en: {}.mpk\n", model_path);
-
-        model
+    let mut model: MinGruChatModel<MyBackend> = MinGruChatModel {
+        embedding: EmbeddingConfig::new(vocab_size, hidden_size).init(&device),
+        layers,
+        norm: RMSNorm::init(hidden_size, true, false, 1e-4, true, &device),
+        head,
+        vocab_size,
+        hidden_size,
+        num_layers,
     };
 
-    // Modo interactivo - Loop para generar texto
-    println!("\n╔════════════════════════════════════════════════════════╗");
-    println!("║        MODO INTERACTIVO - GENERACIÓN DE TEXTO         ║");
-    println!("╚════════════════════════════════════════════════════════╝\n");
-    println!("Comandos:");
-    println!("  - Escribe un texto semilla y presiona Enter para generar");
-    println!("  - Escribe 'salir' o 'exit' para terminar");
-    println!("  - Escribe 'len <n>' para cambiar la longitud (ej: len 300)");
-    println!("  - Escribe 'auto' para generar con semilla automática\n");
+    if model_exists {
+        println!("Cargando pesos del modelo...");
+        let record = CompactRecorder::new().load(model_file.into(), &device)?;
+        model = model.load_record(record);
+    } else {
+        println!("No se encontró un modelo previo. Iniciando desde cero.");
+    }
 
-    let mut current_gen_length = 200;
+    if modo_inferencia {
+        println!("\n╔════════════════════════════════════════════════════════╗");
+        println!("║        MODO INTERACTIVO - MinGRU Chat System          ║");
+        println!("╚════════════════════════════════════════════════════════╝\n");
+        println!("Comandos:");
+        println!("  - Escribe tu semilla para generar texto.");
+        println!("  - 'len <n>': Cambia la cantidad de tokens a generar.");
+        println!("  - 'salir' o 'exit' para terminar.\n");
 
-    loop {
-        print!("Semilla > ");
-        io::stdout().flush()?;
+        let mut current_len = 100;
+        loop {
+            print!("Semilla [len: {}] > ", current_len);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim();
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
+            if input.eq_ignore_ascii_case("salir") || input.eq_ignore_ascii_case("exit") {
+                break;
+            }
 
-        if input.is_empty() {
-            continue;
-        }
+            if input.to_lowercase().starts_with("len ") {
+                if let Ok(new_len) = input[4..].trim().parse::<usize>() {
+                    current_len = new_len;
+                    println!("  -> Longitud cambiada a: {} tokens.\n", current_len);
+                    continue;
+                }
+            }
 
-        if input.eq_ignore_ascii_case("salir") || input.eq_ignore_ascii_case("exit") {
-            println!("\n¡Hasta luego!");
-            break;
-        }
-
-        if input.to_lowercase().starts_with("len ") {
-            if let Ok(new_len) = input[4..].trim().parse::<usize>() {
-                current_gen_length = new_len;
-                println!("  -> Longitud de generación cambiada a: {} tokens\n", current_gen_length);
+            if input.is_empty() {
                 continue;
             }
+
+            println!("\n--- TEXTO GENERADO ---");
+            generate_text(&model.valid(), &tokenizer, input, current_len, &device);
+            println!("----------------------\n");
         }
+        return Ok(());
+    }
 
-        let seed = if input.eq_ignore_ascii_case("auto") {
-            text.chars().take(20).collect::<String>()
-        } else {
-            input.to_string()
-        };
+    let mut optim = AdamConfig::new()
+        .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
+        .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
+        .init();
 
-        println!("\n┌─ Generando texto...");
-        println!("│ Semilla: {}", seed);
-        let gen_start = Instant::now();
-        let generated = generate_text(
-            &model.valid(),
-            &tokenizer,
-            &seed,
-            current_gen_length,
-            vocab_size,
-            &device,
-        );
-        let gen_elapsed = gen_start.elapsed().as_secs_f32();
-        println!("└─ Longitud: {} caracteres | Tiempo: {:.2}s\n", current_gen_length, gen_elapsed);
+    let loss_fn = CrossEntropyLossConfig::new().init(&device);
+    let batch_size = 32;
+    let seq_len = 128;
+    let stride = 128;
+    let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
 
-        println!("╭─────────────────────────────────────────────────────────╮");
-        println!("│ TEXTO GENERADO:");
-        println!("├─────────────────────────────────────────────────────────┤");
+    let hidden_size_expanded = hidden_size * 2; // expansion_factor = 2
+    
+    println!("Iniciando entrenamiento ESTABLE (3 capas, Estilo MinGru con h_0 persistente)...");
+    // Estado h_0 persistente (como self.h_0 en Python notebook)
+    let mut h_states: Option<Vec<Vec<MinGruState<MyBackend>>>> = None;
+    
+    for epoch in 0..25 {
+        let mut total_loss = 0.0;
+        let start_epoch = Instant::now();
         
-        // Dividir en líneas de máximo 55 caracteres para mejor visualización
-        let mut chars_count = 0;
-        print!("│ ");
-        for ch in generated.chars() {
-            print!("{}", ch);
-            chars_count += 1;
-            if ch == '\n' || chars_count >= 55 {
-                if ch != '\n' {
-                    println!();
-                }
-                print!("│ ");
-                chars_count = 0;
+        // Reset h_0 al inicio de cada epoch (como Python: self.h_0 = zeros en __init__)
+        h_states = None;
+        
+        for b in 0..num_batches {
+            let start_idx = b * batch_size * stride;
+            if start_idx + batch_size * stride + seq_len >= tokens.len() { break; }
+            
+            let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
+            
+            let (logits, new_states) = model.forward(x, h_states.take());
+            
+            // Persistir h_0 detached para el próximo batch (evita backprop cross-batch)
+            h_states = Some(new_states.into_iter().map(|layer_s| {
+                layer_s.into_iter().map(|s| MinGruState::new(s.hidden.detach())).collect()
+            }).collect());
+            
+            let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
+            let targets_flat = y.reshape([batch_size * seq_len]);
+            
+            let loss = loss_fn.forward(logits_flat, targets_flat);
+            let current_loss = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+            
+            if current_loss.is_nan() {
+                println!("\n[!] Error: Loss es NaN en Batch {}. Abortando.", b);
+                return Ok(());
+            }
+
+            total_loss += current_loss;
+            
+            let grads = loss.backward();
+            let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
+            model = optim.step(6e-4, model, grads_p); 
+            
+            if b % 10 == 0 {
+                let elapsed = start_epoch.elapsed().as_secs_f32();
+                let batch_time = elapsed / (b + 1) as f32;
+                let tps = ((b + 1) * batch_size * seq_len) as f32 / elapsed;
+                print!("\rEpoch {}/25 | Batch {}/{} | Loss: {:.4} | Time/Batch: {:.3}s | Speed: {:.1} tok/s", 
+                    epoch+1, b, num_batches, total_loss / (b+1) as f32, batch_time, tps);
+                io::stdout().flush().unwrap();
             }
         }
-        if chars_count > 0 {
-            println!();
+        
+        println!("\nEpoch {} completa en {:.2}s. Loss promedio: {:.4}", epoch+1, start_epoch.elapsed().as_secs_f32(), total_loss / num_batches as f32);
+        
+        let recorder = CompactRecorder::new();
+        model.clone().save_file(model_path, &recorder)?;
+
+        if (epoch + 1) % 5 == 0 {
+            let checkpoint_name = format!("{}_epoch_{}", model_path, epoch + 1);
+            model.clone().save_file(&checkpoint_name, &recorder)?;
+            println!(" -> Checkpoint guardado: {}.mpk", checkpoint_name);
         }
-        println!("╰─────────────────────────────────────────────────────────╯\n");
+
+        if epoch % 1 == 0 {
+            println!("--- Generación de prueba ---");
+            generate_text(&model.clone().valid(), &tokenizer, "The ", 100, &device);
+            println!("\n---------------------------");
+        }
     }
 
     Ok(())

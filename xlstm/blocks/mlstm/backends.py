@@ -120,7 +120,7 @@ def recurrent_step_stabilized_simple(
     """
     B, NH, S, DH = q.shape
     # projections
-    q, k, v = q.squeeze_(2).unsqueeze(-1), k.squeeze_(2).unsqueeze(-1), v.squeeze_(2).unsqueeze(-1)  # (B, NH, DH, 1)
+    q, k, v = q.squeeze(2).unsqueeze(-1), k.squeeze(2).unsqueeze(-1), v.squeeze(2).unsqueeze(-1)  # (B, NH, DH, 1)
 
     # gates
     log_fg_act = torch.nn.functional.logsigmoid(fgate_preact)  # (B, NH, 1, 1)

@@ -10,7 +10,7 @@ use burn::module::{Module, Param};
 use burn::config::Config;
 use burn::tensor::Distribution;
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct LinearHeadwiseExpandConfig {
     pub in_features: usize,
     pub num_heads: usize,
@@ -24,26 +24,13 @@ impl LinearHeadwiseExpandConfig {
     pub fn out_features(&self) -> usize {
         (self.expand_factor_up * self.in_features as f64).round() as usize
     }
-}
 
-#[derive(Module, Debug)]
-pub struct LinearHeadwiseExpand<B: Backend> {
-    /// Weight: (num_heads, out_per_head, in_per_head)
-    pub weight: Param<Tensor<B, 3>>,
-    /// Optional bias: (out_features,)
-    pub bias: Option<Param<Tensor<B, 1>>>,
-    pub num_heads: usize,
-    pub in_features: usize,
-    pub out_features: usize,
-}
-
-impl LinearHeadwiseExpandConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> LinearHeadwiseExpand<B> {
         let out_features = self.out_features();
         let out_per_head = out_features / self.num_heads;
         let in_per_head = self.in_features / self.num_heads;
 
-        // small init: std = sqrt(2 / (5 * in_per_head))
+        // Small init: std = sqrt(2 / (5 * in_per_head))
         let std = (2.0 / (5.0 * in_per_head as f64)).sqrt();
         let weight = Tensor::random(
             [self.num_heads, out_per_head, in_per_head],
@@ -67,31 +54,40 @@ impl LinearHeadwiseExpandConfig {
     }
 }
 
+#[derive(Module, Debug)]
+pub struct LinearHeadwiseExpand<B: Backend> {
+    pub weight: Param<Tensor<B, 3>>,
+    pub bias: Option<Param<Tensor<B, 1>>>,
+    pub num_heads: usize,
+    pub in_features: usize,
+    pub out_features: usize,
+}
+
 impl<B: Backend> LinearHeadwiseExpand<B> {
-    /// Forward: input shape (..., in_features) → output (..., out_features).
-    /// The last dim is split into (num_heads, in_per_head), each head is projected,
-    /// and the result is concatenated back.
+    /// Forward: input shape (B, S, in_features) -> output (B, S, out_features).
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let [b, s, _f] = x.dims();
         let in_per_head = self.in_features / self.num_heads;
-        let out_per_head = self.out_features / self.num_heads;
-
-        // (B, S, F) → (B, S, NH, in_per_head) → (B, NH, S, in_per_head)
+        
+        // 1. Preparamos X: (B, S, TotalIn) -> (B, S, H, InH) -> (B, H, S, InH)
+        // Esto permite que el matmul sea head-wise
         let x = x.reshape([b, s, self.num_heads, in_per_head]).swap_dims(1, 2);
 
-        // For each head h: out[b,h,s,:] = x[b,h,s,:] @ weight[h].T
-        // weight: (NH, O, I), x: (B, NH, S, I)
-        // We want: (B, NH, S, I) @ (NH, I, O) → (B, NH, S, O) via batched matmul
-        let w = self.weight.val().unsqueeze_dim::<4>(0); // (1, NH, O, I)
-        let w = w.swap_dims(2, 3); // (1, NH, I, O)
-        let out = x.matmul(w); // (B, NH, S, O)
+        // 2. Preparamos W: (H, OutH, InH) -> (H, InH, OutH) -> (1, H, InH, OutH)
+        // swap_dims(1, 2) equivale a transponer la matriz de cada cabeza (.T en Python)
+        let w = self.weight.val()
+            .swap_dims(1, 2)
+            .unsqueeze_dim(0);
 
-        // (B, NH, S, O) → (B, S, NH, O) → (B, S, NH*O)
-        let out = out.swap_dims(1, 2).reshape([b, s, self.num_heads * out_per_head]);
+        // 3. Matmul Headwise: (B, H, S, InH) @ (1, H, InH, OutH) -> (B, H, S, OutH)
+        let out = x.matmul(w); 
 
+        // 4. Recombinar: (B, H, S, OutH) -> (B, S, H, OutH) -> (B, S, TotalOut)
+        let out = out.swap_dims(1, 2).reshape([b, s, self.out_features]);
+
+        // 5. Bias con broadcasting limpio (1, 1, TotalOut)
         if let Some(bias) = &self.bias {
-            out + bias.val().unsqueeze_dim::<2>(0).unsqueeze_dim::<3>(0)
-                .reshape([1, 1, self.out_features])
+            out + bias.val().reshape([1, 1, self.out_features])
         } else {
             out
         }

@@ -1,0 +1,8 @@
+Ajustar parámetros (Enter para mantener actual):
+Cant. Bloques [4]: 5
+Cant. Heads [8]: 
+Learning Rate [0.0015]: 
+Épocas [30]: 
+Batch Size [16]: 
+Temperatura [0.8]: 0.6
+Repetition Penalty [1.1]: 

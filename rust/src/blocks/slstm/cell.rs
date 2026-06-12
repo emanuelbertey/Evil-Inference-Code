@@ -14,7 +14,7 @@ use burn::prelude::*;
 use burn::module::{Module, Param};
 use burn::config::Config;
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct SLSTMCellConfig {
     pub hidden_size: usize,
     #[config(default = 4)]

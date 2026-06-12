@@ -2,16 +2,11 @@
 
 use burn::prelude::*;
 
-/// Linearly spaced bias initialization across dimensions.
-/// Fills param values from `start` to `end` evenly spaced.
 pub fn bias_linspace_init<B: Backend>(start: f32, end: f32, n_dims: usize, device: &B::Device) -> Tensor<B, 1> {
-    if n_dims == 1 {
-        return Tensor::from_floats([start], device);
-    }
-    let vals: Vec<f32> = (0..n_dims)
-        .map(|i| start + (end - start) * (i as f32) / ((n_dims - 1) as f32))
-        .collect();
-    Tensor::from_floats(vals.as_slice(), device)
+    if n_dims == 0 { return Tensor::zeros([0], device); }
+    if n_dims == 1 { return Tensor::zeros([1], device) + start; }
+    let step = (end - start) / (n_dims - 1) as f32;
+    Tensor::<B, 1, Int>::arange(0..n_dims as i64, device).float() * step + start
 }
 
 /// Standard deviation for "small init" — Transformers without Tears.

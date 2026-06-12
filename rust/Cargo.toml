@@ -7,15 +7,32 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
-burn = { version = "0.16.1", features = ["ndarray", "wgpu", "autodiff", "train"] }
-burn-autodiff = "0.16.1"
-burn-ndarray = "0.16.1"
-burn-wgpu = "0.16.1"
+
+
+#burn = { version = "0.20.1", features = ["ndarray", "wgpu", "autodiff", "train"] }
+#burn-autodiff = "0.20.1"
+#burn-ndarray = "0.20.1"
+#burn-wgpu = "0.20.1"
+#burn-cuda = "0.20.1"
+
+burn = { version = "0.21.0-pre.4", features = ["autodiff", "train"] }
+burn-autodiff = "0.21.0-pre.4"
+burn-flex = "0.21.0-pre.4"
+burn-wgpu = "0.21.0-pre.4"
+burn-cuda = "0.21.0-pre.4"
 tokenizers = "0.20"
 rand = "0.9"
 num-traits = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[[bin]]
+name = "large_chat"
+path = "xorIA/large_chat.rs"
+
+[[bin]]
+name = "large_chat_cuda"
+path = "xorIA/large_chat_cuda.rs"
 
 [[bin]]
 name = "msltmchat"
@@ -30,9 +47,160 @@ name = "msltmchat_gpu"
 path = "xorIA/msltmchat (webgpu).rs"
 
 [[bin]]
-name = "xlstm-demo"
+name = "main"
 path = "src/main.rs"
 
 [[bin]]
 name = "mlstm_equivalence"
 path = "xorIA/bin/mlstm_equivalence.rs"
+
+
+[[bin]]
+name = "test_cumsum"
+path = "xorIA/bin/test_cumsum.rs"
+
+
+
+[[bin]]
+name = "test_conv"
+path = "xorIA/bin/test_conv.rs"
+
+
+
+[[bin]]
+name = "slstm_equivalence"
+path = "xorIA/bin/slstm_equivalence.rs"
+
+
+
+[[bin]]
+name = "pro_trainer"
+path = "xorIA/pro_trainer.rs"
+
+
+
+[[bin]]
+name = "mlstm_stability_test"
+path = "xorIA/bin/mlstm_stability.rs"
+
+
+
+[[bin]]
+name = "mlstm_grad_stability"
+path = "xorIA/bin/mlstm_grad_stability.rs"
+
+
+
+[[bin]]
+name = "mlstm_copy_test"
+path = "xorIA/bin/mlstm_copy_test.rs"
+
+
+
+[[bin]]
+name = "burn_comparison"
+path = "xorIA/bin/burn_device_comparison.rs"
+
+[[bin]]
+name = "wiki_mlstm"
+path = "xorIA/wiki_mlstm.rs"
+
+[[bin]]
+name = "msltmchat_cuda"
+path = "xorIA/msltmchat (cuda).rs"
+
+[[bin]]
+name = "dual_test"
+path = "xorIA/bin/dual_test.rs"
+
+[[bin]]
+name = "test_mingru"
+path = "xorIA/bin/test_mingru.rs"
+
+[[bin]]
+name = "test_slstm"
+path = "xorIA/bin/test_slstm.rs"
+
+[[bin]]
+name = "test_slstm2"
+path = "xorIA/bin/test_slstm2.rs"
+
+[[bin]]
+name = "xlstm_large_test"
+path = "xorIA/bin/xlstm_large_test.rs"
+
+[[bin]]
+name = "xlstm_flex_test"
+path = "xorIA/bin/xlstm_flex_test.rs"
+
+[[bin]]
+name = "mingruchat"
+path = "xorIA/mingruchat.rs"
+
+[[bin]]
+name = "mingru_equivalence"
+path = "xorIA/bin/mingru_equivalence.rs"
+
+[[bin]]
+name = "mingruchat_cuda"
+path = "xorIA/mingruchat_cuda.rs"
+
+[[bin]]
+name = "mingruchat_wgpu"
+path = "xorIA/mingruchat_wgpu.rs"
+
+[[bin]]
+name = "compare_variants"
+path = "xorIA/bin/compare_variants.rs"
+
+[[bin]]
+name = "compare_primitives"
+path = "xorIA/bin/compare_primitives.rs"
+
+[[bin]]
+name = "test_mingru_lib"
+path = "xorIA/bin/test_mingru_lib.rs"
+
+[[bin]]
+name = "test_minlstm_lib"
+path = "xorIA/bin/test_minlstm_lib.rs"
+
+[[bin]]
+name = "minlstmchat"
+path = "xorIA/minlstmchat.rs"
+
+[[bin]]
+name = "burn_comparison_mingru"
+path = "xorIA/bin/burn_device_comparison_mingru.rs"
+
+[[bin]]
+name = "test_large_binary"
+path = "testbin_model/src/main.rs"
+
+[[bin]]
+name = "test_large_binary_flex"
+path = "testbin_model/src/main_flex.rs"
+
+[[bin]]
+name = "sequential_test"
+path = "testbin_model/src/sequential.rs"
+
+[[bin]]
+name = "bitlinear_comparison"
+path = "xorIA/bin/bitlinear_comparison.rs"
+
+[[bin]]
+name = "lstm_chat_test_dual"
+path = "xorIA/bin/lstm_chat_test_dual.rs"
+
+[[bin]]
+name = "transformer_chat"
+path = "xorIA/transformer_chat.rs"
+
+[[bin]]
+name = "transformer_chat_cuda"
+path = "xorIA/transformer_chat_cuda.rs"
+
+[[bin]]
+name = "bit_transformer"
+path = "xorIA/bit_transformer/main.rs"

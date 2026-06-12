@@ -19,7 +19,7 @@ use crate::blocks::xlstm_block::{
     XLSTMBlock, XLSTMBlockMlstmConfig, XLSTMBlockSlstmConfig, XLSTMBlockState,
 };
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct XLSTMBlockStackConfig {
     pub embedding_dim: usize,
     #[config(default = 1)]
@@ -128,6 +128,7 @@ impl XLSTMBlockStackConfig {
                     weight: true,
                     bias: false,
                     eps: 1e-5,
+                    residual_weight: true,
                 }
                 .init(device),
             )

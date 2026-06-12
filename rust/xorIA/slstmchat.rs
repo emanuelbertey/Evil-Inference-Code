@@ -245,11 +245,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let text_file = &args[1];
-    let tokenizer_path = "tokenizer.json";
+    let tokenizer_path = "tokenizer_SLSTM.json";
     let model_path = "slstm_chat_model"; 
 
     // Load or create tokenizer
-    let target_vocab_size = 2048;
+    let target_vocab_size = 1024;
     let tokenizer = if Path::new(tokenizer_path).exists() {
         println!("Cargando tokenizador existente...");
         Tokenizer::load(tokenizer_path)?
@@ -270,9 +270,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Model configuration
     let embedding_dim = 256;
-    let num_blocks = 3;
+    let num_blocks = 1;
     let seq_length = 128;
-    let batch_size = 16;
+    let batch_size = 24;
     let num_epochs = 50;
 
     let device = Default::default();
@@ -317,7 +317,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             dropout: 0.1,
             mlstm_block: Some(mlstm_cfg),
             slstm_block: Some(slstm_cfg),
-            slstm_at: vec![0, 1, 2],
+         //   slstm_at: vec![0, 1, 2],
+            slstm_at: vec![0],
         },
     };
 
@@ -379,7 +380,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let grads = loss.backward();
             let grads = GradientsParams::from_grads(grads, &model);
             
-            let lr = 2e-4; // Stability for sLSTM
+            let lr = 2e-3; // Stability for sLSTM
             model = optim.step(lr, model, grads);
 
             if batch_idx % 5 == 0 || batch_idx == num_batches - 1 {

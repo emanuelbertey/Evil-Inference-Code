@@ -5,7 +5,7 @@ use burn::config::Config;
 use super::layer::SLSTMLayerConfig;
 use crate::components::feedforward::GatedFeedForwardConfig;
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct SLSTMBlockConfig {
     pub slstm: SLSTMLayerConfig,
     pub feedforward: Option<GatedFeedForwardConfig>,

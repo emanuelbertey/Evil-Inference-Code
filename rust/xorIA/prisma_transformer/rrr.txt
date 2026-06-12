@@ -1,0 +1,59 @@
+config.py	Nuevo campo quant_mode: "q1_0" o "tq2_0"
+layers.py	Dos clases separadas: Q1_0_Linear (1 bit, extrae con >> bit_offset & 1) y TQ2_0_Linear (2 bits, extrae con >> (l*2) & 3 - 1). Factory make_linear()
+attention.py	Usa make_linear() con config.quant_mode para Q/K/V/O
+transformer.py	Pasa quant_mode al FeedForward
+main.py	Ejecuta ambos modos consecutivamente para comparar
+
+[ignoring loop detection]
+[Output]:
+============================================================
+--- Generacion con Prisma Transformer [Q1_0 — 1 bit (+1/-1)] ---
+
+[Prompt] Evaluando prompt de longitud 5
+Token predicto: 926 | KV Cache K=torch.Size([1, 4, 5, 8])
+
+[Generacion] Paso 1: Evaluando solo 1 token nuevo...
+Token predicto: 415 | KV Cache K=torch.Size([1, 4, 6, 8])
+
+[Generacion] Paso 2: Evaluando solo 1 token nuevo...
+Token predicto: 415 | KV Cache K=torch.Size([1, 4, 7, 8])
+============================================================
+
+============================================================
+--- Generacion con Prisma Transformer [TQ2_0 — 1.58 bit (-1/0/+1)] ---
+
+[Prompt] Evaluando prompt de longitud 5
+Token predicto: 425 | KV Cache K=torch.Size([1, 4, 5, 8])
+
+[Generacion] Paso 1: Evaluando solo 1 token nuevo...
+Token predicto: 56 | KV Cache K=torch.Size([1, 4, 6, 8])
+
+[Generacion] Paso 2: Evaluando solo 1 token nuevo...
+Token predicto: 138 | KV Cache K=torch.Size([1, 4, 7, 8])
+============================================================
+
+============================================================
+--- Generacion con Prisma Transformer [Q1_0 — 1 bit (+1/-1)] ---
+
+[Prompt] Evaluando prompt de longitud 5
+Token predicto: 790 | KV Cache K=torch.Size([1, 4, 5, 8])
+
+[Generacion] Paso 1: Evaluando solo 1 token nuevo...
+Token predicto: 27 | KV Cache K=torch.Size([1, 4, 6, 8])
+
+[Generacion] Paso 2: Evaluando solo 1 token nuevo...
+Token predicto: 140 | KV Cache K=torch.Size([1, 4, 7, 8])
+============================================================
+
+============================================================
+--- Generacion con Prisma Transformer [TQ2_0 — 1.58 bit (-1/0/+1)] ---
+
+[Prompt] Evaluando prompt de longitud 5
+Token predicto: 276 | KV Cache K=torch.Size([1, 4, 5, 8])
+
+[Generacion] Paso 1: Evaluando solo 1 token nuevo...
+Token predicto: 94 | KV Cache K=torch.Size([1, 4, 6, 8])
+
+[Generacion] Paso 2: Evaluando solo 1 token nuevo...
+Token predicto: 136 | KV Cache K=torch.Size([1, 4, 7, 8])
+============================================================

@@ -93,4 +93,43 @@ fn main() {
     let [b, s, v] = logits.dims();
     println!("Output logits shape: [{}, {}, {}]", b, s, v);
     println!("\n✓ xLSTM model built and ran successfully!");
+
+    // ── Configure a small xLSTMLarge model ──────────────────────────────
+    println!("\n--- Testing xLSTMLarge ---");
+    use xlstm::blocks::xlstm_large::XLSTMLargeConfig;
+    use xlstm::blocks::xlstm_large::model::XLSTMLarge;
+
+    let large_config = XLSTMLargeConfig {
+        embedding_dim: 64,
+        num_heads: 4,
+        num_blocks: 2,
+        vocab_size: 256,
+        use_bias: true,
+        norm_eps: 1e-6,
+        norm_reduction_force_float32: true,
+        add_out_norm: true,
+        qk_dim_factor: 0.5,
+        v_dim_factor: 1.0,
+        mlstm_backend: xlstm::blocks::xlstm_large::config::MLSTMBackendConfig::new(),
+        ffn_proj_factor: 2.6667,
+        ffn_round_up_to_multiple_of: 64,
+        gate_soft_cap: Some(15.0),
+        output_logit_soft_cap: Some(30.0),
+        weight_mode: "single".to_string(),
+    };
+
+    println!("Building xLSTMLarge model...");
+    let large_model: XLSTMLarge<MyBackend> = XLSTMLarge::init(&large_config, &device);
+
+    let input_large_data: Vec<i32> = (0..batch_size * seq_len)
+        .map(|i| i % vocab_size as i32)
+        .collect();
+    let input_large = Tensor::<MyBackend, 1, Int>::from_ints(input_large_data.as_slice(), &device)
+        .reshape([batch_size, seq_len]);
+
+    println!("Running forward pass for xLSTMLarge...");
+    let (logits_large, _) = large_model.forward(input_large, None);
+    let [bl, sl, vl] = logits_large.dims();
+    println!("xLSTMLarge Output logits shape: [{}, {}, {}]", bl, sl, vl);
+    println!("✓ xLSTMLarge model built and ran successfully!");
 }

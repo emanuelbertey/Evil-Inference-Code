@@ -220,7 +220,7 @@ fn generate_text<B: Backend>(
         let (logits, next_state) = model.step(input, current_state);
         current_state = next_state;
 
-        let next_token = sample_from_logits(logits, 0.4, 40, 0.9);
+        let next_token = sample_from_logits(logits, 0.8, 40, 0.92);
         result_ids.push(next_token);
         last_id = next_token;
         
@@ -326,12 +326,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     let mut modo_inferencia = false;
     if existe_modelo {
-        print!("¡Modelo encontrado! ¿Deseas (e)ntrenar o (i)nferir solamente? [e/i]: ");
-        io::stdout().flush()?;
-        let mut choice = String::new();
-        io::stdin().read_line(&mut choice)?;
-        if choice.trim().to_lowercase() == "i" {
-            modo_inferencia = true;
+        // Drenar cualquier byte residual en stdin (típico al lanzar con `cargo run` en Windows)
+        loop {
+            print!("¡Modelo encontrado! ¿Deseas (e)ntrenar o (i)nferir solamente? [e/i]: ");
+            io::stdout().flush()?;
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice)?;
+            let choice = choice.trim().to_lowercase();
+            match choice.as_str() {
+                "i" => { modo_inferencia = true; break; }
+                "e" => { break; }
+                _ => {
+                    // Si llegó vacío o con basura (residuo de cargo run), reintentar
+                    if choice.is_empty() {
+                        continue;
+                    }
+                    println!("  → Opción no reconocida '{}'. Por favor escribe 'e' o 'i'.", choice);
+                }
+            }
         }
     }
 
@@ -393,9 +405,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let grads = loss.backward();
                 let grads = GradientsParams::from_grads(grads, &model);
                 
-                let lr = 1e-4; 
+                let lr = 8e-4; 
                 model = optim.step(lr, model, grads);
-
+ 
                 if batch_idx % 5 == 0 || batch_idx == num_batches - 1 {
                     let elapsed_total = total_start.elapsed().as_secs_f32();
                     let batches_done = epoch * num_batches + batch_idx + 1;

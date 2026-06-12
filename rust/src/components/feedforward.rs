@@ -6,7 +6,7 @@ use burn::module::Module;
 use burn::config::Config;
 use burn::nn;
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct GatedFeedForwardConfig {
     pub embedding_dim: usize,
     #[config(default = 1.3)]

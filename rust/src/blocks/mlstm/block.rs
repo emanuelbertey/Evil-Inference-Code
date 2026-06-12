@@ -11,7 +11,7 @@ use super::layer::MLSTMLayerConfig;
 /// with mlstm set and slstm/feedforward unset.
 /// The actual block logic lives in `blocks::xlstm_block::XLSTMBlock`.
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct MLSTMBlockConfig {
     pub mlstm: MLSTMLayerConfig,
 }
