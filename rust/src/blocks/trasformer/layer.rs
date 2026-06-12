@@ -44,8 +44,9 @@ impl<B: Backend> RMSNorm<B> {
             .mean_dim(2)
             .sqrt()
             .clamp_min(self.eps as f32);
+        // Ensure proper broadcasting: weight -> (1, 1, D)
         let normed = x / rms;
-        let w = self.weight.val().unsqueeze_dim::<2>(0).unsqueeze_dim::<3>(0);
+        let w = self.weight.val().unsqueeze::<2>().unsqueeze::<3>();
         normed * w
     }
 }

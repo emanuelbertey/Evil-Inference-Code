@@ -148,3 +148,4 @@ dmypy.json
 .pyre/
 *.mpk
 *.pt
+/prism-ml-llama.cpp

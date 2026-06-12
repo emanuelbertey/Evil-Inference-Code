@@ -398,8 +398,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokens = tokenizer.encode(&text);
     let device = CudaDevice::default();
 
-    let d_model = 256;
-    let num_layers = 4;
+    let d_model = 512;
+    let num_layers = 8;
     let num_heads = 8;
     let num_kv_groups = 2; 
 
@@ -425,6 +425,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             num_kv_groups,
             head_dim: None, 
             ffn_expansion: 4.0,
+            // KV-cache sizing note:
+            // - For this model: num_layers=8, num_heads=8, d_model=512 -> head_dim=64
+            // - K+V per token per layer = 2 * num_heads * head_dim floats
+            // - bytes_per_token (float32) = 8 * 2 * 8 * 64 * 4 = 32,768 bytes (~32 KiB)
+            // - tokens_max = VRAM_bytes / 32,768  (batch=1, KV-cache only)
+            // Example: max_seq_len = 1024 (configured below) -> KV-cache ≈ 1024 * 32,768 ≈ 32 MiB
+            // If using float16, these numbers are roughly halved. Overheads (weights/activations) reduce usable VRAM.
             use_swiglu: true,
             max_seq_len: 1024,
             rope_base: 10000.0,
@@ -558,7 +565,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let batch_size = 16;
+    let batch_size = 24;
     let seq_len = 64;
     let stride = 64;
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
