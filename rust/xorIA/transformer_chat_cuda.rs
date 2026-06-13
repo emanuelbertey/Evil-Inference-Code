@@ -357,7 +357,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let text = fs::read_to_string(&text_file)?;
     
-    let target_vocab_size = 2000;
+    let target_vocab_size = 16000;
     let tokenizer = if Path::new(&tokenizer_file).exists() {
         println!("Cargando tokenizer BPE desde {}...", tokenizer_file);
         Tokenizer::load(&tokenizer_file)?
@@ -399,10 +399,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokens = tokenizer.encode(&text);
     let device = CudaDevice::default();
 
-    let d_model = 512;
-    let num_layers = 8;
+    let d_model = 720;
+    let num_layers = 12;
     let num_heads = 8;
-    let num_kv_groups = 2; 
+    let num_kv_groups = 4; 
 
     println!("\n── Configuración del Transformer (CUDA) ──");
     println!("  d_model:       {}", d_model);
