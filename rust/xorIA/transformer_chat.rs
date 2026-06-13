@@ -280,6 +280,25 @@ fn generate_text_cached<B: Backend>(
     let mut generated = Vec::new();
     current_offset += seed_len;
 
+    // Trim rule: if cache length > threshold, remove `remove_count` oldest tokens
+    if current_offset >= 90 {
+        let remove_count = 50usize; // remove 30 oldest when threshold exceeded
+        if let Some(first) = caches.get(0) {
+            let mut dims = first.cached_k.dims();
+            let mut seq = dims[1];
+            if seq > 70 {
+                let remove = remove_count.min(seq);
+                let keep = seq - remove;
+                for c in caches.iter_mut() {
+                    *c = c.keep_last(keep);
+                }
+                current_offset = current_offset.saturating_sub(remove);
+                println!("(Cache trimmed: removed {} tokens; kept last {} tokens; new offset: {})", remove, keep, current_offset);
+                seq = keep;
+            }
+        }
+    }
+
     let mut next_id = sample_from_logits(
         last_logits, temperature, top_k, top_p, repetition_penalty, &history,
     );
@@ -307,6 +326,25 @@ fn generate_text_cached<B: Backend>(
         let (logits, new_caches) = model.forward_with_cache(input, current_offset, cache_input);
         caches = new_caches;
         current_offset += 1;
+
+        // Trim rule during generation: if cache length > threshold, remove `remove_count` oldest tokens
+        if current_offset >= 90 {
+            let remove_count = 50usize; // remove 30 oldest when threshold exceeded
+            if let Some(first) = caches.get(0) {
+                let mut dims = first.cached_k.dims();
+                let mut seq = dims[1];
+                if seq > 70 {
+                    let remove = remove_count.min(seq);
+                    let keep = seq - remove;
+                    for c in caches.iter_mut() {
+                        *c = c.keep_last(keep);
+                    }
+                    current_offset = current_offset.saturating_sub(remove);
+                    println!("(Cache trimmed: removed {} tokens; kept last {} tokens; new offset: {})", remove, keep, current_offset);
+                    seq = keep;
+                }
+            }
+        }
 
         let [_, _, v] = logits.dims();
         let logits_2d = logits.reshape([1, v]);
@@ -387,7 +425,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let device = Default::default();
 
     let d_model = 720;
-    let num_layers = 16;
+    let num_layers = 12;
     let num_heads = 8;
     let num_kv_groups = 4; 
 
@@ -411,7 +449,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             head_dim: None, 
             ffn_expansion: 4.0,
             use_swiglu: true,
-            max_seq_len: 1024,
+            max_seq_len: 124,
             rope_base: 10000.0,
             rope_scaling: 1.0,
             causal: true,

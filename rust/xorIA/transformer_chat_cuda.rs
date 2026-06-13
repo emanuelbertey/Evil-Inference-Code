@@ -290,6 +290,25 @@ fn generate_text_cached<B: Backend>(
     let mut history: Vec<usize> = ids.clone();
     let mut generated = Vec::new();
     current_offset += seed_len;
+    // Trim rule: if cache length > threshold, remove `remove_count` oldest tokens
+    if current_offset >= 70 {
+        let threshold = 70usize;
+        let remove_count = 30usize; // remove 30 oldest when threshold exceeded
+        if let Some(first) = caches.get(0) {
+            let mut dims = first.cached_k.dims();
+            let mut seq = dims[1];
+            if seq > threshold {
+                let remove = remove_count.min(seq);
+                let keep = seq - remove;
+                for c in caches.iter_mut() {
+                    *c = c.keep_last(keep);
+                }
+                current_offset = current_offset.saturating_sub(remove);
+                println!("(Cache trimmed: removed {} tokens; kept last {} tokens; new offset: {})", remove, keep, current_offset);
+                seq = keep;
+            }
+        }
+    }
 
     let mut next_id = sample_from_logits(
         last_logits, temperature, top_k, top_p, repetition_penalty, &history,
@@ -319,6 +338,26 @@ fn generate_text_cached<B: Backend>(
         let (logits, new_caches) = model.forward_with_cache(input, current_offset, cache_input);
         caches = new_caches;
         current_offset += 1;
+
+        // Trim rule during generation: if cache length > threshold, remove `remove_count` oldest tokens
+        if current_offset >= 70 {
+            let threshold = 70usize;
+            let remove_count = 30usize; // remove 30 oldest when threshold exceeded
+            if let Some(first) = caches.get(0) {
+                let mut dims = first.cached_k.dims();
+                let mut seq = dims[1];
+                if seq > threshold {
+                    let remove = remove_count.min(seq);
+                    let keep = seq - remove;
+                    for c in caches.iter_mut() {
+                        *c = c.keep_last(keep);
+                    }
+                    current_offset = current_offset.saturating_sub(remove);
+                    println!("(Cache trimmed: removed {} tokens; kept last {} tokens; new offset: {})", remove, keep, current_offset);
+                    seq = keep;
+                }
+            }
+        }
 
         let [_, _, v] = logits.dims();
         let logits_2d = logits.reshape([1, v]);
@@ -400,7 +439,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let device = CudaDevice::default();
 
     let d_model = 720;
-    let num_layers = 16;
+    let num_layers = 24;
     let num_heads = 8;
     let num_kv_groups = 4; 
 
