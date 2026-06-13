@@ -387,7 +387,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let device = Default::default();
 
     let d_model = 720;
-    let num_layers = 12;
+    let num_layers = 16;
     let num_heads = 8;
     let num_kv_groups = 4; 
 
