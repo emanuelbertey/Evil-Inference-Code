@@ -204,3 +204,7 @@ path = "xorIA/transformer_chat_cuda.rs"
 [[bin]]
 name = "bit_transformer"
 path = "xorIA/bit_transformer/main.rs"
+
+[[bin]]
+name = "bit_transformer_cuda"
+path = "xorIA/bit_transformer/main_cuda.rs"

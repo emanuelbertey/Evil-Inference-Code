@@ -1,9 +1,6 @@
 // Optimized Ternary Kernels for CPU
 // Based on BitNet b1.58 (arXiv:2410.16144) and bitnet.cpp implementations
 
-use burn::prelude::*;
-use burn::tensor::TensorData;
-
 /// I2_S Kernel: 2-bit Integer Signed Unpacking + MAD
 /// Packs 16 ternary weights into a 32-bit integer for memory efficiency.
 pub struct I2SKernel;
@@ -31,14 +28,16 @@ impl I2SKernel {
     }
 
     /// Forward pass simulating the I2_S CPU kernel behavior on raw slices.
+    /// Uses per-group scales: each GROUP_SIZE weights share one scale.
     pub fn forward_raw(
         x_data: &[f32],
         batch: usize,
         packed_w: &[u32],
         out_features: usize,
         in_features: usize,
-        scale: f32,
+        scales: &[f32],
     ) -> Vec<f32> {
+        const GROUP_SIZE: usize = 128;
         let mut out_data = vec![0.0f32; batch * out_features];
 
         // FAST PATH: Avoid OS thread spawning overhead for small matrices
@@ -57,10 +56,14 @@ impl I2SKernel {
                             if bits == 0b01 { continue; }
                             
                             let x_val = x_data[b * in_features + i + j];
-                            if bits == 0b10 { sum += x_val; } else { sum -= x_val; }
+                            // Per-group scale: group index based on weight position
+                            let weight_pos = o * in_features + i + j;
+                            let group_idx = (weight_pos / GROUP_SIZE).min(scales.len() - 1);
+                            let s = scales[group_idx];
+                            if bits == 0b10 { sum += x_val * s; } else { sum -= x_val * s; }
                         }
                     }
-                    out_data[b * out_features + o] = sum * scale;
+                    out_data[b * out_features + o] = sum;
                 }
             }
             return out_data;
@@ -92,10 +95,13 @@ impl I2SKernel {
                                 if bits == 0b01 { continue; }
                                 
                                 let x_val = x_data[b * in_features + i + j];
-                                if bits == 0b10 { sum += x_val; } else { sum -= x_val; }
+                                let weight_pos = o * in_features + i + j;
+                                let group_idx = (weight_pos / GROUP_SIZE).min(scales.len() - 1);
+                                let s = scales[group_idx];
+                                if bits == 0b10 { sum += x_val * s; } else { sum -= x_val * s; }
                             }
                         }
-                        *out_val = sum * scale;
+                        *out_val = sum;
                     }
                 });
             }

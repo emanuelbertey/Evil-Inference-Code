@@ -27,19 +27,17 @@ use burn::prelude::*;
 use burn::module::{Module, Param};
 use burn::config::Config;
 use burn::tensor::TensorData;
-use super::kernel::{I2SKernel, TL1Kernel, TL2Kernel};
+use super::kernel::I2SKernel;
 
 // ─── Pure Raw Inference State ───────────────────────────────────────────────
 /// State completely detached from Burn Tensors for maximum CPU inference speed
 #[derive(Clone)]
 pub struct BitLinearInferenceState {
     pub packed_w: Vec<u32>,
-    pub scale: f32,
+    pub scales: Vec<f32>,
     pub in_features: usize,
     pub out_features: usize,
     pub bias: Option<Vec<f32>>,
-    // Note: for a full implementation, you'd also export the RMSNorm weights here
-    // pub rms_weight: Vec<f32>,
 }
 
 impl BitLinearInferenceState {
@@ -51,7 +49,7 @@ impl BitLinearInferenceState {
             &self.packed_w,
             self.out_features,
             self.in_features,
-            self.scale
+            &self.scales,
         );
         
         // Add bias if present
@@ -114,40 +112,69 @@ impl<B: Backend> RMSNorm<B> {
 
 // ─── Quantization Functions ─────────────────────────────────────────────────
 
-/// Ternary weight quantization using AbsMean scaling + STE.
+const GROUP_SIZE: usize = 128;
+
+/// Ternary weight quantization using Per-Group AbsMean scaling + STE.
 ///
-/// Forward:
-///   scale = mean(|W|)
-///   W_q = clamp(round(W / scale), -1, 1)     → values in {-1, 0, +1}
-///   output = W_q * scale                       → rescaled for correct magnitude
+/// Algorithm (BitNet b1.58):
+///   1. Flatten weights, pad to multiple of GROUP_SIZE if needed
+///   2. Reshape into (n_groups, GROUP_SIZE)
+///   3. Per-group scale = mean(|w|), clamped to avoid div-by-zero
+///   4. Normalize: w_scaled = w / scale per group
+///   5. Round + clip to {-1, 0, +1}
+///   6. STE: w_ste = w + (w_dequant - w).detach()
 ///
-/// Backward (STE):
-///   ∂L/∂W = ∂L/∂W_q  (gradient passes through as if quantize = identity)
-///
-/// Implementation trick: `w_quant = w + (quantize(w) - w).detach()`
-///   This ensures forward uses quantized values but backward flows to `w`.
+/// Returns (w_dequant, scales) where scales has shape [n_groups].
 fn quantize_weights_ternary<B: Backend>(w: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 1>) {
-    // AbsMean scale factor: scale = mean(|W|) + eps
-    let abs_w = w.clone().abs();
-    let scale = abs_w.mean(); // scalar → Tensor<B, 1> after reshape
+    let orig_shape = w.dims();
+    let rows = orig_shape[0];
+    let cols = orig_shape[1];
+    let numel = rows * cols;
 
-    // Quantize: round(W / scale), clamped to [-1, 1]
-    let scale_val = scale.clone().reshape([1, 1]);
-    let w_scaled = w.clone() / (scale_val.clone() + 1e-8);
-    let w_rounded = w_scaled.clone().round();
-    let w_clamped = w_rounded.clamp(-1.0, 1.0);
+    // Flatten and pad if needed
+    let (w_flat, pad_len) = if numel % GROUP_SIZE != 0 {
+        let pad_len = GROUP_SIZE - (numel % GROUP_SIZE);
+        let w_flat = w.clone().reshape([numel]);
+        let zeros = Tensor::zeros([pad_len], &w.device());
+        let w_padded = Tensor::cat(vec![w_flat, zeros], 0);
+        (w_padded, pad_len)
+    } else {
+        (w.clone().reshape([numel]), 0)
+    };
 
-    // STE trick: forward uses quantized, backward flows to full-precision w
-    // w_ste = w + (w_quantized - w).detach()
-    // In Burn, .detach() removes from autodiff graph
-    let diff = w_clamped - w_scaled.clone();
-    let w_quantized_ste = w_scaled + diff.detach();
+    let n_groups = w_flat.dims()[0] / GROUP_SIZE;
+    let w_grouped = w_flat.reshape([n_groups, GROUP_SIZE]);
 
-    // Rescale back: W_dequant = W_q * scale
-    let w_dequant = w_quantized_ste * scale_val;
+    // Per-group scale = mean(|w|), clamped to avoid div-by-zero
+    let scales = w_grouped
+        .clone()
+        .abs()
+        .mean_dim(1)
+        .squeeze::<1>()
+        .clamp_min(1e-8); // [n_groups]
 
-    let scale_1d = scale.reshape([1]);
-    (w_dequant, scale_1d)
+    // Normalize, round, clip to ternary
+    let scales_expanded = scales.clone().reshape([n_groups, 1]); // [n_groups, 1]
+    let w_scaled = w_grouped.clone() / scales_expanded.clone();
+    let w_ternary = w_scaled.clone().round().clamp(-1.0, 1.0);
+
+    // STE: forward uses quantized, backward flows to full-precision w
+    let w_dequant_grouped = w_ternary * scales_expanded.clone();
+    let diff = w_dequant_grouped - w_grouped.clone();
+    let w_ste = w_grouped + diff.detach();
+    let w_dequant = w_ste * scales_expanded;
+
+    // Remove padding and reshape
+    let w_dequant = if pad_len > 0 {
+        w_dequant
+            .reshape([n_groups * GROUP_SIZE])
+            .narrow(0, 0, numel)
+            .reshape(orig_shape)
+    } else {
+        w_dequant.reshape(orig_shape)
+    };
+
+    (w_dequant, scales)
 }
 
 /// 8-bit activation quantization using AbsMax scaling + STE.
@@ -305,13 +332,45 @@ impl<B: Backend> BitLinear<B> {
     }
 
     /// Get the current ternary weight values (for inspection/inference export).
-    /// Returns the quantized weight matrix and the AbsMean scale factor.
+    /// Returns the quantized weight matrix and per-group AbsMean scales.
+    /// scales has shape [n_groups] where n_groups = ceil(rows*cols / GROUP_SIZE).
     pub fn get_ternary_weights(&self, device: &B::Device) -> (Tensor<B, 2>, Tensor<B, 1>) {
         let w = self.weight.val();
-        let abs_mean = w.clone().abs().mean().reshape([1]);
-        let w_scaled = w / (abs_mean.clone().reshape([1, 1]) + 1e-8);
+        let dims = w.dims();
+        let numel = dims[0] * dims[1];
+
+        // Flatten and pad
+        let (w_flat, pad_len) = if numel % GROUP_SIZE != 0 {
+            let pad_len = GROUP_SIZE - (numel % GROUP_SIZE);
+            let w_flat = w.reshape([numel]);
+            let zeros = Tensor::zeros([pad_len], device);
+            (Tensor::cat(vec![w_flat, zeros], 0), pad_len)
+        } else {
+            (w.reshape([numel]), 0)
+        };
+
+        let n_groups = w_flat.dims()[0] / GROUP_SIZE;
+        let w_grouped = w_flat.reshape([n_groups, GROUP_SIZE]);
+
+        // Per-group scale = mean(|w|)
+        let scales = w_grouped.clone().abs().mean_dim(1).squeeze::<1>().clamp_min(1e-8);
+
+        // Quantize per group
+        let scales_expanded = scales.clone().reshape([n_groups, 1]);
+        let w_scaled = w_grouped / scales_expanded;
         let w_ternary = w_scaled.round().clamp(-1.0, 1.0);
-        (w_ternary, abs_mean)
+
+        // Remove padding
+        let w_ternary = if pad_len > 0 {
+            w_ternary
+                .reshape([n_groups * GROUP_SIZE])
+                .narrow(0, 0, numel)
+                .reshape(dims)
+        } else {
+            w_ternary.reshape(dims)
+        };
+
+        (w_ternary, scales)
     }
 
     /// Count the distribution of {-1, 0, +1} in the current ternary weights.
@@ -338,8 +397,8 @@ impl<B: Backend> BitLinear<B> {
 
     /// Export to a pure raw inference struct, completely detached from Burn
     pub fn export_inference_layer(&self, device: &B::Device) -> BitLinearInferenceState {
-        let (w_ternary, scale_tensor) = self.get_ternary_weights(device);
-        let scale = scale_tensor.into_data().as_slice::<f32>().unwrap()[0];
+        let (w_ternary, scales_tensor) = self.get_ternary_weights(device);
+        let scales = scales_tensor.into_data().as_slice::<f32>().unwrap().to_vec();
         let w_data = w_ternary.into_data();
         let w_slice = w_data.as_slice::<f32>().unwrap();
         
@@ -351,7 +410,7 @@ impl<B: Backend> BitLinear<B> {
 
         BitLinearInferenceState {
             packed_w,
-            scale,
+            scales,
             in_features: self.in_features,
             out_features: self.out_features,
             bias,
@@ -369,19 +428,16 @@ impl<B: Backend> BitLinear<B> {
         // 2. Quantize activations (8-bit)
         let x_quant = quantize_activations_8bit(x_norm);
 
-        // 3. Get ternary weights and scale
-        let (w_ternary, scale_tensor) = self.get_ternary_weights(device);
-        
-        // Need to extract data for custom CPU kernel
-        // Note: In a production setting, weights would be pre-packed
-        let scale = scale_tensor.into_data().as_slice::<f32>().unwrap()[0];
+        // 3. Get ternary weights and per-group scales
+        let (w_ternary, scales_tensor) = self.get_ternary_weights(device);
+        let scales = scales_tensor.into_data().as_slice::<f32>().unwrap().to_vec();
         let w_data = w_ternary.into_data();
         let w_slice = w_data.as_slice::<f32>().unwrap();
         
         // Pack weights (16 weights per u32)
         let packed_w = I2SKernel::pack_weights(w_slice);
 
-        // 4. Custom MatMul using addition/subtraction kernel
+        // 4. Custom MatMul using addition/subtraction kernel with per-group scales
         let x_flat = x_quant.reshape([batch * seq, self.in_features]);
         let x_flat_data = x_flat.into_data();
         let x_slice = x_flat_data.as_slice::<f32>().unwrap();
@@ -392,7 +448,7 @@ impl<B: Backend> BitLinear<B> {
             &packed_w,
             self.out_features,
             self.in_features,
-            scale
+            &scales,
         );
         let output_flat = Tensor::<B, 2>::from_data(TensorData::new(out_data, [batch * seq, self.out_features]), device);
         let mut output = output_flat.reshape([batch, seq, self.out_features]);
