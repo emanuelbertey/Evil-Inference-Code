@@ -416,21 +416,89 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut top_p: f32 = 0.95;
     let mut repetition_penalty: f32 = 1.1;
 
+    // Parámetros ajustables
+    let mut d_model: usize = 720;
+    let mut num_layers: usize = 24;
+    let mut num_heads: usize = 8;
+    let mut lr: f64 = 4e-5;
+    let mut num_epochs: usize = 50;
+    let mut batch_size: usize = 24;
+
     let mut modo_inferencia = false;
     if model_exists {
         loop {
-            print!("¡Modelo Transformer CUDA encontrado! ¿Deseas (e)ntrenar o (i)nferir? [e/i]: ");
+            println!("\n--- CONFIGURACIÓN ACTUAL (CUDA) ---");
+            println!("  (1) d_model: {}", d_model);
+            println!("  (2) Num layers: {}", num_layers);
+            println!("  (3) Heads:   {}", num_heads);
+            println!("  (4) LR:      {}", lr);
+            println!("  (5) Épocas:  {}", num_epochs);
+            println!("  (6) Batch:   {}", batch_size);
+            println!("  (7) Temp:    {}", temperature);
+            println!("  (8) R-Pen:   {}", repetition_penalty);
+            println!("----------------------------");
+            print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
             io::stdout().flush()?;
+
             let mut choice = String::new();
             io::stdin().read_line(&mut choice)?;
             let choice = choice.trim().to_lowercase();
-            match choice.as_str() {
-                "i" => { modo_inferencia = true; break; }
-                "e" => { break; }
-                _ => {
-                    if choice.is_empty() { continue; }
-                    println!("  → Escribe 'e' para entrenar o 'i' para inferencia.");
-                }
+
+            if choice == "i" {
+                modo_inferencia = true;
+                break;
+            } else if choice == "e" {
+                break;
+            } else if choice == "s" {
+                println!("\nAjustar parámetros (Enter para mantener actual):");
+
+                print!("d_model [{}]: ", d_model);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { d_model = v; }
+
+                print!("Num layers [{}]: ", num_layers);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_layers = v; }
+
+                print!("Heads [{}]: ", num_heads);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_heads = v; }
+
+                print!("Learning Rate [{}]: ", lr);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { lr = v; }
+
+                print!("Épocas [{}]: ", num_epochs);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_epochs = v; }
+
+                print!("Batch Size [{}]: ", batch_size);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { batch_size = v; }
+
+                print!("Temperatura [{}]: ", temperature);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { temperature = v; }
+
+                print!("Repetition Penalty [{}]: ", repetition_penalty);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { repetition_penalty = v; }
             }
         }
     }
@@ -438,9 +506,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokens = tokenizer.encode(&text);
     let device = CudaDevice::default();
 
-    let d_model = 720;
-    let num_layers = 24;
-    let num_heads = 8;
     let num_kv_groups = 4; 
 
     println!("\n── Configuración del Transformer (CUDA) ──");
@@ -605,11 +670,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let batch_size = 24;
     let seq_len = 64;
     let stride = 64;
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
-    let num_epochs = 50;
 
     println!("Iniciando entrenamiento BPE (CUDA)...");
     println!("  batch_size: {} | seq_len: {} | batches/epoch: {}\n", batch_size, seq_len, num_batches);
@@ -643,7 +706,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let grads = loss.backward();
             let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
-            model = optim.step(3e-4, model, grads_p);
+            model = optim.step(lr, model, grads_p);
 
             if b % 10 == 0 {
                 let elapsed = start_epoch.elapsed().as_secs_f32();

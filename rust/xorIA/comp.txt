@@ -122,8 +122,9 @@ cargo build --release --bin transformer_chat 2>&1
 
 cargo run --release --bin transformer_chat -- xorIA/input.txt
 
+cargo run --release --bin transformer_chat -- D:/data/tinychat.txt
 
-cargo run --release --bin transformer_chat -- xorIA/input.txt
+cargo run --release --bin transformer_chat -- D:/data/tinychat.txt
 
 cargo build --release --bin transformer_chat_cuda 2>&1
 

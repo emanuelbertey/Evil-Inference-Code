@@ -330,8 +330,8 @@ fn generate_text_cached<B: Backend>(
     current_offset += seed_len;
 
     // Trim rule: if cache length > threshold, remove `remove_count` oldest tokens
-    if current_offset >= 250 {
-        let remove_count = 180usize; // remove 30 oldest when threshold exceeded
+    if current_offset >= 255 {
+        let remove_count = 160usize; // remove 30 oldest when threshold exceeded
         if let Some(first) = caches.get(0) {
             let mut dims = first.cached_k.dims();
             let mut seq = dims[1];
@@ -377,8 +377,8 @@ fn generate_text_cached<B: Backend>(
         current_offset += 1;
 
         // Trim rule during generation: if cache length > threshold, remove `remove_count` oldest tokens
-        if current_offset >= 250 {
-            let remove_count = 180usize; // remove 30 oldest when threshold exceeded
+        if current_offset >= 255 {
+            let remove_count = 160usize; // remove 30 oldest when threshold exceeded
             if let Some(first) = caches.get(0) {
                 let mut dims = first.cached_k.dims();
                 let mut seq = dims[1];
@@ -413,9 +413,9 @@ fn generate_text_cached<B: Backend>(
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║     Transformer Chat — GQA + RoPE + SwiGLU                   ║");
-    println!("║     BPE-Level Language Model (Hugging Face)                  ║");
-    println!("║     + KV Cache + Top-K/P + Repetition Penalty               ║");
+    println!("║     Transformer Chat — GQA + RoPE + SwiGLU                     ║");
+    println!("║     BPE-Level Language Model (Hugging Face)                    ║");
+    println!("║     + KV Cache + Top-K/P + Repetition Penalty                  ║");
     println!("╚════════════════════════════════════════════════════════════════╝");
 
     let args: Vec<String> = std::env::args().collect();
@@ -452,30 +452,95 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut top_p: f32 = 0.95;
     let mut repetition_penalty: f32 = 1.1;
 
+    // Parâmetros ajustables (expuestos en el menú 's')
+    let mut d_model: usize = 720;
+    let mut num_layers: usize = 24;
+    let mut num_heads: usize = 8;
+    let mut lr: f64 = 3e-4;
+    let mut num_epochs: usize = 50;
+    let mut batch_size: usize = 16;
+
     let mut modo_inferencia = false;
     if model_exists {
         loop {
-            print!("¡Modelo Transformer encontrado! ¿Deseas (e)ntrenar o (i)nferir? [e/i]: ");
+            println!("\n--- CONFIGURACIÓN ACTUAL ---");
+            println!("  (1) d_model: {}", d_model);
+            println!("  (2) Num layers: {}", num_layers);
+            println!("  (3) Heads:   {}", num_heads);
+            println!("  (4) LR:      {}", lr);
+            println!("  (5) Épocas:  {}", num_epochs);
+            println!("  (6) Batch:   {}", batch_size);
+            println!("  (7) Temp:    {}", temperature);
+            println!("  (8) R-Pen:   {}", repetition_penalty);
+            println!("----------------------------");
+            print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
             io::stdout().flush()?;
+
             let mut choice = String::new();
             io::stdin().read_line(&mut choice)?;
             let choice = choice.trim().to_lowercase();
-            match choice.as_str() {
-                "i" => { modo_inferencia = true; break; }
-                "e" => { break; }
-                _ => {
-                    if choice.is_empty() { continue; }
-                    println!("  → Escribe 'e' para entrenar o 'i' para inferencia.");
-                }
+
+            if choice == "i" {
+                modo_inferencia = true;
+                break;
+            } else if choice == "e" {
+                break;
+            } else if choice == "s" {
+                println!("\nAjustar parámetros (Enter para mantener actual):");
+
+                print!("d_model [{}]: ", d_model);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { d_model = v; }
+
+                print!("Num layers [{}]: ", num_layers);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_layers = v; }
+
+                print!("Heads [{}]: ", num_heads);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_heads = v; }
+
+                print!("Learning Rate [{}]: ", lr);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { lr = v; }
+
+                print!("Épocas [{}]: ", num_epochs);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_epochs = v; }
+
+                print!("Batch Size [{}]: ", batch_size);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { batch_size = v; }
+
+                print!("Temperatura [{}]: ", temperature);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { temperature = v; }
+
+                print!("Repetition Penalty [{}]: ", repetition_penalty);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { repetition_penalty = v; }
             }
         }
     }
 
     let device = Default::default();
 
-    let d_model = 720;
-    let num_layers = 12;
-    let num_heads = 8;
     let num_kv_groups = 4; 
 
     println!("\n── Configuración del Transformer ──");
@@ -498,7 +563,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             head_dim: None, 
             ffn_expansion: 4.0,
             use_swiglu: true,
-            max_seq_len: 251,
+            max_seq_len: 256,
             rope_base: 10000.0,
             rope_scaling: 1.0,
             causal: true,
@@ -534,8 +599,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if modo_inferencia {
         println!("\n╔════════════════════════════════════════════════════════════════╗");
-        println!("║     MODO INTERACTIVO — Transformer Chat                      ║");
-        println!("║     KV Cache + Top-K/P + Repetition Penalty                  ║");
+        println!("║     MODO INTERACTIVO — Transformer Chat                        ║");
+        println!("║     KV Cache + Top-K/P + Repetition Penalty                    ║");
         println!("╚════════════════════════════════════════════════════════════════╝\n");
         println!("Comandos:");
         println!("  - Escribe tu semilla para generar texto.");
@@ -629,10 +694,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let batch_size = 16;
     let seq_len = 64;
     let stride = 64;
-    let num_epochs = 50;
 
     let text_path = Path::new(&text_file);
 
@@ -674,7 +737,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let grads = loss.backward();
                 let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
-                model = optim.step(3e-4, model, grads_p);
+                model = optim.step(lr, model, grads_p);
 
                 let elapsed = start_epoch.elapsed().as_secs_f32();
                 let tps = (batch_count * batch_size * seq_len) as f32 / elapsed;
