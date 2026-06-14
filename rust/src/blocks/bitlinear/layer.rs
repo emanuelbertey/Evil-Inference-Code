@@ -162,7 +162,7 @@ fn quantize_weights_ternary<B: Backend>(w: Tensor<B, 2>) -> (Tensor<B, 2>, Tenso
     let w_dequant_grouped = w_ternary * scales_expanded.clone();
     let diff = w_dequant_grouped - w_grouped.clone();
     let w_ste = w_grouped + diff.detach();
-    let w_dequant = w_ste * scales_expanded;
+    let w_dequant = w_ste; // scales already applied once in w_dequant_grouped
 
     // Remove padding and reshape
     let w_dequant = if pad_len > 0 {
@@ -177,23 +177,23 @@ fn quantize_weights_ternary<B: Backend>(w: Tensor<B, 2>) -> (Tensor<B, 2>, Tenso
     (w_dequant, scales)
 }
 
-/// 8-bit activation quantization using AbsMax scaling + STE.
+/// 8-bit activation quantization using Per-Token AbsMax scaling + STE.
 ///
-/// Forward:
-///   γ = max(|X|)
-///   Q_b = 127  (for 8-bit signed integer range)
+/// Per-token: one absmax scale per token (last dimension), not per-tensor.
+/// This preserves dynamic range for each token independently.
+///
+/// For input (B, S, D): γ = max(|X|, dim=D) per token → shape (B, S, 1)
 ///   X_q = clamp(round(X * Q_b / γ), -Q_b, Q_b)
-///   output = X_q * (γ / Q_b)   → rescaled to original magnitude
-///
-/// This enables efficient integer arithmetic during inference.
-fn quantize_activations_8bit<B: Backend, const D: usize>(x: Tensor<B, D>) -> Tensor<B, D> {
-    let q_b: f32 = 127.0; // 2^(8-1) - 1
+///   output = X_q * (γ / Q_b)
+fn quantize_activations_8bit<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
+    let q_b: f32 = 127.0;
+    let [batch, seq, d_model] = x.dims();
 
-    // γ = max(|x|) per-tensor, clamped to avoid division by zero
-    let gamma = x.clone().abs().max().clamp_min(1e-8);
+    // Per-token absmax: max over last dim (d_model) → shape (B, S, 1)
+    let gamma = x.clone().abs().max_dim(2).clamp_min(1e-8).unsqueeze::<3>();
 
-    // Scale to [-127, 127] range
-    let x_scaled = x.clone() * (q_b / gamma.clone().into_scalar().elem::<f32>());
+    // Scale to [-127, 127] range per token
+    let x_scaled = x.clone() * (q_b.clone() as f32 / gamma.clone());
     let x_rounded = x_scaled.clone().round();
     let x_clamped = x_rounded.clamp(-q_b, q_b);
 
@@ -201,9 +201,8 @@ fn quantize_activations_8bit<B: Backend, const D: usize>(x: Tensor<B, D>) -> Ten
     let diff = x_clamped - x_scaled.clone();
     let x_quant_ste = x_scaled + diff.detach();
 
-    // Dequantize: scale back
-    let rescale = gamma.into_scalar().elem::<f32>() / q_b;
-    x_quant_ste * rescale
+    // Dequantize: scale back per token
+    x_quant_ste * (gamma / q_b)
 }
 
 
@@ -311,11 +310,15 @@ impl<B: Backend> BitLinear<B> {
 
     /// Forward pass for 2D input: (B, D_in) → (B, D_out)
     pub fn forward_2d(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+        let [batch, d_in] = x.dims();
+
         // 1. Sub-LN: RMSNorm
         let x_norm = self.rms_norm.forward_2d(x);
 
-        // 2. Quantize activations
-        let x_quant = quantize_activations_8bit(x_norm);
+        // 2. Quantize activations (reshape to 3D for per-token quant, then back)
+        let x_3d = x_norm.unsqueeze::<3>(); // [B, D, 1]
+        let x_quant_3d = quantize_activations_8bit(x_3d);
+        let x_quant = x_quant_3d.squeeze::<3>(); // [B, D]
 
         // 3. Quantize weights
         let (w_quant, _scale) = quantize_weights_ternary(self.weight.val());
