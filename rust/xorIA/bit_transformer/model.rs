@@ -101,18 +101,28 @@ fn quantize_weights_ternary<B: Backend>(w: Tensor<B, 2>) -> (Tensor<B, 2>, Tenso
 
 fn quantize_activations_8bit<B: Backend, const D: usize>(x: Tensor<B, D>) -> Tensor<B, D> {
     let q_b: f32 = 127.0;
-    let gamma = x.clone().abs().max().clamp_min(1e-8);
-    let gamma_val = gamma.into_scalar().elem::<f32>();
 
-    let x_scaled = x.clone() * (q_b / gamma_val);
+    // Per-last-dim absmax: one scale per token (last dimension)
+    let last_dim = D - 1;
+    let gamma = x.clone().abs().max_dim(last_dim).clamp_min(1e-8);
+
+    // gamma has rank D-1, unsqueeze to rank D for broadcasting
+    let mut gamma_shape = [0usize; D];
+    let dims = x.dims();
+    gamma_shape[..D-1].copy_from_slice(&dims[..D-1]);
+    gamma_shape[D-1] = 1;
+    let gamma = gamma.reshape(gamma_shape);
+
+    let x_scaled = x.clone() * (q_b.clone() as f32 / gamma.clone());
     let x_rounded = x_scaled.clone().round();
     let x_clamped = x_rounded.clamp(-q_b, q_b);
 
+    // STE
     let diff = x_clamped - x_scaled.clone();
     let x_quant_ste = x_scaled + diff.detach();
 
-    let rescale = gamma_val / q_b;
-    x_quant_ste * rescale
+    // Dequantize per token
+    x_quant_ste * (gamma / q_b)
 }
 
 // ─── BitLinear Layer ─────────────────────────────────────────────────────────

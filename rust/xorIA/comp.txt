@@ -132,6 +132,8 @@ cargo run --release --bin transformer_chat_cuda -- xorIA/input.txt
 
 cargo run --bin bit_transformer --release xorIA/input.txt
 
+cargo run --bin transformer_bit2 --release -- xorIA/input.txt
+
 python main.py
  
 python load_and_infer_bonsai.py

@@ -187,7 +187,6 @@ fn quantize_weights_ternary<B: Backend>(w: Tensor<B, 2>) -> (Tensor<B, 2>, Tenso
 ///   output = X_q * (γ / Q_b)
 fn quantize_activations_8bit<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     let q_b: f32 = 127.0;
-    let [batch, seq, d_model] = x.dims();
 
     // Per-token absmax: max over last dim (d_model) → shape (B, S, 1)
     let gamma = x.clone().abs().max_dim(2).clamp_min(1e-8).unsqueeze::<3>();
@@ -310,15 +309,15 @@ impl<B: Backend> BitLinear<B> {
 
     /// Forward pass for 2D input: (B, D_in) → (B, D_out)
     pub fn forward_2d(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
-        let [batch, d_in] = x.dims();
+        let [batch, _d_in] = x.dims();
 
         // 1. Sub-LN: RMSNorm
         let x_norm = self.rms_norm.forward_2d(x);
 
         // 2. Quantize activations (reshape to 3D for per-token quant, then back)
-        let x_3d = x_norm.unsqueeze::<3>(); // [B, D, 1]
+        let x_3d = x_norm.reshape([batch, 1, self.in_features]);
         let x_quant_3d = quantize_activations_8bit(x_3d);
-        let x_quant = x_quant_3d.squeeze::<3>(); // [B, D]
+        let x_quant = x_quant_3d.reshape([batch, self.in_features]);
 
         // 3. Quantize weights
         let (w_quant, _scale) = quantize_weights_ternary(self.weight.val());
