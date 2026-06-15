@@ -159,6 +159,140 @@ impl I2SKernel {
         Self::forward_inner(x_data, batch, packed_w, scales, out_features, in_features, &mut out_data);
         out_data
     }
+
+    #[inline(always)]
+    fn compute_row_aligned_i8(
+        x_i8: &[i8], x_off: usize,
+        packed_w: &[u32], w_row_base: usize,
+        in_features: usize,
+    ) -> i32 {
+        unsafe {
+            let mut sum = 0i32;
+            let w_idx_base = w_row_base >> 4;
+            let mut i = 0usize;
+
+            while i + 15 < in_features {
+                let packed = *packed_w.get_unchecked(w_idx_base + (i >> 4));
+                let x_base = x_off + i;
+
+                let b0  = (packed)        & 0b11;
+                let b1  = (packed >> 2)   & 0b11;
+                let b2  = (packed >> 4)   & 0b11;
+                let b3  = (packed >> 6)   & 0b11;
+                let b4  = (packed >> 8)   & 0b11;
+                let b5  = (packed >> 10)  & 0b11;
+                let b6  = (packed >> 12)  & 0b11;
+                let b7  = (packed >> 14)  & 0b11;
+                let b8  = (packed >> 16)  & 0b11;
+                let b9  = (packed >> 18)  & 0b11;
+                let b10 = (packed >> 20)  & 0b11;
+                let b11 = (packed >> 22)  & 0b11;
+                let b12 = (packed >> 24)  & 0b11;
+                let b13 = (packed >> 26)  & 0b11;
+                let b14 = (packed >> 28)  & 0b11;
+                let b15 = (packed >> 30)  & 0b11;
+
+                let x0  = *x_i8.get_unchecked(x_base)      as i32;
+                let x1  = *x_i8.get_unchecked(x_base + 1)  as i32;
+                let x2  = *x_i8.get_unchecked(x_base + 2)  as i32;
+                let x3  = *x_i8.get_unchecked(x_base + 3)  as i32;
+                let x4  = *x_i8.get_unchecked(x_base + 4)  as i32;
+                let x5  = *x_i8.get_unchecked(x_base + 5)  as i32;
+                let x6  = *x_i8.get_unchecked(x_base + 6)  as i32;
+                let x7  = *x_i8.get_unchecked(x_base + 7)  as i32;
+                let x8  = *x_i8.get_unchecked(x_base + 8)  as i32;
+                let x9  = *x_i8.get_unchecked(x_base + 9)  as i32;
+                let x10 = *x_i8.get_unchecked(x_base + 10) as i32;
+                let x11 = *x_i8.get_unchecked(x_base + 11) as i32;
+                let x12 = *x_i8.get_unchecked(x_base + 12) as i32;
+                let x13 = *x_i8.get_unchecked(x_base + 13) as i32;
+                let x14 = *x_i8.get_unchecked(x_base + 14) as i32;
+                let x15 = *x_i8.get_unchecked(x_base + 15) as i32;
+
+                sum += ((b0  >> 1) as i32 - (b0  & 1) as i32) * x0;
+                sum += ((b1  >> 1) as i32 - (b1  & 1) as i32) * x1;
+                sum += ((b2  >> 1) as i32 - (b2  & 1) as i32) * x2;
+                sum += ((b3  >> 1) as i32 - (b3  & 1) as i32) * x3;
+                sum += ((b4  >> 1) as i32 - (b4  & 1) as i32) * x4;
+                sum += ((b5  >> 1) as i32 - (b5  & 1) as i32) * x5;
+                sum += ((b6  >> 1) as i32 - (b6  & 1) as i32) * x6;
+                sum += ((b7  >> 1) as i32 - (b7  & 1) as i32) * x7;
+                sum += ((b8  >> 1) as i32 - (b8  & 1) as i32) * x8;
+                sum += ((b9  >> 1) as i32 - (b9  & 1) as i32) * x9;
+                sum += ((b10 >> 1) as i32 - (b10 & 1) as i32) * x10;
+                sum += ((b11 >> 1) as i32 - (b11 & 1) as i32) * x11;
+                sum += ((b12 >> 1) as i32 - (b12 & 1) as i32) * x12;
+                sum += ((b13 >> 1) as i32 - (b13 & 1) as i32) * x13;
+                sum += ((b14 >> 1) as i32 - (b14 & 1) as i32) * x14;
+                sum += ((b15 >> 1) as i32 - (b15 & 1) as i32) * x15;
+
+                i += 16;
+            }
+
+            while i < in_features {
+                let local = i & 15;
+                let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
+                let x_val = *x_i8.get_unchecked(x_off + i) as i32;
+                sum += ((bits >> 1) as i32 - (bits & 1) as i32) * x_val;
+                i += 1;
+            }
+
+            sum
+        }
+    }
+
+    fn forward_inner_i8(
+        x_i8: &[i8], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+        out_data: &mut [f32],
+    ) {
+        if batch * out_features <= 2 {
+            for b in 0..batch {
+                let x_off = b * in_features;
+                for o in 0..out_features {
+                    let raw = Self::compute_row_aligned_i8(x_i8, x_off, packed_w, o * in_features, in_features);
+                    let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = raw as f32 * *scales.get_unchecked(g); }
+                }
+            }
+            return;
+        }
+
+        let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+
+        std::thread::scope(|s| {
+            let rows_per_thread = (batch * out_features + num_threads - 1) / num_threads;
+            let mut remaining = out_data;
+            for t in 0..num_threads {
+                let n = rows_per_thread.min(remaining.len());
+                if n == 0 { break; }
+                let (chunk, rest) = remaining.split_at_mut(n);
+                remaining = rest;
+                let start_row = t * rows_per_thread;
+                s.spawn(move || {
+                    for local_idx in 0..chunk.len() {
+                        let idx = start_row + local_idx;
+                        let b = idx / out_features;
+                        let o = idx % out_features;
+                        let raw = Self::compute_row_aligned_i8(x_i8, b * in_features, packed_w, o * in_features, in_features);
+                        let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = raw as f32 * *scales.get_unchecked(g); }
+                    }
+                });
+            }
+        });
+    }
+
+    pub fn forward_raw_i8(
+        x_i8: &[i8], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let mut out_data = vec![0.0f32; batch * out_features];
+        Self::forward_inner_i8(x_i8, batch, packed_w, scales, out_features, in_features, &mut out_data);
+        out_data
+    }
 }
 
 pub struct TL1Kernel;
@@ -482,6 +616,137 @@ impl I2STile16Kernel {
                         unsafe {
                             *chunk.get_unchecked_mut(local_idx) =
                                 Self::compute_row(x_data, b * in_features, packed_w, o * in_features, scales, in_features);
+                        }
+                    }
+                });
+            }
+        });
+
+        out
+    }
+
+    #[inline(always)]
+    fn compute_row_i8(
+        x_i8: &[i8], x_off: usize,
+        packed_w: &[u32], w_row: usize,
+        scales: &[f32], in_features: usize,
+    ) -> i32 {
+        unsafe {
+            let mut sum = 0i32;
+            let w_idx_base = w_row >> 4;
+            let mut i = 0usize;
+            while i + 15 < in_features {
+                let packed = *packed_w.get_unchecked(w_idx_base + (i >> 4));
+                let x_base = x_off + i;
+
+                let b0  = (packed)        & 0b11;
+                let b1  = (packed >> 2)   & 0b11;
+                let b2  = (packed >> 4)   & 0b11;
+                let b3  = (packed >> 6)   & 0b11;
+                let b4  = (packed >> 8)   & 0b11;
+                let b5  = (packed >> 10)  & 0b11;
+                let b6  = (packed >> 12)  & 0b11;
+                let b7  = (packed >> 14)  & 0b11;
+                let b8  = (packed >> 16)  & 0b11;
+                let b9  = (packed >> 18)  & 0b11;
+                let b10 = (packed >> 20)  & 0b11;
+                let b11 = (packed >> 22)  & 0b11;
+                let b12 = (packed >> 24)  & 0b11;
+                let b13 = (packed >> 26)  & 0b11;
+                let b14 = (packed >> 28)  & 0b11;
+                let b15 = (packed >> 30)  & 0b11;
+
+                let x0  = *x_i8.get_unchecked(x_base)      as i32;
+                let x1  = *x_i8.get_unchecked(x_base + 1)  as i32;
+                let x2  = *x_i8.get_unchecked(x_base + 2)  as i32;
+                let x3  = *x_i8.get_unchecked(x_base + 3)  as i32;
+                let x4  = *x_i8.get_unchecked(x_base + 4)  as i32;
+                let x5  = *x_i8.get_unchecked(x_base + 5)  as i32;
+                let x6  = *x_i8.get_unchecked(x_base + 6)  as i32;
+                let x7  = *x_i8.get_unchecked(x_base + 7)  as i32;
+                let x8  = *x_i8.get_unchecked(x_base + 8)  as i32;
+                let x9  = *x_i8.get_unchecked(x_base + 9)  as i32;
+                let x10 = *x_i8.get_unchecked(x_base + 10) as i32;
+                let x11 = *x_i8.get_unchecked(x_base + 11) as i32;
+                let x12 = *x_i8.get_unchecked(x_base + 12) as i32;
+                let x13 = *x_i8.get_unchecked(x_base + 13) as i32;
+                let x14 = *x_i8.get_unchecked(x_base + 14) as i32;
+                let x15 = *x_i8.get_unchecked(x_base + 15) as i32;
+
+                sum += ((b0  >> 1) as i32 - (b0  & 1) as i32) * x0;
+                sum += ((b1  >> 1) as i32 - (b1  & 1) as i32) * x1;
+                sum += ((b2  >> 1) as i32 - (b2  & 1) as i32) * x2;
+                sum += ((b3  >> 1) as i32 - (b3  & 1) as i32) * x3;
+                sum += ((b4  >> 1) as i32 - (b4  & 1) as i32) * x4;
+                sum += ((b5  >> 1) as i32 - (b5  & 1) as i32) * x5;
+                sum += ((b6  >> 1) as i32 - (b6  & 1) as i32) * x6;
+                sum += ((b7  >> 1) as i32 - (b7  & 1) as i32) * x7;
+                sum += ((b8  >> 1) as i32 - (b8  & 1) as i32) * x8;
+                sum += ((b9  >> 1) as i32 - (b9  & 1) as i32) * x9;
+                sum += ((b10 >> 1) as i32 - (b10 & 1) as i32) * x10;
+                sum += ((b11 >> 1) as i32 - (b11 & 1) as i32) * x11;
+                sum += ((b12 >> 1) as i32 - (b12 & 1) as i32) * x12;
+                sum += ((b13 >> 1) as i32 - (b13 & 1) as i32) * x13;
+                sum += ((b14 >> 1) as i32 - (b14 & 1) as i32) * x14;
+                sum += ((b15 >> 1) as i32 - (b15 & 1) as i32) * x15;
+
+                i += 16;
+            }
+            while i < in_features {
+                let local = i & 15;
+                let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
+                let x_val = *x_i8.get_unchecked(x_off + i) as i32;
+                sum += ((bits >> 1) as i32 - (bits & 1) as i32) * x_val;
+                i += 1;
+            }
+            let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
+            sum
+        }
+    }
+
+    pub fn forward_raw_i8(
+        x_i8: &[i8], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; batch * out_features];
+        let total = batch * out_features;
+        if total < 16 {
+            for b in 0..batch {
+                let x_off = b * in_features;
+                for o in 0..out_features {
+                    unsafe {
+                        let raw = Self::compute_row_i8(x_i8, x_off, packed_w, o * in_features, scales, in_features);
+                        let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
+                        *out.get_unchecked_mut(b * out_features + o) = raw as f32 * *scales.get_unchecked(g);
+                    }
+                }
+            }
+            return out;
+        }
+
+        let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let rows_per_thread = (total + num_threads - 1) / num_threads;
+
+        std::thread::scope(|s| {
+            let mut remaining = &mut out[..];
+            let mut start_row = 0usize;
+            for _ in 0..num_threads {
+                let n = rows_per_thread.min(remaining.len());
+                if n == 0 { break; }
+                let (chunk, rest) = remaining.split_at_mut(n);
+                remaining = rest;
+                let sr = start_row;
+                start_row += n;
+                s.spawn(move || {
+                    for local_idx in 0..chunk.len() {
+                        let idx = sr + local_idx;
+                        let b = idx / out_features;
+                        let o = idx % out_features;
+                        unsafe {
+                            let raw = Self::compute_row_i8(x_i8, b * in_features, packed_w, o * in_features, scales, in_features);
+                            let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
+                            *chunk.get_unchecked_mut(local_idx) = raw as f32 * *scales.get_unchecked(g);
                         }
                     }
                 });

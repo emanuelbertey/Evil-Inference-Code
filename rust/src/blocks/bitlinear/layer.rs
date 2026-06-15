@@ -73,6 +73,30 @@ impl BitLinearInferenceState {
         
         out
     }
+
+    pub fn forward_raw_i8(&self, x_i8: &[i8], batch: usize) -> Vec<f32> {
+        let mut out = match self.kernel {
+            KernelKind::I2S => I2SKernel::forward_raw_i8(
+                x_i8, batch, &self.packed_w, &self.scales,
+                self.out_features, self.in_features,
+            ),
+            KernelKind::Tile16 => I2STile16Kernel::forward_raw_i8(
+                x_i8, batch, &self.packed_w, &self.scales,
+                self.out_features, self.in_features,
+            ),
+        };
+
+        if let Some(b) = &self.bias {
+            for batch_idx in 0..batch {
+                let offset = batch_idx * self.out_features;
+                for i in 0..self.out_features {
+                    out[offset + i] += b[i];
+                }
+            }
+        }
+
+        out
+    }
 }
 
 // ─── RMSNorm (Sub-LN) ──────────────────────────────────────────────────────
@@ -211,6 +235,34 @@ fn quantize_activations_8bit<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
 
     // Dequantize: scale back per token
     x_quant_ste * (gamma / q_b)
+}
+
+/// Quantize activations to i8 without dequantizing. For inference only.
+/// Returns (i8 data, gamma per token for dequant of output).
+fn quantize_to_i8(x_data: &[f32], d_model: usize, seq_len: usize) -> (Vec<i8>, Vec<f32>) {
+    let mut x_i8 = vec![0i8; x_data.len()];
+    let mut gammas = vec![0.0f32; seq_len];
+    let q_b: f32 = 127.0;
+
+    for t in 0..seq_len {
+        let offset = t * d_model;
+        let mut absmax = 0.0f32;
+        for j in 0..d_model {
+            let v = unsafe { *x_data.get_unchecked(offset + j) };
+            if v > absmax { absmax = v; }
+            else if -v > absmax { absmax = -v; }
+        }
+        if absmax < 1e-8 { absmax = 1e-8; }
+        gammas[t] = absmax;
+        let scale = q_b / absmax;
+        for j in 0..d_model {
+            let v = unsafe { *x_data.get_unchecked(offset + j) };
+            let quantized = (v * scale).round().clamp(-127.0, 127.0) as i8;
+            unsafe { *x_i8.get_unchecked_mut(offset + j) = quantized; }
+        }
+    }
+
+    (x_i8, gammas)
 }
 
 
@@ -428,7 +480,7 @@ impl<B: Backend> BitLinear<B> {
     }
 
     /// Forward pass for inference using CPU I2_S Kernel
-    /// This avoids floating point multiplications for the main matrix multiplication
+    /// Quantizes activations to i8 first, then uses branchless i8 kernel.
     pub fn forward_inference(&self, x: Tensor<B, 3>, state: &BitLinearInferenceState) -> Tensor<B, 3> {
         let [batch, seq, _d_in] = x.dims();
         let device = x.device();
@@ -436,25 +488,17 @@ impl<B: Backend> BitLinear<B> {
         // 1. Sub-LN: RMSNorm
         let x_norm = self.rms_norm.forward(x);
 
-        // 2. Quantize activations (8-bit)
-        let x_quant = quantize_activations_8bit(x_norm);
-
-        // 3. Custom MatMul using pre-cached packed weights + scales
-        let x_flat = x_quant.reshape([batch * seq, self.in_features]);
+        // 2. Quantize activations to i8 (NO dequantize)
+        let x_flat = x_norm.reshape([batch * seq, self.in_features]);
         let x_flat_data = x_flat.into_data();
         let x_slice = x_flat_data.as_slice::<f32>().unwrap();
-        
-        let out_data = state.forward_raw(x_slice, batch * seq);
+
+        let (x_i8, _gammas) = quantize_to_i8(x_slice, self.in_features, batch * seq);
+
+        // 3. i8 kernel: branchless int multiply
+        let out_data = state.forward_raw_i8(&x_i8, batch * seq);
         let output_flat = Tensor::<B, 2>::from_data(TensorData::new(out_data, [batch * seq, self.out_features]), &device);
-        let mut output = output_flat.reshape([batch, seq, self.out_features]);
-
-        // 4. Add bias
-        if let Some(b) = &state.bias {
-            let bias_tensor = Tensor::<B, 1>::from_data(TensorData::new(b.clone(), [self.out_features]), &device);
-            output = output + bias_tensor.unsqueeze::<2>().unsqueeze::<3>();
-        }
-
-        output
+        output_flat.reshape([batch, seq, self.out_features])
     }
 }
 
