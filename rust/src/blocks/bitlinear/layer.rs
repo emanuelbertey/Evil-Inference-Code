@@ -34,7 +34,6 @@ use super::kernel::{I2SKernel, I2STile16Kernel, KernelKind};
 #[derive(Clone)]
 pub struct BitLinearInferenceState {
     pub packed_w: Vec<u32>,
-    pub w_i8: Vec<i8>,
     pub scales: Vec<f32>,
     pub in_features: usize,
     pub out_features: usize,
@@ -56,7 +55,7 @@ impl BitLinearInferenceState {
             KernelKind::Tile16 => I2STile16Kernel::forward_raw(
                 x_quant_data,
                 batch,
-                &self.w_i8,
+                &self.packed_w,
                 &self.scales,
                 self.out_features,
                 self.in_features,
@@ -238,18 +237,11 @@ pub struct BitLinearConfig {
 
 #[derive(Module, Debug)]
 pub struct BitLinear<B: Backend> {
-    /// Full-precision shadow weights — the optimizer updates these.
-    /// Forward uses quantized versions via STE.
-    pub weight: Param<Tensor<B, 2>>,
-    /// Optional bias (typically not used in BitLinear)
+    pub weight: Option<Param<Tensor<B, 2>>>,
     pub bias: Option<Param<Tensor<B, 1>>>,
-    /// RMSNorm applied to activations before quantization (Sub-LN)
     pub rms_norm: RMSNorm<B>,
-    /// Number of bits for activation quantization
     pub activation_bits: usize,
-    /// Input dimension (for reference)
     pub in_features: usize,
-    /// Output dimension (for reference)
     pub out_features: usize,
 }
 
@@ -272,7 +264,7 @@ impl BitLinearConfig {
         let rms_norm = RMSNorm::new(self.in_features, self.rms_norm_eps, device);
 
         BitLinear {
-            weight: Param::from_tensor(weight),
+            weight: Some(Param::from_tensor(weight)),
             bias,
             rms_norm,
             activation_bits: self.activation_bits,
@@ -301,7 +293,7 @@ impl<B: Backend> BitLinear<B> {
         let x_quant = quantize_activations_8bit(x_norm);
 
         // 3. Quantize weights (ternary with STE)
-        let (w_quant, _scale) = quantize_weights_ternary(self.weight.val());
+        let (w_quant, _scale) = quantize_weights_ternary(self.weight.as_ref().unwrap().val());
 
         // 4. MatMul: x_quant @ w_quant^T
         // Reshape for batch matmul: (B*S, D_in) @ (D_out, D_in)^T = (B*S, D_out)
@@ -330,7 +322,7 @@ impl<B: Backend> BitLinear<B> {
         let x_quant = x_quant_3d.reshape([batch, self.in_features]);
 
         // 3. Quantize weights
-        let (w_quant, _scale) = quantize_weights_ternary(self.weight.val());
+        let (w_quant, _scale) = quantize_weights_ternary(self.weight.as_ref().unwrap().val());
 
         // 4. MatMul
         let mut output = x_quant.matmul(w_quant.transpose());
@@ -347,7 +339,7 @@ impl<B: Backend> BitLinear<B> {
     /// Returns the quantized weight matrix and per-group AbsMean scales.
     /// scales has shape [n_groups] where n_groups = ceil(rows*cols / GROUP_SIZE).
     pub fn get_ternary_weights(&self, device: &B::Device) -> (Tensor<B, 2>, Tensor<B, 1>) {
-        let w = self.weight.val();
+        let w = self.weight.as_ref().unwrap().val();
         let dims = w.dims();
         let numel = dims[0] * dims[1];
 
@@ -407,11 +399,9 @@ impl<B: Backend> BitLinear<B> {
         (neg, zero, pos, total)
     }
 
-    pub fn release_weights(&mut self, device: &B::Device) {
-        self.weight = Param::from_tensor(Tensor::zeros([1, 1], device));
-        if self.bias.is_some() {
-            self.bias = Some(Param::from_tensor(Tensor::zeros([1], device)));
-        }
+    pub fn release_weights(&mut self, _device: &B::Device) {
+        self.weight = None;
+        self.bias = None;
     }
 
     /// Export to a pure raw inference struct, completely detached from Burn
@@ -422,7 +412,6 @@ impl<B: Backend> BitLinear<B> {
         let w_slice = w_data.as_slice::<f32>().unwrap();
         
         let packed_w = I2SKernel::pack_weights(w_slice);
-        let w_i8 = I2STile16Kernel::quantize_to_i8(w_slice);
         
         let bias = self.bias.as_ref().map(|b| {
             b.val().into_data().as_slice::<f32>().unwrap().to_vec()
@@ -430,7 +419,6 @@ impl<B: Backend> BitLinear<B> {
 
         BitLinearInferenceState {
             packed_w,
-            w_i8,
             scales,
             in_features: self.in_features,
             out_features: self.out_features,

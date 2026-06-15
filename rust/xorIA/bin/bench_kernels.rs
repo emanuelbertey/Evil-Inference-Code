@@ -59,10 +59,10 @@ fn bench_raw_kernel(kernel_name: &str, x: &[f32], batch: usize, out: usize, inp:
             t0.elapsed().as_secs_f32() * 1000.0 / iters as f32
         }
         "Tile16" => {
-            let w_i8 = I2STile16Kernel::quantize_to_i8(&w_t);
-            for _ in 0..50 { let _ = I2STile16Kernel::forward_raw(x, batch, &w_i8, &scales, out, inp); }
+            let packed = I2SKernel::pack_weights(&w_t);
+            for _ in 0..50 { let _ = I2STile16Kernel::forward_raw(x, batch, &packed, &scales, out, inp); }
             let t0 = Instant::now();
-            for _ in 0..iters { let _ = I2STile16Kernel::forward_raw(x, batch, &w_i8, &scales, out, inp); }
+            for _ in 0..iters { let _ = I2STile16Kernel::forward_raw(x, batch, &packed, &scales, out, inp); }
             t0.elapsed().as_secs_f32() * 1000.0 / iters as f32
         }
         "f32" => {

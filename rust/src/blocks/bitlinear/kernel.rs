@@ -362,43 +362,78 @@ impl TL2Kernel {
 pub struct I2STile16Kernel;
 
 impl I2STile16Kernel {
-    pub fn quantize_to_i8(weights: &[f32]) -> Vec<i8> {
-        weights.iter().map(|&w| {
-            if w < -0.5 { -1i8 } else if w > 0.5 { 1i8 } else { 0i8 }
-        }).collect()
-    }
-
     #[inline(always)]
     fn compute_row(
         x_data: &[f32], x_off: usize,
-        w: &[i8], w_row: usize,
+        packed_w: &[u32], w_row: usize,
         scales: &[f32], in_features: usize,
     ) -> f32 {
         unsafe {
             let mut sum = 0.0f32;
+            let w_idx_base = w_row >> 4;
             let mut i = 0usize;
-            while i + 7 < in_features {
-                let w0 = *w.get_unchecked(w_row + i) as f32;
-                let w1 = *w.get_unchecked(w_row + i + 1) as f32;
-                let w2 = *w.get_unchecked(w_row + i + 2) as f32;
-                let w3 = *w.get_unchecked(w_row + i + 3) as f32;
-                let w4 = *w.get_unchecked(w_row + i + 4) as f32;
-                let w5 = *w.get_unchecked(w_row + i + 5) as f32;
-                let w6 = *w.get_unchecked(w_row + i + 6) as f32;
-                let w7 = *w.get_unchecked(w_row + i + 7) as f32;
-                let x0 = *x_data.get_unchecked(x_off + i);
-                let x1 = *x_data.get_unchecked(x_off + i + 1);
-                let x2 = *x_data.get_unchecked(x_off + i + 2);
-                let x3 = *x_data.get_unchecked(x_off + i + 3);
-                let x4 = *x_data.get_unchecked(x_off + i + 4);
-                let x5 = *x_data.get_unchecked(x_off + i + 5);
-                let x6 = *x_data.get_unchecked(x_off + i + 6);
-                let x7 = *x_data.get_unchecked(x_off + i + 7);
-                sum += w0*x0 + w1*x1 + w2*x2 + w3*x3 + w4*x4 + w5*x5 + w6*x6 + w7*x7;
-                i += 8;
+            while i + 15 < in_features {
+                let packed = *packed_w.get_unchecked(w_idx_base + (i >> 4));
+                let x_base = x_off + i;
+
+                let x0 = *x_data.get_unchecked(x_base);
+                let x1 = *x_data.get_unchecked(x_base + 1);
+                let x2 = *x_data.get_unchecked(x_base + 2);
+                let x3 = *x_data.get_unchecked(x_base + 3);
+                let x4 = *x_data.get_unchecked(x_base + 4);
+                let x5 = *x_data.get_unchecked(x_base + 5);
+                let x6 = *x_data.get_unchecked(x_base + 6);
+                let x7 = *x_data.get_unchecked(x_base + 7);
+                let x8 = *x_data.get_unchecked(x_base + 8);
+                let x9 = *x_data.get_unchecked(x_base + 9);
+                let x10 = *x_data.get_unchecked(x_base + 10);
+                let x11 = *x_data.get_unchecked(x_base + 11);
+                let x12 = *x_data.get_unchecked(x_base + 12);
+                let x13 = *x_data.get_unchecked(x_base + 13);
+                let x14 = *x_data.get_unchecked(x_base + 14);
+                let x15 = *x_data.get_unchecked(x_base + 15);
+
+                let b0  = (packed)        & 0b11;
+                let b1  = (packed >> 2)   & 0b11;
+                let b2  = (packed >> 4)   & 0b11;
+                let b3  = (packed >> 6)   & 0b11;
+                let b4  = (packed >> 8)   & 0b11;
+                let b5  = (packed >> 10)  & 0b11;
+                let b6  = (packed >> 12)  & 0b11;
+                let b7  = (packed >> 14)  & 0b11;
+                let b8  = (packed >> 16)  & 0b11;
+                let b9  = (packed >> 18)  & 0b11;
+                let b10 = (packed >> 20)  & 0b11;
+                let b11 = (packed >> 22)  & 0b11;
+                let b12 = (packed >> 24)  & 0b11;
+                let b13 = (packed >> 26)  & 0b11;
+                let b14 = (packed >> 28)  & 0b11;
+                let b15 = (packed >> 30)  & 0b11;
+
+                if b0  == 0b10 { sum += x0;  } else if b0  == 0b00 { sum -= x0; }
+                if b1  == 0b10 { sum += x1;  } else if b1  == 0b00 { sum -= x1; }
+                if b2  == 0b10 { sum += x2;  } else if b2  == 0b00 { sum -= x2; }
+                if b3  == 0b10 { sum += x3;  } else if b3  == 0b00 { sum -= x3; }
+                if b4  == 0b10 { sum += x4;  } else if b4  == 0b00 { sum -= x4; }
+                if b5  == 0b10 { sum += x5;  } else if b5  == 0b00 { sum -= x5; }
+                if b6  == 0b10 { sum += x6;  } else if b6  == 0b00 { sum -= x6; }
+                if b7  == 0b10 { sum += x7;  } else if b7  == 0b00 { sum -= x7; }
+                if b8  == 0b10 { sum += x8;  } else if b8  == 0b00 { sum -= x8; }
+                if b9  == 0b10 { sum += x9;  } else if b9  == 0b00 { sum -= x9; }
+                if b10 == 0b10 { sum += x10; } else if b10 == 0b00 { sum -= x10; }
+                if b11 == 0b10 { sum += x11; } else if b11 == 0b00 { sum -= x11; }
+                if b12 == 0b10 { sum += x12; } else if b12 == 0b00 { sum -= x12; }
+                if b13 == 0b10 { sum += x13; } else if b13 == 0b00 { sum -= x13; }
+                if b14 == 0b10 { sum += x14; } else if b14 == 0b00 { sum -= x14; }
+                if b15 == 0b10 { sum += x15; } else if b15 == 0b00 { sum -= x15; }
+
+                i += 16;
             }
             while i < in_features {
-                sum += *w.get_unchecked(w_row + i) as f32 * *x_data.get_unchecked(x_off + i);
+                let local = i & 15;
+                let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
+                let x_val = *x_data.get_unchecked(x_off + i);
+                if bits == 0b10 { sum += x_val; } else if bits == 0b00 { sum -= x_val; }
                 i += 1;
             }
             let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
@@ -408,7 +443,7 @@ impl I2STile16Kernel {
 
     pub fn forward_raw(
         x_data: &[f32], batch: usize,
-        w_i8: &[i8], scales: &[f32],
+        packed_w: &[u32], scales: &[f32],
         out_features: usize, in_features: usize,
     ) -> Vec<f32> {
         let mut out = vec![0.0f32; batch * out_features];
@@ -419,7 +454,7 @@ impl I2STile16Kernel {
                 for o in 0..out_features {
                     unsafe {
                         *out.get_unchecked_mut(b * out_features + o) =
-                            Self::compute_row(x_data, x_off, w_i8, o * in_features, scales, in_features);
+                            Self::compute_row(x_data, x_off, packed_w, o * in_features, scales, in_features);
                     }
                 }
             }
@@ -446,7 +481,7 @@ impl I2STile16Kernel {
                         let o = idx % out_features;
                         unsafe {
                             *chunk.get_unchecked_mut(local_idx) =
-                                Self::compute_row(x_data, b * in_features, w_i8, o * in_features, scales, in_features);
+                                Self::compute_row(x_data, b * in_features, packed_w, o * in_features, scales, in_features);
                         }
                     }
                 });
