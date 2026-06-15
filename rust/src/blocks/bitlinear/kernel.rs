@@ -1,5 +1,4 @@
 pub const GROUP_SIZE: usize = 128;
-const TILE_ROWS: usize = 32;
 
 pub struct I2SKernel;
 
@@ -21,7 +20,7 @@ impl I2SKernel {
     fn compute_row_aligned(
         x_data: &[f32], x_off: usize,
         packed_w: &[u32], w_row_base: usize,
-        scales: &[f32], in_features: usize,
+        in_features: usize,
     ) -> f32 {
         let mut sum_pos = 0.0f32;
         let mut sum_neg = 0.0f32;
@@ -59,14 +58,11 @@ impl I2SKernel {
         out_features: usize, in_features: usize,
         out_data: &mut [f32],
     ) {
-        let num_tiles = (out_features + TILE_ROWS - 1) / TILE_ROWS;
-        let total_tiles = batch * num_tiles;
-
-        if total_tiles <= 2 {
+        if batch * out_features <= 2 {
             for b in 0..batch {
                 let x_off = b * in_features;
                 for o in 0..out_features {
-                    let raw = Self::compute_row_aligned(x_data, x_off, packed_w, o * in_features, scales, in_features);
+                    let raw = Self::compute_row_aligned(x_data, x_off, packed_w, o * in_features, in_features);
                     let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
                     out_data[b * out_features + o] = raw * scales[g];
                 }
@@ -77,53 +73,52 @@ impl I2SKernel {
         let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
 
         std::thread::scope(|s| {
-            let tiles_per_thread = (total_tiles + num_threads - 1) / num_threads;
+            let rows_per_thread = (batch * out_features + num_threads - 1) / num_threads;
+            let mut remaining = out_data;
             for t in 0..num_threads {
-                let start = t * tiles_per_thread;
-                let end = (start + tiles_per_thread).min(total_tiles);
-                if start >= end { continue; }
+                let n = rows_per_thread.min(remaining.len());
+                if n == 0 { break; }
+                let (chunk, rest) = remaining.split_at_mut(n);
+                remaining = rest;
+                let start_row = t * rows_per_thread;
                 s.spawn(move || {
-                    for tile_idx in start..end {
-                        let b = tile_idx / num_tiles;
-                        let tile = tile_idx % num_tiles;
-                        let o_start = tile * TILE_ROWS;
-                        let o_end = (o_start + TILE_ROWS).min(out_features);
+                    for local_idx in 0..chunk.len() {
+                        let idx = start_row + local_idx;
+                        let b = idx / out_features;
+                        let o = idx % out_features;
+                        let w_row = o * in_features;
+                        let w_idx_base = w_row >> 4;
                         let x_off = b * in_features;
+                        let mut sum_pos = 0.0f32;
+                        let mut sum_neg = 0.0f32;
+                        let mut i = 0usize;
 
-                        for o in o_start..o_end {
-                            let w_row = o * in_features;
-                            let w_idx_base = w_row >> 4;
-                            let mut sum_pos = 0.0f32;
-                            let mut sum_neg = 0.0f32;
-                            let mut i = 0usize;
-
-                            while i + 15 < in_features {
-                                let packed = packed_w[w_idx_base + (i >> 4)];
-                                let mut j = 0u32;
-                                while j < 16 {
-                                    let bits = (packed >> (j * 2)) & 0b11;
-                                    let x_val = x_data[x_off + i + j as usize];
-                                    if bits == 0b10 { sum_pos += x_val; }
-                                    else if bits == 0b00 { sum_neg += x_val; }
-                                    j += 1;
-                                }
-                                i += 16;
+                        while i + 15 < in_features {
+                            let packed = packed_w[w_idx_base + (i >> 4)];
+                            let mut j = 0u32;
+                            while j < 16 {
+                                let bits = (packed >> (j * 2)) & 0b11;
+                                let x_val = x_data[x_off + i + j as usize];
+                                if bits == 0b10 { sum_pos += x_val; }
+                                else if bits == 0b00 { sum_neg += x_val; }
+                                j += 1;
                             }
-                            if i < in_features {
-                                let packed = packed_w[w_idx_base + (i >> 4)];
-                                while i < in_features {
-                                    let local = (i & 15) as u32;
-                                    let bits = (packed >> (local * 2)) & 0b11;
-                                    let x_val = x_data[x_off + i];
-                                    if bits == 0b10 { sum_pos += x_val; }
-                                    else if bits == 0b00 { sum_neg += x_val; }
-                                    i += 1;
-                                }
-                            }
-
-                            let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-                            out_data[b * out_features + o] = (sum_pos - sum_neg) * scales[g];
+                            i += 16;
                         }
+                        if i < in_features {
+                            let packed = packed_w[w_idx_base + (i >> 4)];
+                            while i < in_features {
+                                let local = (i & 15) as u32;
+                                let bits = (packed >> (local * 2)) & 0b11;
+                                let x_val = x_data[x_off + i];
+                                if bits == 0b10 { sum_pos += x_val; }
+                                else if bits == 0b00 { sum_neg += x_val; }
+                                i += 1;
+                            }
+                        }
+
+                        let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
+                        chunk[local_idx] = (sum_pos - sum_neg) * scales[g];
                     }
                 });
             }
