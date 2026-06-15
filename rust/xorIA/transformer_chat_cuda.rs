@@ -290,6 +290,25 @@ fn generate_text_cached<B: Backend>(
     let mut history: Vec<usize> = ids.clone();
     let mut generated = Vec::new();
     current_offset += seed_len;
+    // Trim rule: if cache length > threshold, remove `remove_count` oldest tokens
+    if current_offset >= 70 {
+        let threshold = 70usize;
+        let remove_count = 30usize; // remove 30 oldest when threshold exceeded
+        if let Some(first) = caches.get(0) {
+            let mut dims = first.cached_k.dims();
+            let mut seq = dims[1];
+            if seq > threshold {
+                let remove = remove_count.min(seq);
+                let keep = seq - remove;
+                for c in caches.iter_mut() {
+                    *c = c.keep_last(keep);
+                }
+                current_offset = current_offset.saturating_sub(remove);
+                println!("(Cache trimmed: removed {} tokens; kept last {} tokens; new offset: {})", remove, keep, current_offset);
+                seq = keep;
+            }
+        }
+    }
 
     let mut next_id = sample_from_logits(
         last_logits, temperature, top_k, top_p, repetition_penalty, &history,
@@ -305,8 +324,9 @@ fn generate_text_cached<B: Backend>(
         history.push(next_id);
         if history.len() > 64 { history.remove(0); }
 
-        let token_str = tokenizer.decode(&[next_id]);
-        print!("{}", token_str);
+        let token_raw = tokenizer.id_to_token(next_id).unwrap_or_default();
+        let clean_str = token_raw.replace('▁', " ").replace(' ', " ");
+        print!("{}", clean_str);
         io::stdout().flush().unwrap();
 
         let input = Tensor::<B, 2, Int>::from_data(
@@ -318,6 +338,26 @@ fn generate_text_cached<B: Backend>(
         let (logits, new_caches) = model.forward_with_cache(input, current_offset, cache_input);
         caches = new_caches;
         current_offset += 1;
+
+        // Trim rule during generation: if cache length > threshold, remove `remove_count` oldest tokens
+        if current_offset >= 70 {
+            let threshold = 70usize;
+            let remove_count = 30usize; // remove 30 oldest when threshold exceeded
+            if let Some(first) = caches.get(0) {
+                let mut dims = first.cached_k.dims();
+                let mut seq = dims[1];
+                if seq > threshold {
+                    let remove = remove_count.min(seq);
+                    let keep = seq - remove;
+                    for c in caches.iter_mut() {
+                        *c = c.keep_last(keep);
+                    }
+                    current_offset = current_offset.saturating_sub(remove);
+                    println!("(Cache trimmed: removed {} tokens; kept last {} tokens; new offset: {})", remove, keep, current_offset);
+                    seq = keep;
+                }
+            }
+        }
 
         let [_, _, v] = logits.dims();
         let logits_2d = logits.reshape([1, v]);
@@ -356,7 +396,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let text = fs::read_to_string(&text_file)?;
     
-    let target_vocab_size = 2000;
+    let target_vocab_size = 16000;
     let tokenizer = if Path::new(&tokenizer_file).exists() {
         println!("Cargando tokenizer BPE desde {}...", tokenizer_file);
         Tokenizer::load(&tokenizer_file)?
@@ -376,21 +416,89 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut top_p: f32 = 0.95;
     let mut repetition_penalty: f32 = 1.1;
 
+    // Parámetros ajustables
+    let mut d_model: usize = 720;
+    let mut num_layers: usize = 24;
+    let mut num_heads: usize = 8;
+    let mut lr: f64 = 4e-5;
+    let mut num_epochs: usize = 50;
+    let mut batch_size: usize = 24;
+
     let mut modo_inferencia = false;
     if model_exists {
         loop {
-            print!("¡Modelo Transformer CUDA encontrado! ¿Deseas (e)ntrenar o (i)nferir? [e/i]: ");
+            println!("\n--- CONFIGURACIÓN ACTUAL (CUDA) ---");
+            println!("  (1) d_model: {}", d_model);
+            println!("  (2) Num layers: {}", num_layers);
+            println!("  (3) Heads:   {}", num_heads);
+            println!("  (4) LR:      {}", lr);
+            println!("  (5) Épocas:  {}", num_epochs);
+            println!("  (6) Batch:   {}", batch_size);
+            println!("  (7) Temp:    {}", temperature);
+            println!("  (8) R-Pen:   {}", repetition_penalty);
+            println!("----------------------------");
+            print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
             io::stdout().flush()?;
+
             let mut choice = String::new();
             io::stdin().read_line(&mut choice)?;
             let choice = choice.trim().to_lowercase();
-            match choice.as_str() {
-                "i" => { modo_inferencia = true; break; }
-                "e" => { break; }
-                _ => {
-                    if choice.is_empty() { continue; }
-                    println!("  → Escribe 'e' para entrenar o 'i' para inferencia.");
-                }
+
+            if choice == "i" {
+                modo_inferencia = true;
+                break;
+            } else if choice == "e" {
+                break;
+            } else if choice == "s" {
+                println!("\nAjustar parámetros (Enter para mantener actual):");
+
+                print!("d_model [{}]: ", d_model);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { d_model = v; }
+
+                print!("Num layers [{}]: ", num_layers);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_layers = v; }
+
+                print!("Heads [{}]: ", num_heads);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_heads = v; }
+
+                print!("Learning Rate [{}]: ", lr);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { lr = v; }
+
+                print!("Épocas [{}]: ", num_epochs);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_epochs = v; }
+
+                print!("Batch Size [{}]: ", batch_size);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { batch_size = v; }
+
+                print!("Temperatura [{}]: ", temperature);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { temperature = v; }
+
+                print!("Repetition Penalty [{}]: ", repetition_penalty);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { repetition_penalty = v; }
             }
         }
     }
@@ -398,10 +506,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokens = tokenizer.encode(&text);
     let device = CudaDevice::default();
 
-    let d_model = 512;
-    let num_layers = 8;
-    let num_heads = 8;
-    let num_kv_groups = 2; 
+    let num_kv_groups = 4; 
 
     println!("\n── Configuración del Transformer (CUDA) ──");
     println!("  d_model:       {}", d_model);
@@ -565,11 +670,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let batch_size = 24;
     let seq_len = 64;
     let stride = 64;
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
-    let num_epochs = 50;
 
     println!("Iniciando entrenamiento BPE (CUDA)...");
     println!("  batch_size: {} | seq_len: {} | batches/epoch: {}\n", batch_size, seq_len, num_batches);
@@ -603,7 +706,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let grads = loss.backward();
             let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
-            model = optim.step(3e-4, model, grads_p);
+            model = optim.step(lr, model, grads_p);
 
             if b % 10 == 0 {
                 let elapsed = start_epoch.elapsed().as_secs_f32();

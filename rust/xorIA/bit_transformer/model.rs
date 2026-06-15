@@ -51,38 +51,78 @@ impl<B: Backend> RMSNorm<B> {
 
 // ─── Quantization Functions ──────────────────────────────────────────────────
 
+const GROUP_SIZE: usize = 128;
+
+/// Per-group absmean ternary quantization with STE.
+/// Each group of GROUP_SIZE weights gets its own scale.
 fn quantize_weights_ternary<B: Backend>(w: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 1>) {
-    let abs_w = w.clone().abs();
-    let scale = abs_w.mean(); 
+    let orig_shape = w.dims();
+    let numel = orig_shape[0] * orig_shape[1];
 
-    let scale_val = scale.clone().reshape([1, 1]);
-    let w_scaled = w.clone() / (scale_val.clone() + 1e-8);
-    let w_rounded = w_scaled.clone().round();
-    let w_clamped = w_rounded.clamp(-1.0, 1.0);
+    // Flatten and pad if needed
+    let (w_flat, pad_len) = if numel % GROUP_SIZE != 0 {
+        let pad_len = GROUP_SIZE - (numel % GROUP_SIZE);
+        let w_flat = w.clone().reshape([numel]);
+        let zeros = Tensor::zeros([pad_len], &w.device());
+        let w_padded = Tensor::cat(vec![w_flat, zeros], 0);
+        (w_padded, pad_len)
+    } else {
+        (w.clone().reshape([numel]), 0)
+    };
 
-    // STE trick
-    let diff = w_clamped - w_scaled.clone();
-    let w_quantized_ste = w_scaled + diff.detach();
+    let n_groups = w_flat.dims()[0] / GROUP_SIZE;
+    let w_grouped = w_flat.reshape([n_groups, GROUP_SIZE]);
 
-    let w_dequant = w_quantized_ste * scale_val;
-    let scale_1d = scale.reshape([1]);
-    (w_dequant, scale_1d)
+    // Per-group scale = mean(|w|)
+    let scales = w_grouped.clone().abs().mean_dim(1).squeeze::<1>().clamp_min(1e-8);
+
+    // Normalize per group, round, clip to ternary
+    let scales_expanded = scales.clone().reshape([n_groups, 1]);
+    let w_scaled = w_grouped.clone() / scales_expanded.clone();
+    let w_ternary = w_scaled.clone().round().clamp(-1.0, 1.0);
+
+    // STE
+    let diff = w_ternary - w_scaled.clone();
+    let w_ste = w_scaled + diff.detach();
+    let w_dequant = w_ste * scales_expanded;
+
+    // Remove padding and reshape
+    let w_dequant = if pad_len > 0 {
+        w_dequant
+            .reshape([n_groups * GROUP_SIZE])
+            .narrow(0, 0, numel)
+            .reshape(orig_shape)
+    } else {
+        w_dequant.reshape(orig_shape)
+    };
+
+    (w_dequant, scales)
 }
 
 fn quantize_activations_8bit<B: Backend, const D: usize>(x: Tensor<B, D>) -> Tensor<B, D> {
     let q_b: f32 = 127.0;
-    let gamma = x.clone().abs().max().clamp_min(1e-8);
-    let gamma_val = gamma.into_scalar().elem::<f32>();
 
-    let x_scaled = x.clone() * (q_b / gamma_val);
+    // Per-last-dim absmax: one scale per token (last dimension)
+    let last_dim = D - 1;
+    let gamma = x.clone().abs().max_dim(last_dim).clamp_min(1e-8);
+
+    // gamma has rank D-1, unsqueeze to rank D for broadcasting
+    let mut gamma_shape = [0usize; D];
+    let dims = x.dims();
+    gamma_shape[..D-1].copy_from_slice(&dims[..D-1]);
+    gamma_shape[D-1] = 1;
+    let gamma = gamma.reshape(gamma_shape);
+
+    let x_scaled = x.clone() * (q_b.clone() as f32 / gamma.clone());
     let x_rounded = x_scaled.clone().round();
     let x_clamped = x_rounded.clamp(-q_b, q_b);
 
+    // STE
     let diff = x_clamped - x_scaled.clone();
     let x_quant_ste = x_scaled + diff.detach();
 
-    let rescale = gamma_val / q_b;
-    x_quant_ste * rescale
+    // Dequantize per token
+    x_quant_ste * (gamma / q_b)
 }
 
 // ─── BitLinear Layer ─────────────────────────────────────────────────────────
@@ -306,13 +346,26 @@ impl<B: Backend> BitTransformerLM<B> {
 impl<B: Backend> BitLinear<B> {
     pub fn weight_distribution(&self) -> (usize, usize, usize, usize) {
         let w = self.weight.val();
-        let abs_mean = w.clone().abs().mean().into_scalar().elem::<f32>();
-        let w_scaled = w / (abs_mean + 1e-8);
+        let dims = w.dims();
+        let numel = dims[0] * dims[1];
+        let (w_flat, pad_len) = if numel % GROUP_SIZE != 0 {
+            let pad_len = GROUP_SIZE - (numel % GROUP_SIZE);
+            let w_flat = w.clone().reshape([numel]);
+            let zeros = Tensor::zeros([pad_len], &w.device());
+            (Tensor::cat(vec![w_flat, zeros], 0), pad_len)
+        } else {
+            (w.reshape([numel]), 0)
+        };
+        let n_groups = w_flat.dims()[0] / GROUP_SIZE;
+        let w_grouped = w_flat.reshape([n_groups, GROUP_SIZE]);
+        let scales = w_grouped.clone().abs().mean_dim(1).squeeze::<1>().clamp_min(1e-8);
+        let scales_expanded = scales.reshape([n_groups, 1]);
+        let w_scaled = w_grouped / scales_expanded;
         let w_ternary = w_scaled.round().clamp(-1.0, 1.0);
         
         let data = w_ternary.into_data();
         let values = data.as_slice::<f32>().unwrap();
-        let total = values.len();
+        let total = if pad_len > 0 { numel } else { values.len() };
         let mut neg = 0;
         let mut zero = 0;
         let mut pos = 0;

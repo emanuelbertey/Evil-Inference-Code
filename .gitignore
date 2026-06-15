@@ -149,3 +149,4 @@ dmypy.json
 *.mpk
 *.pt
 /prism-ml-llama.cpp
+/nanochat-rs-ternary
