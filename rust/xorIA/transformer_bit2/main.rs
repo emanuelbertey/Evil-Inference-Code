@@ -83,6 +83,9 @@ fn generate_text_cached<B: Backend>(
 
     let mut next_id = sample_from_logits(last_logits, temperature, top_k, top_p, repetition_penalty, &history);
 
+    let mut total_model_time = 0.0f32;
+    let mut total_other_time = 0.0f32;
+
     for _ in 0..length {
         if let Some(token) = tokenizer.id_to_token(next_id) {
             if token == "eos" { break; }
@@ -97,9 +100,14 @@ fn generate_text_cached<B: Backend>(
         print!("{}", clean_str);
         io::stdout().flush().unwrap();
 
+        let t0 = Instant::now();
         let input = Tensor::<B, 2, Int>::from_data(TensorData::new(vec![next_id as i64], [1, 1]), &device);
         let cache_input: Vec<Option<KVCache<B>>> = caches.into_iter().collect();
         let (logits, new_caches) = model.forward_with_cache_inference(input, current_offset, cache_input, inf_state);
+        let model_time = t0.elapsed().as_secs_f32();
+        total_model_time += model_time;
+
+        let t1 = Instant::now();
         caches = new_caches.into_iter().map(Some).collect();
         current_offset += 1;
 
@@ -118,11 +126,19 @@ fn generate_text_cached<B: Backend>(
         let [_, _, v] = logits.dims();
         let logits_2d = logits.reshape([1, v]);
         next_id = sample_from_logits(logits_2d, temperature, top_k, top_p, repetition_penalty, &history);
+        total_other_time += t1.elapsed().as_secs_f32();
     }
 
     let elapsed = start_gen.elapsed().as_secs_f32();
     let text = tokenizer.decode(&generated);
     println!();
+    if !generated.is_empty() {
+        let n = generated.len() as f32;
+        println!("[DEBUG] Modelo: {:.3}s ({:.1} ms/tok) | Other: {:.3}s ({:.1} ms/tok) | Kernel+attn: ~{:.1}%",
+            total_model_time, total_model_time * 1000.0 / n,
+            total_other_time, total_other_time * 1000.0 / n,
+            total_model_time / elapsed.max(0.001) * 100.0);
+    }
     (text, generated.len(), elapsed, caches, current_offset)
 }
 

@@ -436,7 +436,7 @@ impl<B: Backend> BitLinear<B> {
         // 2. Quantize activations (8-bit)
         let x_quant = quantize_activations_8bit(x_norm);
 
-        // 3. Custom MatMul using pre-cached packed weights + row_scales
+        // 3. Custom MatMul using pre-cached packed weights + scales
         let x_flat = x_quant.reshape([batch * seq, self.in_features]);
         let x_flat_data = x_flat.into_data();
         let x_slice = x_flat_data.as_slice::<f32>().unwrap();

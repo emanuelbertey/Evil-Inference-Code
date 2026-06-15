@@ -216,3 +216,7 @@ path = "xorIA/transformer_bit2/main.rs"
 [[bin]]
 name = "transformer_bit2_cuda"
 path = "xorIA/transformer_bit2/main_cuda.rs"
+
+[[bin]]
+name = "bench_kernels"
+path = "xorIA/bin/bench_kernels.rs"
