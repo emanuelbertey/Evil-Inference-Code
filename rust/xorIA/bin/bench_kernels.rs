@@ -1,5 +1,5 @@
 use std::time::Instant;
-use xlstm::blocks::bitlinear::kernel::{I2SKernel, TL1Kernel, TL2Kernel};
+use xlstm::blocks::bitlinear::kernel::{I2SKernel, I2STile16Kernel, KernelKind, TL1Kernel, TL2Kernel};
 use xlstm::blocks::bitlinear::layer::{BitLinear, BitLinearConfig, BitLinearInferenceState};
 use burn::module::Module;
 use burn_flex::Flex;
@@ -58,6 +58,13 @@ fn bench_raw_kernel(kernel_name: &str, x: &[f32], batch: usize, out: usize, inp:
             for _ in 0..iters { let _ = TL2Kernel::forward_raw(x, batch, &packed, &scales, out, inp); }
             t0.elapsed().as_secs_f32() * 1000.0 / iters as f32
         }
+        "Tile16" => {
+            let w_i8 = I2STile16Kernel::quantize_to_i8(&w_t);
+            for _ in 0..50 { let _ = I2STile16Kernel::forward_raw(x, batch, &w_i8, &scales, out, inp); }
+            let t0 = Instant::now();
+            for _ in 0..iters { let _ = I2STile16Kernel::forward_raw(x, batch, &w_i8, &scales, out, inp); }
+            t0.elapsed().as_secs_f32() * 1000.0 / iters as f32
+        }
         "f32" => {
             for _ in 0..50 { let _ = bench_f32_matmul(x, &w_f32, batch, out, inp); }
             let t0 = Instant::now();
@@ -89,14 +96,16 @@ fn main() {
     for (out, inp) in &dims {
         let x: Vec<f32> = (0..batch * inp).map(|_| rand::random::<f32>() * 0.1).collect();
         let t_i2s = bench_raw_kernel("I2S", &x, batch, *out, *inp, iters);
+        let t_tile16 = bench_raw_kernel("Tile16", &x, batch, *out, *inp, iters);
         let t_tl1 = bench_raw_kernel("TL1", &x, batch, *out, *inp, iters);
         let t_tl2 = bench_raw_kernel("TL2", &x, batch, *out, *inp, iters);
         let t_f32 = bench_raw_kernel("f32", &x, batch, *out, *inp, iters);
         println!("{}x{}:", out, inp);
-        println!("  f32:   {:.3} ms", t_f32);
-        println!("  I2S:   {:.3} ms  ({:.1}x vs f32)", t_i2s, t_f32 / t_i2s.max(0.001));
-        println!("  TL1:   {:.3} ms  ({:.1}x vs f32)", t_tl1, t_f32 / t_tl1.max(0.001));
-        println!("  TL2:   {:.3} ms  ({:.1}x vs f32)", t_tl2, t_f32 / t_tl2.max(0.001));
+        println!("  f32:     {:.3} ms", t_f32);
+        println!("  I2S:     {:.3} ms  ({:.1}x vs f32)", t_i2s, t_f32 / t_i2s.max(0.001));
+        println!("  Tile16:  {:.3} ms  ({:.1}x vs f32)", t_tile16, t_f32 / t_tile16.max(0.001));
+        println!("  TL1:     {:.3} ms  ({:.1}x vs f32)", t_tl1, t_f32 / t_tl1.max(0.001));
+        println!("  TL2:     {:.3} ms  ({:.1}x vs f32)", t_tl2, t_f32 / t_tl2.max(0.001));
         println!();
     }
 
@@ -131,7 +140,7 @@ fn main() {
         for (name, out, inp) in &layer_specs {
             let config = BitLinearConfig { in_features: *inp, out_features: *out, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 };
             let mut layer: BitLinear<MyBackend> = config.init(&device);
-            let state = layer.export_inference_layer(&device);
+            let state = layer.export_inference_layer(&device, KernelKind::Tile16);
             layer.release_weights(&device);
             let x: Vec<f32> = (0..*inp).map(|_| rand::random::<f32>() * 0.1).collect();
             let t = bench_bitlinear(&state, &x, iters);
@@ -143,7 +152,7 @@ fn main() {
     println!("  Head (16000x512):");
     let config = BitLinearConfig { in_features: 512, out_features: 16000, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 };
     let mut layer: BitLinear<MyBackend> = config.init(&device);
-    let state = layer.export_inference_layer(&device);
+    let state = layer.export_inference_layer(&device, KernelKind::I2S);
     layer.release_weights(&device);
     let x: Vec<f32> = (0..512).map(|_| rand::random::<f32>() * 0.1).collect();
     let t = bench_bitlinear(&state, &x, iters);

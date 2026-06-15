@@ -3,6 +3,7 @@
 
 use burn::module::Module;
 use burn::tensor::{Tensor, backend::Backend, TensorData, Int};
+use xlstm::blocks::bitlinear::kernel::KernelKind;
 use std::error::Error;
 use std::fs;
 use std::io::{self, BufReader, Read};
@@ -481,7 +482,7 @@ impl<B: Backend> TransformerBitLinearLM<B> {
         (self.head.forward(x), new_caches)
     }
 
-    pub fn build_inference_state(&self, device: &B::Device) -> TransformerInferenceState {
+    pub fn build_inference_state(&self, device: &B::Device, layer_kernel: KernelKind, head_kernel: KernelKind) -> TransformerInferenceState {
         let mut qkv_states = Vec::new();
         let mut o_proj_states = Vec::new();
         let mut ffn_gate_up_states = Vec::new();
@@ -489,13 +490,13 @@ impl<B: Backend> TransformerBitLinearLM<B> {
 
         for layer in &self.transformer.layers {
             qkv_states.push((
-                layer.qkv.q_proj.export_inference_layer(device),
-                layer.qkv.k_proj.export_inference_layer(device),
-                layer.qkv.v_proj.export_inference_layer(device),
+                layer.qkv.q_proj.export_inference_layer(device, layer_kernel),
+                layer.qkv.k_proj.export_inference_layer(device, layer_kernel),
+                layer.qkv.v_proj.export_inference_layer(device, layer_kernel),
             ));
-            o_proj_states.push(layer.o_proj.o_proj.export_inference_layer(device));
-            ffn_gate_up_states.push(layer.ffn.gate_up_proj.export_inference_layer(device));
-            ffn_down_states.push(layer.ffn.down_proj.export_inference_layer(device));
+            o_proj_states.push(layer.o_proj.o_proj.export_inference_layer(device, layer_kernel));
+            ffn_gate_up_states.push(layer.ffn.gate_up_proj.export_inference_layer(device, layer_kernel));
+            ffn_down_states.push(layer.ffn.down_proj.export_inference_layer(device, layer_kernel));
         }
 
         TransformerInferenceState {
@@ -503,7 +504,7 @@ impl<B: Backend> TransformerBitLinearLM<B> {
             o_proj: o_proj_states,
             ffn_gate_up: ffn_gate_up_states,
             ffn_down: ffn_down_states,
-            head: self.head.export_inference_layer(device),
+            head: self.head.export_inference_layer(device, head_kernel),
         }
     }
 

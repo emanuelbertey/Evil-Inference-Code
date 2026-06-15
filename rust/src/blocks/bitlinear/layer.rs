@@ -27,29 +27,41 @@ use burn::prelude::*;
 use burn::module::{Module, Param};
 use burn::config::Config;
 use burn::tensor::TensorData;
-use super::kernel::I2SKernel;
+use super::kernel::{I2SKernel, I2STile16Kernel, KernelKind};
 
 // ─── Pure Raw Inference State ───────────────────────────────────────────────
 /// State completely detached from Burn Tensors for maximum CPU inference speed
 #[derive(Clone)]
 pub struct BitLinearInferenceState {
     pub packed_w: Vec<u32>,
+    pub w_i8: Vec<i8>,
     pub scales: Vec<f32>,
     pub in_features: usize,
     pub out_features: usize,
     pub bias: Option<Vec<f32>>,
+    pub kernel: KernelKind,
 }
 
 impl BitLinearInferenceState {
     pub fn forward_raw(&self, x_quant_data: &[f32], batch: usize) -> Vec<f32> {
-        let mut out = I2SKernel::forward_raw(
-            x_quant_data,
-            batch,
-            &self.packed_w,
-            &self.scales,
-            self.out_features,
-            self.in_features,
-        );
+        let mut out = match self.kernel {
+            KernelKind::I2S => I2SKernel::forward_raw(
+                x_quant_data,
+                batch,
+                &self.packed_w,
+                &self.scales,
+                self.out_features,
+                self.in_features,
+            ),
+            KernelKind::Tile16 => I2STile16Kernel::forward_raw(
+                x_quant_data,
+                batch,
+                &self.w_i8,
+                &self.scales,
+                self.out_features,
+                self.in_features,
+            ),
+        };
         
         if let Some(b) = &self.bias {
             for batch_idx in 0..batch {
@@ -403,13 +415,14 @@ impl<B: Backend> BitLinear<B> {
     }
 
     /// Export to a pure raw inference struct, completely detached from Burn
-    pub fn export_inference_layer(&self, device: &B::Device) -> BitLinearInferenceState {
+    pub fn export_inference_layer(&self, device: &B::Device, kernel: KernelKind) -> BitLinearInferenceState {
         let (w_ternary, scales_tensor) = self.get_ternary_weights(device);
         let scales = scales_tensor.into_data().as_slice::<f32>().unwrap().to_vec();
         let w_data = w_ternary.into_data();
         let w_slice = w_data.as_slice::<f32>().unwrap();
         
         let packed_w = I2SKernel::pack_weights(w_slice);
+        let w_i8 = I2STile16Kernel::quantize_to_i8(w_slice);
         
         let bias = self.bias.as_ref().map(|b| {
             b.val().into_data().as_slice::<f32>().unwrap().to_vec()
@@ -417,10 +430,12 @@ impl<B: Backend> BitLinear<B> {
 
         BitLinearInferenceState {
             packed_w,
+            w_i8,
             scales,
             in_features: self.in_features,
             out_features: self.out_features,
             bias,
+            kernel,
         }
     }
 

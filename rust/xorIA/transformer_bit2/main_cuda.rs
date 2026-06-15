@@ -24,6 +24,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use xlstm::blocks::bitlinear::layer::BitLinearConfig;
+use xlstm::blocks::bitlinear::kernel::KernelKind;
 use model::{
     Tokenizer, FileFragmentIterator, BitLinearQKVProjection, BitLinearOutputProjection,
     BitLinearSwiGLUFeedForward, BitLinearTransformerLayer, BitLinearRMSNorm,
@@ -216,7 +217,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("Pre-computando kernels ternarios...");
         let inf_start = Instant::now();
         let mut model_v = model.valid();
-        let inf_state = model_v.build_inference_state(&device);
+        let inf_state = model_v.build_inference_state(&device, KernelKind::I2S, KernelKind::I2S);
         model_v.release_all_weights(&device);
         println!("Kernels listos en {:.2}s (RAM 16-bit liberada)\n", inf_start.elapsed().as_secs_f32());
         println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'reset', 'salir'\n");
@@ -288,7 +289,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         CompactRecorder::new().clone().save_file(&model_file, &model.clone())?;
 
         if (epoch+1) % 2 == 0 {
-            let inf_state = model.valid().build_inference_state(&device);
+            let inf_state = model.valid().build_inference_state(&device, KernelKind::I2S, KernelKind::I2S);
             let empty: Vec<Option<KVCache<burn_cuda::Cuda<f32>>>> = (0..num_layers).map(|_| None).collect();
             let (_, tc, el, _, _) = generate_text_cached(&model.clone().valid(), &inf_state, &tokenizer, "The world ", 30, temperature, top_k, top_p, repetition_penalty, empty, 0);
             println!("[{:.1} tok/s]", tc as f32 / el.max(0.001));
