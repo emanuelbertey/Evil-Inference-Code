@@ -28,7 +28,7 @@ use xlstm::blocks::bitlinear::layer::BitLinearConfig;
 use model::{
     Tokenizer, FileFragmentIterator, BitLinearQKVProjection, BitLinearOutputProjection,
     BitLinearSwiGLUFeedForward, BitLinearTransformerLayer, BitLinearRMSNorm,
-    BitLinearTransformerStack, TransformerBitLinearLM, KVCache,
+    BitLinearTransformerStack, TransformerBitLinearLM, TransformerInferenceState, KVCache,
     create_batch, sample_from_logits,
 };
 
@@ -38,6 +38,7 @@ type MyBackend = Autodiff<Flex<f32>>;
 
 fn generate_text_cached<B: Backend>(
     model: &TransformerBitLinearLM<B>,
+    inf_state: &TransformerInferenceState,
     tokenizer: &Tokenizer,
     seed_text: &str,
     length: usize,
@@ -58,7 +59,7 @@ fn generate_text_cached<B: Backend>(
         TensorData::new(ids.iter().map(|&id| id as i64).collect(), [1, seed_len]), &device,
     );
 
-    let (logits, updated_caches) = model.forward_with_cache_inference(input, current_offset, caches, &device);
+    let (logits, updated_caches) = model.forward_with_cache_inference(input, current_offset, caches, inf_state);
     let mut caches = updated_caches.into_iter().map(Some).collect::<Vec<_>>();
 
     let [_, s_len, v_dim] = logits.dims();
@@ -98,7 +99,7 @@ fn generate_text_cached<B: Backend>(
 
         let input = Tensor::<B, 2, Int>::from_data(TensorData::new(vec![next_id as i64], [1, 1]), &device);
         let cache_input: Vec<Option<KVCache<B>>> = caches.into_iter().collect();
-        let (logits, new_caches) = model.forward_with_cache_inference(input, current_offset, cache_input, &device);
+        let (logits, new_caches) = model.forward_with_cache_inference(input, current_offset, cache_input, inf_state);
         caches = new_caches.into_iter().map(Some).collect();
         current_offset += 1;
 
@@ -175,7 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("\n--- CONFIGURACIÓN ACTUAL ---");
             println!("  (1) d_model: {}  (2) Layers: {}  (3) Heads: {}", d_model, num_layers, num_heads);
             println!("  (4) LR: {}  (5) Épocas: {}  (6) Batch: {}", lr, num_epochs, batch_size);
-            println!("  (7) Temp: {}  (8) R-Pen: {}", temperature, repetition_penalty);
+            println!("  (7) Temp: {}  (8) Top-K: {}  (9) Top-P: {}  (10) R-Pen: {}", temperature, top_k, top_p, repetition_penalty);
             println!("----------------------------");
             print!("¿Entrenar (e), Inferir con I2S (i) o Ajustar (s)? [e/i/s]: ");
             io::stdout().flush()?;
@@ -193,6 +194,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 read_param!("Épocas", num_epochs);
                 read_param!("Batch", batch_size);
                 read_param!("Temp", temperature);
+                read_param!("Top-K", top_k);
+                read_param!("Top-P", top_p);
                 read_param!("R-Pen", repetition_penalty);
             }
         }
@@ -254,6 +257,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("\n╔════════════════════════════════════════════════════════════════╗");
         println!("║     MODO INFERENCIA — I2S Kernel (Ternary CPU)                ║");
         println!("╚════════════════════════════════════════════════════════════════╝\n");
+        println!("Pre-computando kernels ternarios...");
+        let inf_start = Instant::now();
+        let mut model_v = model.valid();
+        let inf_state = model_v.build_inference_state(&device);
+        model_v.release_all_weights(&device);
+        println!("Kernels listos en {:.2}s (RAM 16-bit liberada)\n", inf_start.elapsed().as_secs_f32());
         println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'reset', 'salir'\n");
 
         let mut current_len = 50;
@@ -277,7 +286,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             println!("\n--- TEXTO GENERADO (I2S Kernel) ---");
             let (_, tokens_count, elapsed, updated_caches, updated_offset) = generate_text_cached(
-                &model.valid(), &tokenizer, input, current_len,
+                &model_v, &inf_state, &tokenizer, input, current_len,
                 temperature, top_k, top_p, repetition_penalty, session_caches, session_offset,
             );
             session_caches = updated_caches;
@@ -344,9 +353,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if (epoch + 1) % 2 == 0 {
             println!("--- Generación de prueba (I2S Kernel) ---");
+            let inf_state = model.valid().build_inference_state(&device);
             let empty_caches: Vec<Option<KVCache<Flex<f32>>>> = (0..num_layers).map(|_| None).collect();
             let (_, tokens_count, elapsed, _, _) = generate_text_cached(
-                &model.valid(), &tokenizer, "The world ", 30,
+                &model.valid(), &inf_state, &tokenizer, "The world ", 30,
                 temperature, top_k, top_p, repetition_penalty, empty_caches, 0,
             );
             let tps = tokens_count as f32 / elapsed.max(0.001);

@@ -41,18 +41,16 @@ pub struct BitLinearInferenceState {
 }
 
 impl BitLinearInferenceState {
-    /// Pure raw slice inference
     pub fn forward_raw(&self, x_quant_data: &[f32], batch: usize) -> Vec<f32> {
         let mut out = I2SKernel::forward_raw(
             x_quant_data,
             batch,
             &self.packed_w,
+            &self.scales,
             self.out_features,
             self.in_features,
-            &self.scales,
         );
         
-        // Add bias if present
         if let Some(b) = &self.bias {
             for batch_idx in 0..batch {
                 let offset = batch_idx * self.out_features;
@@ -397,6 +395,13 @@ impl<B: Backend> BitLinear<B> {
         (neg, zero, pos, total)
     }
 
+    pub fn release_weights(&mut self, device: &B::Device) {
+        self.weight = Param::from_tensor(Tensor::zeros([1, 1], device));
+        if self.bias.is_some() {
+            self.bias = Some(Param::from_tensor(Tensor::zeros([1], device)));
+        }
+    }
+
     /// Export to a pure raw inference struct, completely detached from Burn
     pub fn export_inference_layer(&self, device: &B::Device) -> BitLinearInferenceState {
         let (w_ternary, scales_tensor) = self.get_ternary_weights(device);
@@ -421,8 +426,9 @@ impl<B: Backend> BitLinear<B> {
 
     /// Forward pass for inference using CPU I2_S Kernel
     /// This avoids floating point multiplications for the main matrix multiplication
-    pub fn forward_inference(&self, x: Tensor<B, 3>, device: &B::Device) -> Tensor<B, 3> {
+    pub fn forward_inference(&self, x: Tensor<B, 3>, state: &BitLinearInferenceState) -> Tensor<B, 3> {
         let [batch, seq, _d_in] = x.dims();
+        let device = x.device();
 
         // 1. Sub-LN: RMSNorm
         let x_norm = self.rms_norm.forward(x);
@@ -430,34 +436,19 @@ impl<B: Backend> BitLinear<B> {
         // 2. Quantize activations (8-bit)
         let x_quant = quantize_activations_8bit(x_norm);
 
-        // 3. Get ternary weights and per-group scales
-        let (w_ternary, scales_tensor) = self.get_ternary_weights(device);
-        let scales = scales_tensor.into_data().as_slice::<f32>().unwrap().to_vec();
-        let w_data = w_ternary.into_data();
-        let w_slice = w_data.as_slice::<f32>().unwrap();
-        
-        // Pack weights (16 weights per u32)
-        let packed_w = I2SKernel::pack_weights(w_slice);
-
-        // 4. Custom MatMul using addition/subtraction kernel with per-group scales
+        // 3. Custom MatMul using pre-cached packed weights + row_scales
         let x_flat = x_quant.reshape([batch * seq, self.in_features]);
         let x_flat_data = x_flat.into_data();
         let x_slice = x_flat_data.as_slice::<f32>().unwrap();
         
-        let out_data = I2SKernel::forward_raw(
-            x_slice,
-            batch * seq,
-            &packed_w,
-            self.out_features,
-            self.in_features,
-            &scales,
-        );
-        let output_flat = Tensor::<B, 2>::from_data(TensorData::new(out_data, [batch * seq, self.out_features]), device);
+        let out_data = state.forward_raw(x_slice, batch * seq);
+        let output_flat = Tensor::<B, 2>::from_data(TensorData::new(out_data, [batch * seq, self.out_features]), &device);
         let mut output = output_flat.reshape([batch, seq, self.out_features]);
 
-        // 5. Add bias
-        if let Some(b) = &self.bias {
-            output = output + b.val().unsqueeze::<2>().unsqueeze::<3>();
+        // 4. Add bias
+        if let Some(b) = &state.bias {
+            let bias_tensor = Tensor::<B, 1>::from_data(TensorData::new(b.clone(), [self.out_features]), &device);
+            output = output + bias_tensor.unsqueeze::<2>().unsqueeze::<3>();
         }
 
         output

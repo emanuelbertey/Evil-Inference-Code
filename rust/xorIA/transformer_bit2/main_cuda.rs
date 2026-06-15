@@ -27,14 +27,15 @@ use xlstm::blocks::bitlinear::layer::BitLinearConfig;
 use model::{
     Tokenizer, FileFragmentIterator, BitLinearQKVProjection, BitLinearOutputProjection,
     BitLinearSwiGLUFeedForward, BitLinearTransformerLayer, BitLinearRMSNorm,
-    BitLinearTransformerStack, TransformerBitLinearLM, KVCache,
+    BitLinearTransformerStack, TransformerBitLinearLM, TransformerInferenceState, KVCache,
     create_batch, sample_from_logits,
 };
 
 type MyBackend = Autodiff<burn_cuda::Cuda<f32>>;
 
-fn generate_text_cached(
-    model: &TransformerBitLinearLM<MyBackend>,
+fn generate_text_cached<B: burn::tensor::backend::Backend>(
+    model: &TransformerBitLinearLM<B>,
+    inf_state: &TransformerInferenceState,
     tokenizer: &Tokenizer,
     seed_text: &str,
     length: usize,
@@ -42,16 +43,16 @@ fn generate_text_cached(
     top_k: usize,
     top_p: f32,
     repetition_penalty: f32,
-    caches: Vec<Option<KVCache<MyBackend>>>,
+    caches: Vec<Option<KVCache<B>>>,
     mut current_offset: usize,
-) -> (String, usize, f32, Vec<Option<KVCache<MyBackend>>>, usize) {
+) -> (String, usize, f32, Vec<Option<KVCache<B>>>, usize) {
     let ids = tokenizer.encode(seed_text);
     if ids.is_empty() { return (seed_text.to_string(), 0, 0.0, Vec::new(), current_offset); }
-    let device = Default::default();
+    let device: B::Device = Default::default();
     let start_gen = Instant::now();
     let seed_len = ids.len();
-    let input = Tensor::<MyBackend, 2, Int>::from_data(TensorData::new(ids.iter().map(|&id| id as i64).collect(), [1, seed_len]), &device);
-    let (logits, updated_caches) = model.forward_with_cache(input, current_offset, caches);
+    let input = Tensor::<B, 2, Int>::from_data(TensorData::new(ids.iter().map(|&id| id as i64).collect(), [1, seed_len]), &device);
+    let (logits, updated_caches) = model.forward_with_cache_inference(input, current_offset, caches, inf_state);
     let mut caches = updated_caches.into_iter().map(Some).collect::<Vec<_>>();
 
     let [_, s_len, v_dim] = logits.dims();
@@ -77,9 +78,9 @@ fn generate_text_cached(
         print!("{}", clean_str);
         io::stdout().flush().unwrap();
 
-        let input = Tensor::<MyBackend, 2, Int>::from_data(TensorData::new(vec![next_id as i64], [1, 1]), device);
-        let cache_input: Vec<Option<KVCache<MyBackend>>> = caches.into_iter().collect();
-        let (logits, new_caches) = model.forward_with_cache(input, current_offset, cache_input);
+        let input = Tensor::<B, 2, Int>::from_data(TensorData::new(vec![next_id as i64], [1, 1]), &device);
+        let cache_input: Vec<Option<KVCache<B>>> = caches.into_iter().collect();
+        let (logits, new_caches) = model.forward_with_cache_inference(input, current_offset, cache_input, inf_state);
         caches = new_caches.into_iter().map(Some).collect();
         current_offset += 1;
 
@@ -143,9 +144,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut modo_inferencia = false;
     if model_exists {
         loop {
-            println!("\n--- CONFIG ---");
-            println!("  d_model={} | layers={} | heads={}", d_model, num_layers, num_heads);
-            print!("¿Entrenar (e), Inferir (i) o Ajustar (s)? [e/i/s]: ");
+            println!("\n--- CONFIGURACIÓN ACTUAL ---");
+            println!("  (1) d_model: {}  (2) Layers: {}  (3) Heads: {}", d_model, num_layers, num_heads);
+            println!("  (4) LR: {}  (5) Épocas: {}  (6) Batch: {}", lr, num_epochs, batch_size);
+            println!("  (7) Temp: {}  (8) Top-K: {}  (9) Top-P: {}  (10) R-Pen: {}", temperature, top_k, top_p, repetition_penalty);
+            println!("----------------------------");
+            print!("¿Entrenar (e), Inferir con I2S (i) o Ajustar (s)? [e/i/s]: ");
             io::stdout().flush()?;
             let mut choice = String::new();
             io::stdin().read_line(&mut choice)?;
@@ -156,7 +160,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     macro_rules! rp { ($l:expr, $v:expr) => { print!("{} [{}]: ", $l, $v); io::stdout().flush().unwrap(); let mut b = String::new(); io::stdin().read_line(&mut b).unwrap(); if let Ok(v) = b.trim().parse() { $v = v; } }; }
                     rp!("d_model", d_model); rp!("Layers", num_layers); rp!("Heads", num_heads);
                     rp!("LR", lr); rp!("Épocas", num_epochs); rp!("Batch", batch_size);
-                    rp!("Temp", temperature); rp!("R-Pen", repetition_penalty);
+                    rp!("Temp", temperature); rp!("Top-K", top_k); rp!("Top-P", top_p); rp!("R-Pen", repetition_penalty);
                 }
                 _ => continue,
             }
@@ -168,8 +172,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let head_dim = d_model / num_heads;
     let ffn_dim = ((4.0 * d_model as f64 * 2.0 / 3.0) as usize / 64 + 1) * 64;
 
-    println!("\n── Config (CUDA) ──");
-    println!("  GPU Training | d_model={} | layers={} | heads={}\n", d_model, num_layers, num_heads);
+    println!("\n── Configuración (CUDA) ──");
+    println!("  d_model={} | layers={} | heads={} | kv_groups={}", d_model, num_layers, num_heads, num_kv_groups);
+    println!("  head_dim={} | ffn_dim={} | SwiGLU | RoPE | I2S Kernel\n", head_dim, ffn_dim);
 
     let layers = (0..num_layers).map(|_| {
         BitLinearTransformerLayer {
@@ -205,16 +210,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if modo_inferencia {
-        let mut session_caches: Vec<Option<KVCache<MyBackend>>> = (0..num_layers).map(|_| None).collect();
+        println!("\n╔════════════════════════════════════════════════════════════════╗");
+        println!("║     MODO INFERENCIA — I2S Kernel (Ternary CPU)                ║");
+        println!("╚════════════════════════════════════════════════════════════════╝\n");
+        println!("Pre-computando kernels ternarios...");
+        let inf_start = Instant::now();
+        let mut model_v = model.valid();
+        let inf_state = model_v.build_inference_state(&device);
+        model_v.release_all_weights(&device);
+        println!("Kernels listos en {:.2}s (RAM 16-bit liberada)\n", inf_start.elapsed().as_secs_f32());
+        println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'reset', 'salir'\n");
+
+        let mut current_len = 50;
+        let mut session_caches: Vec<Option<KVCache<burn_cuda::Cuda<f32>>>> = (0..num_layers).map(|_| None).collect();
         let mut session_offset = 0;
+
         loop {
-            print!("Chat > "); io::stdout().flush()?;
-            let mut input = String::new(); io::stdin().read_line(&mut input)?;
+            print!("Chat [len:{} t:{} k:{} p:{} rp:{}] > ", current_len, temperature, top_k, top_p, repetition_penalty);
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
             let input = input.trim();
-            if input == "salir" || input == "exit" { break; }
+            if input.eq_ignore_ascii_case("salir") || input.eq_ignore_ascii_case("exit") { break; }
+            if input.to_lowercase().starts_with("len ") { if let Ok(v) = input[4..].trim().parse::<usize>() { current_len = v; println!("  -> Longitud: {}\n", current_len); continue; } }
+            if input.to_lowercase().starts_with("temp ") { if let Ok(v) = input[5..].trim().parse::<f32>() { temperature = v; println!("  -> Temperatura: {}\n", temperature); continue; } }
+            if input.to_lowercase().starts_with("topk ") { if let Ok(v) = input[5..].trim().parse::<usize>() { top_k = v; println!("  -> Top-K: {}\n", top_k); continue; } }
+            if input.to_lowercase().starts_with("topp ") { if let Ok(v) = input[5..].trim().parse::<f32>() { top_p = v; println!("  -> Top-P: {}\n", top_p); continue; } }
+            if input.to_lowercase().starts_with("rpen ") { if let Ok(v) = input[5..].trim().parse::<f32>() { repetition_penalty = v; println!("  -> R-Pen: {}\n", repetition_penalty); continue; } }
+            if input.eq_ignore_ascii_case("reset") { session_caches = (0..num_layers).map(|_| None).collect(); session_offset = 0; println!("  -> Cache reiniciada.\n"); continue; }
             if input.is_empty() { continue; }
-            let (_, _, _, caches, offset) = generate_text_cached(&model.valid(), &tokenizer, input, 50, temperature, top_k, top_p, repetition_penalty, session_caches, session_offset);
+
+            println!("\n--- TEXTO GENERADO (I2S Kernel) ---");
+            let (_, tokens_count, elapsed, caches, offset) = generate_text_cached(&model_v, &inf_state, &tokenizer, input, current_len, temperature, top_k, top_p, repetition_penalty, session_caches, session_offset);
             session_caches = caches; session_offset = offset;
+            let tps = tokens_count as f32 / elapsed.max(0.001);
+            println!("---");
+            println!("Tokens: {} | Tiempo: {:.2}s | {:.2} tok/s | Offset: {}\n", tokens_count, elapsed, tps, session_offset);
         }
         return Ok(());
     }
@@ -224,7 +255,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let seq_len = 64;
     let stride = 64;
 
-    println!("Entrenando en GPU...\n");
+    println!("Entrenando en GPU...");
+    println!("  batch_size: {} | seq_len: {} | stride: {} | epochs: {}\n", batch_size, seq_len, stride, num_epochs);
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0;
         let mut batch_count = 0;
@@ -247,7 +279,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let grads = loss.backward();
                 model = optim.step(lr, model, burn::optim::GradientsParams::from_grads(grads, &model));
                 let tps = (batch_count * batch_size * seq_len) as f32 / start_epoch.elapsed().as_secs_f32();
-                print!("\rEpoch {} | Frag {} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s", epoch+1, frag_idx, b+1, nb, total_loss/batch_count as f32, tps);
+                print!("\rEpoch {}/{} | Frag {} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s", epoch+1, num_epochs, frag_idx, b+1, nb, total_loss/batch_count as f32, tps);
                 io::stdout().flush().unwrap();
             }
         }
@@ -256,8 +288,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         CompactRecorder::new().clone().save_file(&model_file, &model.clone())?;
 
         if (epoch+1) % 2 == 0 {
-            let empty: Vec<Option<KVCache<MyBackend>>> = (0..num_layers).map(|_| None).collect();
-            let (_, tc, el, _, _) = generate_text_cached(&model.clone().valid(), &tokenizer, "The world ", 30, temperature, top_k, top_p, repetition_penalty, empty, 0);
+            let inf_state = model.valid().build_inference_state(&device);
+            let empty: Vec<Option<KVCache<burn_cuda::Cuda<f32>>>> = (0..num_layers).map(|_| None).collect();
+            let (_, tc, el, _, _) = generate_text_cached(&model.clone().valid(), &inf_state, &tokenizer, "The world ", 30, temperature, top_k, top_p, repetition_penalty, empty, 0);
             println!("[{:.1} tok/s]", tc as f32 / el.max(0.001));
         }
     }

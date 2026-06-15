@@ -15,7 +15,16 @@ use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
 use tokenizers::models::TrainerWrapper;
 
-use xlstm::blocks::bitlinear::layer::BitLinear;
+use xlstm::blocks::bitlinear::layer::{BitLinear, BitLinearInferenceState};
+
+// ─── Cached Inference State ────────────────────────────────────────────────
+pub struct TransformerInferenceState {
+    pub qkv: Vec<(BitLinearInferenceState, BitLinearInferenceState, BitLinearInferenceState)>,
+    pub o_proj: Vec<BitLinearInferenceState>,
+    pub ffn_gate_up: Vec<BitLinearInferenceState>,
+    pub ffn_down: Vec<BitLinearInferenceState>,
+    pub head: BitLinearInferenceState,
+}
 
 // ─── BPE Tokenizer ──────────────────────────────────────────────────────────
 
@@ -101,6 +110,12 @@ pub struct BitLinearQKVProjection<B: Backend> {
 }
 
 impl<B: Backend> BitLinearQKVProjection<B> {
+    pub fn release_weights(&mut self, device: &B::Device) {
+        self.q_proj.release_weights(device);
+        self.k_proj.release_weights(device);
+        self.v_proj.release_weights(device);
+    }
+
     pub fn forward(&self, x: Tensor<B, 3>) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
         let [batch, seq_len, _d] = x.dims();
         let q = self.q_proj.forward(x.clone()).reshape([batch, seq_len, self.num_heads, self.head_dim]);
@@ -109,11 +124,11 @@ impl<B: Backend> BitLinearQKVProjection<B> {
         (q, k, v)
     }
 
-    pub fn forward_inference(&self, x: Tensor<B, 3>, device: &B::Device) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
+    pub fn forward_inference(&self, x: Tensor<B, 3>, q_state: &BitLinearInferenceState, k_state: &BitLinearInferenceState, v_state: &BitLinearInferenceState) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
         let [batch, seq_len, _d] = x.dims();
-        let q = self.q_proj.forward_inference(x.clone(), device).reshape([batch, seq_len, self.num_heads, self.head_dim]);
-        let k = self.k_proj.forward_inference(x.clone(), device).reshape([batch, seq_len, self.num_kv_groups, self.head_dim]);
-        let v = self.v_proj.forward_inference(x, device).reshape([batch, seq_len, self.num_kv_groups, self.head_dim]);
+        let q = self.q_proj.forward_inference(x.clone(), q_state).reshape([batch, seq_len, self.num_heads, self.head_dim]);
+        let k = self.k_proj.forward_inference(x.clone(), k_state).reshape([batch, seq_len, self.num_kv_groups, self.head_dim]);
+        let v = self.v_proj.forward_inference(x, v_state).reshape([batch, seq_len, self.num_kv_groups, self.head_dim]);
         (q, k, v)
     }
 }
@@ -128,14 +143,18 @@ pub struct BitLinearOutputProjection<B: Backend> {
 }
 
 impl<B: Backend> BitLinearOutputProjection<B> {
+    pub fn release_weights(&mut self, device: &B::Device) {
+        self.o_proj.release_weights(device);
+    }
+
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 3> {
         let [batch, seq_len, _nh, _hd] = x.dims();
         self.o_proj.forward(x.reshape([batch, seq_len, self.num_heads * self.head_dim]))
     }
 
-    pub fn forward_inference(&self, x: Tensor<B, 4>, device: &B::Device) -> Tensor<B, 3> {
+    pub fn forward_inference(&self, x: Tensor<B, 4>, state: &BitLinearInferenceState) -> Tensor<B, 3> {
         let [batch, seq_len, _nh, _hd] = x.dims();
-        self.o_proj.forward_inference(x.reshape([batch, seq_len, self.num_heads * self.head_dim]), device)
+        self.o_proj.forward_inference(x.reshape([batch, seq_len, self.num_heads * self.head_dim]), state)
     }
 }
 
@@ -150,6 +169,11 @@ pub struct BitLinearSwiGLUFeedForward<B: Backend> {
 }
 
 impl<B: Backend> BitLinearSwiGLUFeedForward<B> {
+    pub fn release_weights(&mut self, device: &B::Device) {
+        self.gate_up_proj.release_weights(device);
+        self.down_proj.release_weights(device);
+    }
+
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let gate_up = self.gate_up_proj.forward(x);
         let chunks = gate_up.chunk(2, 2);
@@ -160,13 +184,13 @@ impl<B: Backend> BitLinearSwiGLUFeedForward<B> {
         self.down_proj.forward(h)
     }
 
-    pub fn forward_inference(&self, x: Tensor<B, 3>, device: &B::Device) -> Tensor<B, 3> {
-        let gate_up = self.gate_up_proj.forward_inference(x, device);
+    pub fn forward_inference(&self, x: Tensor<B, 3>, gate_up_state: &BitLinearInferenceState, down_state: &BitLinearInferenceState) -> Tensor<B, 3> {
+        let gate_up = self.gate_up_proj.forward_inference(x, gate_up_state);
         let chunks = gate_up.chunk(2, 2);
         let gate = chunks[0].clone();
         let up = chunks[1].clone();
         let h = burn::tensor::activation::silu(gate) * up;
-        self.down_proj.forward_inference(h, device)
+        self.down_proj.forward_inference(h, down_state)
     }
 }
 
@@ -305,6 +329,12 @@ pub struct BitLinearTransformerLayer<B: Backend> {
 }
 
 impl<B: Backend> BitLinearTransformerLayer<B> {
+    pub fn release_weights(&mut self, device: &B::Device) {
+        self.qkv.release_weights(device);
+        self.o_proj.release_weights(device);
+        self.ffn.release_weights(device);
+    }
+
     pub fn forward(&self, x: Tensor<B, 3>, offset: usize) -> Tensor<B, 3> {
         let residual = x.clone();
         let h = self.attention_forward(self.attn_norm.forward(x), offset);
@@ -371,18 +401,18 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
         (self.o_proj.forward(attn_output), new_cache)
     }
 
-    pub fn forward_with_cache_inference(&self, x: Tensor<B, 3>, offset: usize, cache: Option<KVCache<B>>, device: &B::Device) -> (Tensor<B, 3>, KVCache<B>) {
+    pub fn forward_with_cache_inference(&self, x: Tensor<B, 3>, offset: usize, cache: Option<KVCache<B>>, states: (&BitLinearInferenceState, &BitLinearInferenceState, &BitLinearInferenceState, &BitLinearInferenceState, &BitLinearInferenceState, &BitLinearInferenceState)) -> (Tensor<B, 3>, KVCache<B>) {
         let residual = x.clone();
-        let (h, new_cache) = self.attention_with_cache_inference(self.attn_norm.forward(x), offset, cache, device);
+        let (h, new_cache) = self.attention_with_cache_inference(self.attn_norm.forward(x), offset, cache, states.0, states.1, states.2, states.3);
         let x = residual + self.residual_dropout.forward(h);
 
         let residual = x.clone();
-        let h = self.ffn.forward_inference(self.ffn_norm.forward(x), device);
+        let h = self.ffn.forward_inference(self.ffn_norm.forward(x), states.4, states.5);
         (residual + self.residual_dropout.forward(h), new_cache)
     }
 
-    fn attention_with_cache_inference(&self, x: Tensor<B, 3>, offset: usize, cache: Option<KVCache<B>>, device: &B::Device) -> (Tensor<B, 3>, KVCache<B>) {
-        let (q, k_new, v_new) = self.qkv.forward_inference(x, device);
+    fn attention_with_cache_inference(&self, x: Tensor<B, 3>, offset: usize, cache: Option<KVCache<B>>, q_state: &BitLinearInferenceState, k_state: &BitLinearInferenceState, v_state: &BitLinearInferenceState, o_state: &BitLinearInferenceState) -> (Tensor<B, 3>, KVCache<B>) {
+        let (q, k_new, v_new) = self.qkv.forward_inference(x, q_state, k_state, v_state);
         let (q, k_new) = apply_rope(q, k_new, offset);
 
         let (k_full, v_full) = if let Some(prev) = cache {
@@ -405,7 +435,7 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
         if q_len > 1 { scores = apply_causal_mask_with_offset(scores, q_len, kv_len); }
 
         let attn_output = burn::tensor::activation::softmax(scores, 3).matmul(v).swap_dims(1, 2);
-        (self.o_proj.forward_inference(attn_output, device), new_cache)
+        (self.o_proj.forward_inference(attn_output, o_state), new_cache)
     }
 }
 
@@ -432,6 +462,13 @@ pub struct TransformerBitLinearLM<B: Backend> {
 }
 
 impl<B: Backend> TransformerBitLinearLM<B> {
+    pub fn release_all_weights(&mut self, device: &B::Device) {
+        for layer in &mut self.transformer.layers {
+            layer.release_weights(device);
+        }
+        self.head.release_weights(device);
+    }
+
     pub fn forward(&self, input: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let x = self.embedding.forward(input);
         let x = self.transformer_forward(x, 0);
@@ -444,10 +481,44 @@ impl<B: Backend> TransformerBitLinearLM<B> {
         (self.head.forward(x), new_caches)
     }
 
-    pub fn forward_with_cache_inference(&self, input: Tensor<B, 2, Int>, offset: usize, caches: Vec<Option<KVCache<B>>>, device: &B::Device) -> (Tensor<B, 3>, Vec<KVCache<B>>) {
+    pub fn build_inference_state(&self, device: &B::Device) -> TransformerInferenceState {
+        let mut qkv_states = Vec::new();
+        let mut o_proj_states = Vec::new();
+        let mut ffn_gate_up_states = Vec::new();
+        let mut ffn_down_states = Vec::new();
+
+        for layer in &self.transformer.layers {
+            qkv_states.push((
+                layer.qkv.q_proj.export_inference_layer(device),
+                layer.qkv.k_proj.export_inference_layer(device),
+                layer.qkv.v_proj.export_inference_layer(device),
+            ));
+            o_proj_states.push(layer.o_proj.o_proj.export_inference_layer(device));
+            ffn_gate_up_states.push(layer.ffn.gate_up_proj.export_inference_layer(device));
+            ffn_down_states.push(layer.ffn.down_proj.export_inference_layer(device));
+        }
+
+        TransformerInferenceState {
+            qkv: qkv_states,
+            o_proj: o_proj_states,
+            ffn_gate_up: ffn_gate_up_states,
+            ffn_down: ffn_down_states,
+            head: self.head.export_inference_layer(device),
+        }
+    }
+
+    pub fn forward_with_cache_inference(&self, input: Tensor<B, 2, Int>, offset: usize, caches: Vec<Option<KVCache<B>>>, state: &TransformerInferenceState) -> (Tensor<B, 3>, Vec<KVCache<B>>) {
+        let device = input.device();
         let x = self.embedding.forward(input);
-        let (x, new_caches) = self.transformer_forward_with_cache_inference(x, offset, caches, device);
-        (self.head.forward_inference(x, device), new_caches)
+        let (x, new_caches) = self.transformer_forward_with_cache_inference(x, offset, caches, state);
+        let x_flat = x;
+        let [batch, seq, d] = x_flat.dims();
+        let x_2d = x_flat.reshape([batch * seq, d]);
+        let x_data = x_2d.into_data();
+        let x_slice = x_data.as_slice::<f32>().unwrap();
+        let out_data = state.head.forward_raw(x_slice, batch * seq);
+        let output = Tensor::<B, 2>::from_data(TensorData::new(out_data, [batch * seq, self.vocab_size]), &device);
+        (output.reshape([batch, seq, self.vocab_size]), new_caches)
     }
 
     fn transformer_forward(&self, mut x: Tensor<B, 3>, offset: usize) -> Tensor<B, 3> {
@@ -465,10 +536,11 @@ impl<B: Backend> TransformerBitLinearLM<B> {
         (self.transformer.final_norm.forward(x), new_caches)
     }
 
-    fn transformer_forward_with_cache_inference(&self, mut x: Tensor<B, 3>, offset: usize, caches: Vec<Option<KVCache<B>>>, device: &B::Device) -> (Tensor<B, 3>, Vec<KVCache<B>>) {
+    fn transformer_forward_with_cache_inference(&self, mut x: Tensor<B, 3>, offset: usize, caches: Vec<Option<KVCache<B>>>, state: &TransformerInferenceState) -> (Tensor<B, 3>, Vec<KVCache<B>>) {
         let mut new_caches = Vec::with_capacity(self.num_layers);
-        for (layer, cache) in self.transformer.layers.iter().zip(caches.into_iter()) {
-            let (out, new_cache) = layer.forward_with_cache_inference(x, offset, cache, device);
+        for (idx, (layer, cache)) in self.transformer.layers.iter().zip(caches.into_iter()).enumerate() {
+            let layer_states = (&state.qkv[idx].0, &state.qkv[idx].1, &state.qkv[idx].2, &state.o_proj[idx], &state.ffn_gate_up[idx], &state.ffn_down[idx]);
+            let (out, new_cache) = layer.forward_with_cache_inference(x, offset, cache, layer_states);
             x = out;
             new_caches.push(new_cache);
         }
