@@ -4,12 +4,12 @@ pub struct I2SKernel;
 
 impl I2SKernel {
     pub fn pack_weights(weights: &[f32]) -> Vec<u32> {
-        let mut packed = Vec::with_capacity((weights.len() + 15) / 16);
+        let mut packed = Vec::with_capacity((weights.len() + 15) >> 4);
         for chunk in weights.chunks(16) {
             let mut p: u32 = 0;
             for (i, &w) in chunk.iter().enumerate() {
                 let bits = if w < -0.5 { 0b00 } else if w > 0.5 { 0b10 } else { 0b01 };
-                p |= bits << (i * 2);
+                p |= bits << (i << 1);
             }
             packed.push(p);
         }
@@ -22,34 +22,80 @@ impl I2SKernel {
         packed_w: &[u32], w_row_base: usize,
         in_features: usize,
     ) -> f32 {
-        let mut sum_pos = 0.0f32;
-        let mut sum_neg = 0.0f32;
-        let w_idx_base = w_row_base >> 4;
-        let mut i = 0usize;
-        while i + 15 < in_features {
-            let packed = packed_w[w_idx_base + (i >> 4)];
-            let mut local = 0u32;
-            while local < 16 {
-                let bits = (packed >> (local * 2)) & 0b11;
-                let x_val = x_data[x_off + i + local as usize];
-                if bits == 0b10 { sum_pos += x_val; }
-                else if bits == 0b00 { sum_neg += x_val; }
-                local += 1;
+        unsafe {
+            let mut sum_pos = 0.0f32;
+            let mut sum_neg = 0.0f32;
+            let w_idx_base = w_row_base >> 4;
+            let mut i = 0usize;
+
+            while i + 15 < in_features {
+                let packed = *packed_w.get_unchecked(w_idx_base + (i >> 4));
+                let x_base = x_off + i;
+
+                let bits0 = (packed) & 0b11;
+                let bits1 = (packed >> 2) & 0b11;
+                let bits2 = (packed >> 4) & 0b11;
+                let bits3 = (packed >> 6) & 0b11;
+                let bits4 = (packed >> 8) & 0b11;
+                let bits5 = (packed >> 10) & 0b11;
+                let bits6 = (packed >> 12) & 0b11;
+                let bits7 = (packed >> 14) & 0b11;
+                let bits8 = (packed >> 16) & 0b11;
+                let bits9 = (packed >> 18) & 0b11;
+                let bits10 = (packed >> 20) & 0b11;
+                let bits11 = (packed >> 22) & 0b11;
+                let bits12 = (packed >> 24) & 0b11;
+                let bits13 = (packed >> 26) & 0b11;
+                let bits14 = (packed >> 28) & 0b11;
+                let bits15 = (packed >> 30) & 0b11;
+
+                let x0 = *x_data.get_unchecked(x_base);
+                let x1 = *x_data.get_unchecked(x_base + 1);
+                let x2 = *x_data.get_unchecked(x_base + 2);
+                let x3 = *x_data.get_unchecked(x_base + 3);
+                let x4 = *x_data.get_unchecked(x_base + 4);
+                let x5 = *x_data.get_unchecked(x_base + 5);
+                let x6 = *x_data.get_unchecked(x_base + 6);
+                let x7 = *x_data.get_unchecked(x_base + 7);
+                let x8 = *x_data.get_unchecked(x_base + 8);
+                let x9 = *x_data.get_unchecked(x_base + 9);
+                let x10 = *x_data.get_unchecked(x_base + 10);
+                let x11 = *x_data.get_unchecked(x_base + 11);
+                let x12 = *x_data.get_unchecked(x_base + 12);
+                let x13 = *x_data.get_unchecked(x_base + 13);
+                let x14 = *x_data.get_unchecked(x_base + 14);
+                let x15 = *x_data.get_unchecked(x_base + 15);
+
+                if bits0 == 0b10 { sum_pos += x0; } else if bits0 == 0b00 { sum_neg += x0; }
+                if bits1 == 0b10 { sum_pos += x1; } else if bits1 == 0b00 { sum_neg += x1; }
+                if bits2 == 0b10 { sum_pos += x2; } else if bits2 == 0b00 { sum_neg += x2; }
+                if bits3 == 0b10 { sum_pos += x3; } else if bits3 == 0b00 { sum_neg += x3; }
+                if bits4 == 0b10 { sum_pos += x4; } else if bits4 == 0b00 { sum_neg += x4; }
+                if bits5 == 0b10 { sum_pos += x5; } else if bits5 == 0b00 { sum_neg += x5; }
+                if bits6 == 0b10 { sum_pos += x6; } else if bits6 == 0b00 { sum_neg += x6; }
+                if bits7 == 0b10 { sum_pos += x7; } else if bits7 == 0b00 { sum_neg += x7; }
+                if bits8 == 0b10 { sum_pos += x8; } else if bits8 == 0b00 { sum_neg += x8; }
+                if bits9 == 0b10 { sum_pos += x9; } else if bits9 == 0b00 { sum_neg += x9; }
+                if bits10 == 0b10 { sum_pos += x10; } else if bits10 == 0b00 { sum_neg += x10; }
+                if bits11 == 0b10 { sum_pos += x11; } else if bits11 == 0b00 { sum_neg += x11; }
+                if bits12 == 0b10 { sum_pos += x12; } else if bits12 == 0b00 { sum_neg += x12; }
+                if bits13 == 0b10 { sum_pos += x13; } else if bits13 == 0b00 { sum_neg += x13; }
+                if bits14 == 0b10 { sum_pos += x14; } else if bits14 == 0b00 { sum_neg += x14; }
+                if bits15 == 0b10 { sum_pos += x15; } else if bits15 == 0b00 { sum_neg += x15; }
+
+                i += 16;
             }
-            i += 16;
-        }
-        if i < in_features {
-            let packed = packed_w[w_idx_base + (i >> 4)];
+
             while i < in_features {
-                let local = (i & 15) as u32;
-                let bits = (packed >> (local * 2)) & 0b11;
-                let x_val = x_data[x_off + i];
-                if bits == 0b10 { sum_pos += x_val; }
-                else if bits == 0b00 { sum_neg += x_val; }
+                let local = i & 15;
+                let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
+                let x_val = *x_data.get_unchecked(x_off + i);
+                if bits == 0b10 { sum_pos += x_val; } else if bits == 0b00 { sum_neg += x_val; }
                 i += 1;
             }
+
+            sum_pos - sum_neg
         }
-        sum_pos - sum_neg
     }
 
     fn forward_inner(
@@ -64,7 +110,7 @@ impl I2SKernel {
                 for o in 0..out_features {
                     let raw = Self::compute_row_aligned(x_data, x_off, packed_w, o * in_features, in_features);
                     let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-                    out_data[b * out_features + o] = raw * scales[g];
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = raw * *scales.get_unchecked(g); }
                 }
             }
             return;
@@ -89,36 +135,10 @@ impl I2SKernel {
                         let w_row = o * in_features;
                         let w_idx_base = w_row >> 4;
                         let x_off = b * in_features;
-                        let mut sum_pos = 0.0f32;
-                        let mut sum_neg = 0.0f32;
-                        let mut i = 0usize;
 
-                        while i + 15 < in_features {
-                            let packed = packed_w[w_idx_base + (i >> 4)];
-                            let mut j = 0u32;
-                            while j < 16 {
-                                let bits = (packed >> (j * 2)) & 0b11;
-                                let x_val = x_data[x_off + i + j as usize];
-                                if bits == 0b10 { sum_pos += x_val; }
-                                else if bits == 0b00 { sum_neg += x_val; }
-                                j += 1;
-                            }
-                            i += 16;
-                        }
-                        if i < in_features {
-                            let packed = packed_w[w_idx_base + (i >> 4)];
-                            while i < in_features {
-                                let local = (i & 15) as u32;
-                                let bits = (packed >> (local * 2)) & 0b11;
-                                let x_val = x_data[x_off + i];
-                                if bits == 0b10 { sum_pos += x_val; }
-                                else if bits == 0b00 { sum_neg += x_val; }
-                                i += 1;
-                            }
-                        }
-
+                        let raw = Self::compute_row_aligned(x_data, x_off, packed_w, w_row, in_features);
                         let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-                        chunk[local_idx] = (sum_pos - sum_neg) * scales[g];
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = raw * *scales.get_unchecked(g); }
                     }
                 });
             }
@@ -140,11 +160,11 @@ pub struct TL1Kernel;
 
 impl TL1Kernel {
     pub fn pack_weights(weights: &[f32]) -> Vec<u8> {
-        let mut packed = Vec::with_capacity((weights.len() + 1) / 2);
+        let mut packed = Vec::with_capacity((weights.len() + 1) >> 1);
         for chunk in weights.chunks(2) {
             let mut p: u8 = 0;
             for (i, &w) in chunk.iter().enumerate() {
-                let val = if w < -0.5 { 0 } else if w > 0.5 { 2 } else { 1 };
+                let val = if w < -0.5 { 0u8 } else if w > 0.5 { 2 } else { 1 };
                 p += val * 3u8.pow(i as u32);
             }
             packed.push(p);
@@ -158,40 +178,40 @@ impl TL1Kernel {
         packed_w: &[u8], w_row: usize,
         scales: &[f32], in_features: usize,
     ) -> f32 {
-        let mut sum = 0.0f32;
-        let mut i = 0usize;
-        while i + 1 < in_features {
-            let w_idx = (w_row + i) >> 1;
-            let p = packed_w[w_idx];
-            let x0 = x_data[x_off + i];
-            let x1 = x_data[x_off + i + 1];
-            let v = match p {
-                0 => -x0 - x1,
-                1 => -x1,
-                2 => x0 - x1,
-                3 => -x0,
-                4 => 0.0,
-                5 => x0,
-                6 => -x0 + x1,
-                7 => x1,
-                8 => x0 + x1,
-                _ => 0.0,
-            };
-            sum += v;
-            i += 2;
+        unsafe {
+            let mut sum = 0.0f32;
+            let mut i = 0usize;
+            while i + 1 < in_features {
+                let p = *packed_w.get_unchecked((w_row + i) >> 1);
+                let x0 = *x_data.get_unchecked(x_off + i);
+                let x1 = *x_data.get_unchecked(x_off + i + 1);
+                let v = match p {
+                    0 => -x0 - x1,
+                    1 => -x1,
+                    2 => x0 - x1,
+                    3 => -x0,
+                    4 => 0.0,
+                    5 => x0,
+                    6 => -x0 + x1,
+                    7 => x1,
+                    8 => x0 + x1,
+                    _ => 0.0,
+                };
+                sum += v;
+                i += 2;
+            }
+            if i < in_features {
+                let p = *packed_w.get_unchecked((w_row + i) >> 1);
+                let x0 = *x_data.get_unchecked(x_off + i);
+                sum += match p & 3 {
+                    0 => -x0,
+                    2 => x0,
+                    _ => 0.0,
+                };
+            }
+            let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
+            sum * *scales.get_unchecked(g)
         }
-        if i < in_features {
-            let w_idx = (w_row + i) >> 1;
-            let p = packed_w[w_idx];
-            let x0 = x_data[x_off + i];
-            sum += match p & 3 {
-                0 => -x0,
-                2 => x0,
-                _ => 0.0,
-            };
-        }
-        let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
-        sum * scales[g]
     }
 
     fn forward_inner(
@@ -205,7 +225,7 @@ impl TL1Kernel {
             for b in 0..batch {
                 let x_off = b * in_features;
                 for o in 0..out_features {
-                    out_data[b * out_features + o] = Self::compute_row(x_data, x_off, packed_w, o * in_features, scales, in_features);
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = Self::compute_row(x_data, x_off, packed_w, o * in_features, scales, in_features); }
                 }
             }
             return;
@@ -248,7 +268,7 @@ impl TL2Kernel {
         for chunk in weights.chunks(3) {
             let mut p: u8 = 0;
             for (i, &w) in chunk.iter().enumerate() {
-                let val = if w < -0.5 { 0 } else if w > 0.5 { 2 } else { 1 };
+                let val = if w < -0.5 { 0u8 } else if w > 0.5 { 2 } else { 1 };
                 p += val * 3u8.pow(i as u32);
             }
             packed.push(p);
@@ -262,30 +282,30 @@ impl TL2Kernel {
         packed_w: &[u8], w_row: usize,
         scales: &[f32], in_features: usize,
     ) -> f32 {
-        let mut sum = 0.0f32;
-        let mut i = 0usize;
-        while i + 2 < in_features {
-            let w_idx = (w_row + i) / 3;
-            let p = packed_w[w_idx];
-            let x0 = x_data[x_off + i];
-            let x1 = x_data[x_off + i + 1];
-            let x2 = x_data[x_off + i + 2];
-            let w0 = match p % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-            let w1 = match (p / 3) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-            let w2 = match (p / 9) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-            sum += w0 * x0 + w1 * x1 + w2 * x2;
-            i += 3;
+        unsafe {
+            let mut sum = 0.0f32;
+            let mut i = 0usize;
+            while i + 2 < in_features {
+                let p = *packed_w.get_unchecked((w_row + i) / 3);
+                let x0 = *x_data.get_unchecked(x_off + i);
+                let x1 = *x_data.get_unchecked(x_off + i + 1);
+                let x2 = *x_data.get_unchecked(x_off + i + 2);
+                let w0 = match p % 3 { 0 => -1.0f32, 2 => 1.0, _ => 0.0 };
+                let w1 = match (p / 3) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
+                let w2 = match (p / 9) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
+                sum += w0 * x0 + w1 * x1 + w2 * x2;
+                i += 3;
+            }
+            while i < in_features {
+                let p = *packed_w.get_unchecked((w_row + i) / 3);
+                let local = (w_row + i) % 3;
+                let w = match (p / 3u8.pow(local as u32)) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
+                sum += w * *x_data.get_unchecked(x_off + i);
+                i += 1;
+            }
+            let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
+            sum * *scales.get_unchecked(g)
         }
-        while i < in_features {
-            let w_idx = (w_row + i) / 3;
-            let local = (w_row + i) % 3;
-            let p = packed_w[w_idx];
-            let w = match (p / 3u8.pow(local as u32)) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-            sum += w * x_data[x_off + i];
-            i += 1;
-        }
-        let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
-        sum * scales[g]
     }
 
     fn forward_inner(
@@ -299,7 +319,7 @@ impl TL2Kernel {
             for b in 0..batch {
                 let x_off = b * in_features;
                 for o in 0..out_features {
-                    out_data[b * out_features + o] = Self::compute_row(x_data, x_off, packed_w, o * in_features, scales, in_features);
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = Self::compute_row(x_data, x_off, packed_w, o * in_features, scales, in_features); }
                 }
             }
             return;
