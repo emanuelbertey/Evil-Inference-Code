@@ -3,7 +3,7 @@
 
 use burn::module::Module;
 use burn::tensor::{Tensor, backend::Backend, TensorData, Int};
-use xlstm::blocks::bitlinear::kernel::KernelKind;
+use crate::blocks::bitlinear::kernel::KernelKind;
 use std::error::Error;
 use std::fs;
 use std::io::{self, BufReader, Read};
@@ -16,7 +16,7 @@ use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
 use tokenizers::models::TrainerWrapper;
 
-use xlstm::blocks::bitlinear::layer::{BitLinear, BitLinearInferenceState};
+use crate::blocks::bitlinear::layer::{BitLinear, BitLinearInferenceState};
 
 // ─── Cached Inference State ────────────────────────────────────────────────
 pub struct TransformerInferenceState {

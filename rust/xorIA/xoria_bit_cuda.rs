@@ -1,12 +1,9 @@
-// ─── Transformer Bit2 CUDA — BitLinear GPU Training ────────────────────────
+// ─── xoria_bit_cuda — BitLinear GPU Training ──────────────────────────────
 //
 // Entrenamiento GPU con CUDA. Modelo guardado como .mpk compatible con I2S CPU.
-// Para inferencia I2S: usar transformer_bit2 (CPU).
+// Para inferencia I2S: usar xoria_bit (CPU).
 //
-// Usage: cargo run --bin transformer_bit2_cuda --release -- xorIA/input.txt
-
-mod model;
-mod bitnet_export;
+// Usage: cargo run --bin xoria_bit_cuda --release -- xorIA/input.txt
 
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::decay::WeightDecayConfig;
@@ -27,13 +24,13 @@ use std::time::Instant;
 
 use xlstm::blocks::bitlinear::layer::BitLinearConfig;
 use xlstm::blocks::bitlinear::kernel::KernelKind;
-use model::{
+use xlstm::blocks::trasformer_bit::model::{
     Tokenizer, FileFragmentIterator, BitLinearQKVProjection, BitLinearOutputProjection,
     BitLinearSwiGLUFeedForward, BitLinearTransformerLayer, BitLinearRMSNorm,
     BitLinearTransformerStack, TransformerBitLinearLM, TransformerInferenceState, KVCache,
     create_batch, sample_from_logits,
 };
-use bitnet_export::{export_bitnet, load_bitnet, is_bitnet_file, compare_models};
+use xlstm::blocks::trasformer_bit::bitnet_export::{export_bitnet, load_bitnet, is_bitnet_file, compare_models};
 
 type MyBackend = Autodiff<burn_cuda::Cuda<f32>>;
 
@@ -103,7 +100,7 @@ fn generate_text_cached<B: burn::tensor::backend::Backend>(
     (text, generated.len(), elapsed, caches, current_offset)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
     println!("╔════════════════════════════════════════════════════════════════╗");
     println!("║     Transformer Bit2 CUDA — BitLinear GPU Training             ║");
     println!("╚════════════════════════════════════════════════════════════════╝");
@@ -367,4 +364,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn main() {
+    if let Err(e) = xoria_cuda() {
+        eprintln!("Error: {}", e);
+    }
 }

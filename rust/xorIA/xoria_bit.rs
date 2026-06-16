@@ -1,12 +1,9 @@
-// ─── Transformer Bit2: BitLinear (1.58-bit) CPU Training + I2S Kernel Inference
+// ─── xoria_bit: BitLinear (1.58-bit) CPU Training + I2S Kernel Inference
 //
 // Entrenamiento CPU con STE + inferencia con kernel I2S (ternary).
-// Para entrenamiento GPU: usar transformer_bit2_cuda.
+// Para entrenamiento GPU: usar xoria_bit_cuda.
 //
-// Usage: cargo run --bin transformer_bit2 --release -- xorIA/input.txt
-
-mod model;
-mod bitnet_export;
+// Usage: cargo run --bin xoria_bit --release -- xorIA/input.txt
 
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::decay::WeightDecayConfig;
@@ -27,13 +24,13 @@ use std::time::Instant;
 
 use xlstm::blocks::bitlinear::layer::BitLinearConfig;
 use xlstm::blocks::bitlinear::kernel::KernelKind;
-use model::{
+use xlstm::blocks::trasformer_bit::model::{
     Tokenizer, FileFragmentIterator, BitLinearQKVProjection, BitLinearOutputProjection,
     BitLinearSwiGLUFeedForward, BitLinearTransformerLayer, BitLinearRMSNorm,
     BitLinearTransformerStack, TransformerBitLinearLM, TransformerInferenceState, KVCache,
     create_batch, sample_from_logits,
 };
-use bitnet_export::{export_bitnet, load_bitnet, load_bitnet_inference_state, is_bitnet_file, compare_models, compare_compatibility, report_inference_state_memory};
+use xlstm::blocks::trasformer_bit::bitnet_export::{export_bitnet, load_bitnet, load_bitnet_inference_state, is_bitnet_file, compare_models, compare_compatibility, report_inference_state_memory};
 
 type MyBackend = Autodiff<Flex<f32>>;
 
@@ -143,7 +140,7 @@ fn generate_text_cached<B: Backend>(
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
     println!("╔════════════════════════════════════════════════════════════════╗");
     println!("║     Transformer Bit2 — BitLinear CPU + I2S Kernel             ║");
     println!("║     GQA + RoPE + SwiGLU + KV Cache + Ternary Inference       ║");
@@ -488,4 +485,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn main() {
+    if let Err(e) = xoria_cpu() {
+        eprintln!("Error: {}", e);
+    }
 }

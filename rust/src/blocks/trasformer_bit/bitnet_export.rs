@@ -4,10 +4,10 @@ use std::path::Path;
 
 use burn::tensor::{Tensor, TensorData, backend::Backend};
 
-use xlstm::blocks::bitlinear::kernel::{I2SKernel, KernelKind};
-use xlstm::blocks::bitlinear::layer::{BitLinear, BitLinearInferenceState};
+use crate::blocks::bitlinear::kernel::{I2SKernel, KernelKind};
+use crate::blocks::bitlinear::layer::{BitLinear, BitLinearInferenceState};
 
-use super::{
+use super::model::{
     TransformerBitLinearLM, TransformerInferenceState, BitLinearTransformerStack, BitLinearTransformerLayer,
     BitLinearRMSNorm, BitLinearQKVProjection, BitLinearOutputProjection,
     BitLinearSwiGLUFeedForward,
@@ -286,7 +286,7 @@ pub fn export_bitnet<B: Backend>(model: &TransformerBitLinearLM<B>, path: &str) 
 // ─── Load (reconstruct BitLinear from ternary) ─────────────────────────────
 
 fn reconstruct_bitlinear<B: Backend>(bl: &BitLinearBinLoaded, device: &B::Device) -> BitLinear<B> {
-    use xlstm::blocks::bitlinear::layer::RMSNorm;
+    use crate::blocks::bitlinear::layer::RMSNorm;
 
     let rms_norm = RMSNorm {
         weight: burn::module::Param::from_tensor(
@@ -650,7 +650,7 @@ pub fn compare_compatibility<B: Backend>(
     use burn::record::{CompactRecorder, Recorder};
     use burn::module::Module;
     use burn::tensor::Int;
-    use xlstm::blocks::bitlinear::layer::BitLinearConfig;
+    use crate::blocks::bitlinear::layer::BitLinearConfig;
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  Comparación de compatibilidad MPK vs .bitnet                ║");
