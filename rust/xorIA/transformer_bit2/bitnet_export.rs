@@ -227,7 +227,7 @@ pub fn export_bitnet<B: Backend>(model: &TransformerBitLinearLM<B>, path: &str) 
         let packed = ((params + 15) / 16) * 4;
         let groups = (params + 127) / 128;
         let scales = groups * 4;
-        let rms = inf * 2;  // f16 rms norm weight
+        let rms = inf * 4;  // f32 rms norm weight (write_f32_slice)
         packed + scales + rms
     };
 
@@ -298,9 +298,16 @@ fn reconstruct_bitlinear<B: Backend>(bl: &BitLinearBinLoaded, device: &B::Device
     let numel = bl.in_features * bl.out_features;
     let mut w_f32 = vec![0.0f32; numel];
 
+    let u32s_per_row = (bl.in_features + 15) / 16;
+    let groups_per_row = (bl.in_features + 127) / 128;
+
     for (g_idx, &packed) in bl.packed_w.iter().enumerate() {
         let base = g_idx * 16;
-        let scale = bl.scales.get(g_idx).copied().unwrap_or(1e-8);
+        let row = g_idx / u32s_per_row;
+        let pos_in_row = g_idx % u32s_per_row;
+        let gi = pos_in_row / 8;
+        let scale_idx = row * groups_per_row + gi;
+        let scale = bl.scales.get(scale_idx).copied().unwrap_or(1e-8);
         for bit_idx in 0..16 {
             let w_idx = base + bit_idx;
             if w_idx >= numel { break; }
@@ -514,6 +521,64 @@ fn skip_bytes<R: Read>(r: &mut R, n: usize) -> io::Result<()> {
     Ok(())
 }
 
+// ─── Memory Report ──────────────────────────────────────────────────────────
+
+fn bitlinear_bytes(bl: &BitLinearInferenceState) -> usize {
+    bl.packed_w.len() * std::mem::size_of::<u32>() + bl.scales.len() * std::mem::size_of::<f32>()
+}
+
+pub fn report_inference_state_memory(
+    state: &TransformerInferenceState,
+    embed_bytes: usize,
+    norm_bytes: usize,
+    d_model: usize,
+    num_layers: usize,
+) {
+    let mut total_packed = 0usize;
+    let mut total_scales = 0usize;
+
+    let mut component = |name: &str, bl: &BitLinearInferenceState| {
+        let pw = bl.packed_w.len() * std::mem::size_of::<u32>();
+        let sc = bl.scales.len() * std::mem::size_of::<f32>();
+        println!("    {:<14} packed: {:>8.2} KB  scales: {:>6.2} KB  ({}×{})",
+            name, pw as f64 / 1e3, sc as f64 / 1e3, bl.in_features, bl.out_features);
+        total_packed += pw;
+        total_scales += sc;
+    };
+
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║  Desglose de RAM — Inference State                          ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+
+    for (li, (q, k, v)) in state.qkv.iter().enumerate() {
+        println!("  Capa {}:", li);
+        component("q_proj", q);
+        component("k_proj", k);
+        component("v_proj", v);
+        component("o_proj", &state.o_proj[li]);
+        component("gate_up", &state.ffn_gate_up[li]);
+        component("down", &state.ffn_down[li]);
+    }
+    println!("  Head:");
+    component("head", &state.head);
+
+    let total_bitlinear = total_packed + total_scales;
+    let total = embed_bytes + norm_bytes + total_bitlinear;
+
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  RESUMEN                                                    ║");
+    println!("║    Embedding (f16):      {:>8.2} KB  ({:>5.1}%)            ", embed_bytes as f64 / 1e3, embed_bytes as f64 / total as f64 * 100.0);
+    println!("║    Norms (f16):          {:>8.2} KB  ({:>5.1}%)            ", norm_bytes as f64 / 1e3, norm_bytes as f64 / total as f64 * 100.0);
+    println!("║    Packed ternary:       {:>8.2} KB  ({:>5.1}%)            ", total_packed as f64 / 1e3, total_packed as f64 / total as f64 * 100.0);
+    println!("║    Scales (f32):         {:>8.2} KB  ({:>5.1}%)            ", total_scales as f64 / 1e3, total_scales as f64 / total as f64 * 100.0);
+    println!("║    ─────────────────────────────────────────────────────    ║");
+    println!("║    TOTAL inference:      {:>8.2} KB  ({} layers)           ", total as f64 / 1e3, num_layers);
+
+    let act_per_token = d_model * (4 + 1);  // f32 input + i8 quantized
+    println!("║    Activación/token:     {:>8.2} KB  (d_model={} i8+f32)  ", act_per_token as f64 / 1e3, d_model);
+    println!("╚══════════════════════════════════════════════════════════════╝");
+}
+
 // ─── Auto-detect format ────────────────────────────────────────────────────
 
 pub fn is_bitnet_file(path: &str) -> bool {
@@ -571,6 +636,184 @@ pub fn compare_models<B: Backend>(
         println!("  BitNet BitLinear params (f32 dequant): {:.2}M", bn_params as f64 / 1e6);
         println!("  Embedding: {}x{} = {:.2}M", bn_model.vocab_size, bn_model.d_model, (bn_model.vocab_size * bn_model.d_model) as f64 / 1e6);
     }
+
+    Ok(())
+}
+
+// ─── Compatibility Test: MPK vs .bitnet ──────────────────────────────────────
+
+pub fn compare_compatibility<B: Backend>(
+    mpk_path: &str,
+    bitnet_path: &str,
+    device: &B::Device,
+) -> io::Result<()> {
+    use burn::record::{CompactRecorder, Recorder};
+    use burn::module::Module;
+    use burn::tensor::Int;
+    use xlstm::blocks::bitlinear::layer::BitLinearConfig;
+
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║  Comparación de compatibilidad MPK vs .bitnet                ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+
+    let d_model: usize = 512;
+    let num_layers: usize = 6;
+    let num_heads: usize = 8;
+    let num_kv_groups: usize = 4;
+    let head_dim = d_model / num_heads;
+    let ffn_dim = ((4.0 * d_model as f64 * 2.0 / 3.0) as usize / 64 + 1) * 64;
+    let vocab_size = 16000;
+
+    // ── Load MPK model ──────────────────────────────────────────
+    let mpk_layers: Vec<BitLinearTransformerLayer<B>> = (0..num_layers).map(|_| {
+        BitLinearTransformerLayer {
+            attn_norm: BitLinearRMSNorm::new(d_model, 1e-5, device),
+            qkv: BitLinearQKVProjection {
+                q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+                k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+                v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+                num_heads, num_kv_groups, head_dim,
+            },
+            o_proj: BitLinearOutputProjection {
+                o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+                num_heads, head_dim,
+            },
+            ffn_norm: BitLinearRMSNorm::new(d_model, 1e-5, device),
+            ffn: BitLinearSwiGLUFeedForward {
+                gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+                down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+                dropout: burn::nn::DropoutConfig::new(0.0).init(),
+                intermediate_dim: ffn_dim,
+            },
+            residual_dropout: burn::nn::DropoutConfig::new(0.0).init(),
+        }
+    }).collect();
+
+    let mut mpk_model: TransformerBitLinearLM<B> = TransformerBitLinearLM {
+        embedding: burn::nn::EmbeddingConfig::new(vocab_size, d_model).init(device),
+        transformer: BitLinearTransformerStack { final_norm: BitLinearRMSNorm::new(d_model, 1e-5, device), num_layers, d_model, layers: mpk_layers },
+        head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+        vocab_size, d_model, num_layers,
+    };
+
+    println!("  Cargando MPK: {}...", mpk_path);
+    let record = CompactRecorder::new().load(mpk_path.into(), device)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    mpk_model = mpk_model.load_record(record);
+    println!("  MPK cargado.");
+
+    // ── Load .bitnet model ──────────────────────────────────────
+    println!("  Cargando .bitnet: {}...", bitnet_path);
+    let (bn_model, warnings) = load_bitnet::<B>(bitnet_path, device)?;
+    for w in &warnings { println!("    {}", w); }
+    println!("  .bitnet cargado.");
+
+    // ── Same input for both ─────────────────────────────────────
+    let seq_len = 32;
+    let token_ids: Vec<i64> = (0..seq_len).map(|i| (i % vocab_size) as i64).collect();
+    let input = Tensor::<B, 2, Int>::from_data(
+        TensorData::new(token_ids, [1, seq_len]), device
+    );
+
+    // ── Forward pass on both ────────────────────────────────────
+    println!("  Ejecutando forward pass (seq_len={})...", seq_len);
+
+    let mpk_logits = mpk_model.forward(input.clone());
+    let bn_logits = bn_model.forward(input);
+
+    let mpk_data = mpk_logits.into_data();
+    let bn_data = bn_logits.into_data();
+
+    let mpk_slice = mpk_data.as_slice::<f32>().unwrap();
+    let bn_slice = bn_data.as_slice::<f32>().unwrap();
+
+    assert_eq!(mpk_slice.len(), bn_slice.len(), "Dimensiones de salida diferentes");
+
+    // ── Numerical comparison ────────────────────────────────────
+    let n = mpk_slice.len() as f64;
+    let mut sum_sq_diff = 0.0f64;
+    let mut sum_sq_mpk = 0.0f64;
+    let mut sum_sq_bn = 0.0f64;
+    let mut sum_abs_diff = 0.0f64;
+    let mut max_abs_diff = 0.0f64;
+    let mut max_abs_diff_pos = 0usize;
+    let mut cosine_num = 0.0f64;
+    let mut match_count = 0usize;
+
+    for i in 0..mpk_slice.len() {
+        let a = mpk_slice[i] as f64;
+        let b = bn_slice[i] as f64;
+        let diff = a - b;
+        sum_sq_diff += diff * diff;
+        sum_sq_mpk += a * a;
+        sum_sq_bn += b * b;
+        sum_abs_diff += diff.abs();
+        cosine_num += a * b;
+        if diff.abs() > max_abs_diff {
+            max_abs_diff = diff.abs();
+            max_abs_diff_pos = i;
+        }
+        // Top-1 match: same argmax in vocab dimension
+        // We'll check per-position below
+    }
+
+    let mse = sum_sq_diff / n;
+    let rmse = mse.sqrt();
+    let mae = sum_abs_diff / n;
+    let cosine_sim = cosine_num / (sum_sq_mpk.sqrt() * sum_sq_bn.sqrt() + 1e-12);
+
+    // Per-position top-1 accuracy
+    let mut top1_matches = 0usize;
+    for pos in 0..seq_len {
+        let mpk_row = &mpk_slice[pos * vocab_size..(pos + 1) * vocab_size];
+        let bn_row = &bn_slice[pos * vocab_size..(pos + 1) * vocab_size];
+        let mpk_argmax = mpk_row.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+        let bn_argmax = bn_row.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+        if mpk_argmax == bn_argmax { top1_matches += 1; }
+    }
+
+    // Top-5 match
+    let mut top5_matches = 0usize;
+    for pos in 0..seq_len {
+        let mpk_row = &mpk_slice[pos * vocab_size..(pos + 1) * vocab_size];
+        let bn_row = &bn_slice[pos * vocab_size..(pos + 1) * vocab_size];
+        let mut mpk_top5: Vec<(usize, f32)> = mpk_row.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        mpk_top5.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let mut bn_top5: Vec<(usize, f32)> = bn_row.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        bn_top5.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let mpk_set: std::collections::HashSet<usize> = mpk_top5.iter().take(5).map(|(i, _)| *i).collect();
+        let bn_set: std::collections::HashSet<usize> = bn_top5.iter().take(5).map(|(i, _)| *i).collect();
+        if mpk_set.intersection(&bn_set).count() > 0 { top5_matches += 1; }
+    }
+
+    println!("║                                                              ║");
+    println!("║  Resultados numéricos:                                       ║");
+    println!("║    MSE:              {:>14.8}                           ", mse);
+    println!("║    RMSE:             {:>14.8}                           ", rmse);
+    println!("║    MAE:              {:>14.8}                           ", mae);
+    println!("║    Cosine similarity:{:>14.8}                           ", cosine_sim);
+    println!("║    Max abs diff:     {:>14.8}  (pos={})              ", max_abs_diff, max_abs_diff_pos);
+    println!("║                                                              ║");
+    println!("║  Per-position accuracy ({} tokens):                        ║", seq_len);
+    println!("║    Top-1 match:      {:>5}/{} ({:>5.1}%)                    ", top1_matches, seq_len, top1_matches as f64 / seq_len as f64 * 100.0);
+    println!("║    Top-5 overlap:    {:>5}/{} ({:>5.1}%)                    ", top5_matches, seq_len, top5_matches as f64 / seq_len as f64 * 100.0);
+
+    // Quality verdict
+    let verdict = if cosine_sim > 0.99 {
+        "EXCELENTE — paridad casi perfecta"
+    } else if cosine_sim > 0.95 {
+        "BUENO — menor error de cuantización"
+    } else if cosine_sim > 0.80 {
+        "REGULAR — pérdida significativa"
+    } else if cosine_sim > 0.50 {
+        "MALO — divergencia notable"
+    } else {
+        "CRÍTICO — modelos fundamentalmente diferentes"
+    };
+
+    println!("║                                                              ║");
+    println!("║  Veredicto: {:<48}║", verdict);
+    println!("╚══════════════════════════════════════════════════════════════╝");
 
     Ok(())
 }

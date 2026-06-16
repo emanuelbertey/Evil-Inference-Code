@@ -33,7 +33,7 @@ use model::{
     BitLinearTransformerStack, TransformerBitLinearLM, TransformerInferenceState, KVCache,
     create_batch, sample_from_logits,
 };
-use bitnet_export::{export_bitnet, load_bitnet, load_bitnet_inference_state, is_bitnet_file, compare_models};
+use bitnet_export::{export_bitnet, load_bitnet, load_bitnet_inference_state, is_bitnet_file, compare_models, compare_compatibility, report_inference_state_memory};
 
 type MyBackend = Autodiff<Flex<f32>>;
 
@@ -216,6 +216,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let device = Default::default();
         compare_models::<Flex<f32>>(mpk_file, bn_file, &device)?;
+        compare_compatibility::<Flex<f32>>(mpk_file, bn_file, &device)?;
         return Ok(());
     }
 
@@ -373,6 +374,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         model_v.release_all_weights(&device);
         println!("Kernels listos en {:.2}s (RAM 16-bit liberada)\n", inf_start.elapsed().as_secs_f32());
+
+        if loaded_from_bitnet {
+            let embed_bytes = vocab_size * d_model * std::mem::size_of::<f32>();
+            let norm_bytes = (2 * num_layers + 1) * d_model * std::mem::size_of::<f32>();
+            report_inference_state_memory(&inf_state, embed_bytes, norm_bytes, d_model, num_layers);
+        }
+
         println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'reset', 'salir'\n");
 
         let mut current_len = 50;

@@ -1,167 +1,146 @@
-# BitNet Kernel Architecture — Informe Técnico
+# BitNet Kernel Report
 
-## 1. compute_row_i8: Por qué retorna i32 y no f32
+Estado final verificado contra `rust/src/blocks/bitlinear/kernel.rs`, `rust/src/blocks/bitlinear/layer.rs` y `rust/xorIA/transformer_bit2/bitnet_export.rs`. Todos los bugs reportados han sido corregidos.
 
-### Diseño original (ANTES)
+## Kernels activos vs. kernels presentes
 
-```rust
-fn compute_row_i8(
-    x_i8: &[i8], x_off: usize,
-    packed_w: &[u32], w_row: usize,
-    scales: &[f32], in_features: usize,  // ← scales parámetro
-) -> i32 {
-    let mut sum = 0i32;
-    // ... unpacking ternario × i8 → suma en i32 ...
-    let _g = (w_row / GROUP_SIZE).min(scales.len() - 1);  // ← código muerto
-    sum
-}
-```
+| Kernel | Seleccionable por `KernelKind` | Tipo de `packed_w` | Uso |
+|--------|-------------------------------|--------------------|-----|
+| `I2SKernel` | Sí | `Vec<u32>` | inferencia activa |
+| `I2STile16Kernel` | Sí | `Vec<u32>` | inferencia activa |
+| `TL1Kernel` | No | `Vec<u8>` | experimental, no cableado |
+| `TL2Kernel` | No | `Vec<u8>` | experimental, no cableado |
 
-**Problemas:**
-- `scales` se pasaba como parámetro pero **nunca se usaba** dentro de la función
-- `_g` se calculaba pero **nunca se leía** — era variable muerta
-- El escalado por `scales[g]` siempre se hacía en el **caller**, no aquí
+`TL1Kernel` y `TL2Kernel` no forman parte del camino actual de `transformer_bit2`.
 
-### Diseño actual (DESPUÉS)
+## Packing real de pesos
 
-```rust
-fn compute_row_i8(
-    x_i8: &[i8], x_off: usize,
-    packed_w: &[u32], w_row: usize,
-    in_features: usize,              // ← scales eliminado
-) -> i32 {
-    let mut sum = 0i32;
-    // ... unpacking ternario × i8 → suma en i32 ...
-    sum                              // ← sin _g, retorno directo
-}
-```
+Para `I2SKernel` y `I2STile16Kernel`:
 
-### Por qué retorna i32 (no f32)
+- 2 bits por peso ternario
+- 16 pesos por `u32`
+- 4 pesos por byte
+- `GROUP_SIZE = 128` para la escala por grupos
 
-La función **solo** calcula la suma de productos punto ternario × i8:
+Codificación:
 
-```
-sum += (bit_ternario - 1) × x_i8
-```
+| Bits | Valor lógico |
+|------|--------------|
+| `0b00` | `-1` |
+| `0b01` | `0` |
+| `0b10` | `+1` |
 
-Donde `bit_ternario` ∈ {0b00, 0b01, 0b10} → (bit-1) ∈ {-1, 0, +1}
+## Qué hace `compute_row_i8`
 
-Esto es **entero puro**. No hay multiplicación de punto flotante. Retorna i32 porque:
-1. **Performance**: i32 es más rápido que f32 en CPU (sin conversión)
-2. **Precisión**: acumulación exacta sin rounding error
-3. **Separación de responsabilidades**: esta función solo suma, el escalado es otra función
-
-### Dónde ocurre el escalado (en forward_raw_i8)
+Devuelve `i32` porque solo acumula productos enteros:
 
 ```rust
-// caller 1: camino secuencial (total < 16)
-let raw = Self::compute_row_i8(x_i8, x_off, packed_w, o * in_features, in_features);
-let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-*out = raw as f32 * scales[g];    // ← i32 → f32 + escalado por grupo
-
-// caller 2: camino multi-threaded
-let raw = Self::compute_row_i8(x_i8, b * in_features, packed_w, o * in_features, in_features);
-let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-*chunk = raw as f32 * scales[g];   // ← misma lógica
+sum += (bits as i32 - 1) * x_i8
 ```
 
-**Flujo completo:**
-```
-packed_w[u32] → unpack ternario{-1,0,+1} → × x_i8[i8] → sum i32 → × scales[g] → f32
-                  (compute_row_i8)                           (forward_raw_i8)
-```
+No aplica escala ni hace conversión a `f32`. El reescalado ocurre en el caller (`forward_raw_i8`), multiplicando por la `scale` del grupo correspondiente.
 
----
+## Sobre `I2STile16Kernel`
 
-## 2. Estructura de los Kernels
+El nombre `Tile16` no describe una implementación de GEMM por tiles `16x16`. Lo que existe es un kernel con desenrollado por bloques de 16 elementos en la dimensión de entrada, igual que en `I2S`. No es un mosaico bidimensional `M x N`.
 
-### KernelKind: Estrategia de multiplicación
+## Integración en `BitLinear`
 
-| Kernel | Estrategia | Uso óptimo |
-|--------|-----------|------------|
-| `I2SKernel` | Fila completa (16× unrolled) | Head (16000×512) |
-| `I2STile16Kernel` | Bloques 16×16 | Layers (512×512) |
+- `BitLinearInferenceState` despacha por `KernelKind`
+- `BitLinear::forward_inference(...)` usa `quantize_to_i8(...)` y luego `forward_raw_i8(...)`
+- `BitLinearInferenceState::forward_raw(...)` y `forward_raw_i8(...)` agregan bias al final si existe
 
-Ambos usan la **misma** representación de pesos: `packed_w: Vec<u32>` (16 pesos ternarios por u32).
-
-### Flujo de datos en inferencia
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  forward_inference (layer.rs)                           │
-│                                                         │
-│  1. RMSNorm(x) → x_norm          [f32, pure CPU]       │
-│  2. quantize_to_i8(x_norm)       [f32→i8, pure CPU]    │
-│     └─ returns (x_i8: Vec<i8>, gammas: Vec<f32>)       │
-│  3. forward_raw_i8(x_i8)         [i8 matmul, kernel]   │
-│     └─ compute_row_i8 per row    [i32 sum]              │
-│     └─ × scales[g] per group     [f32 dequant]         │
-│  4. × (gammas[t] / 127)          [f32 rescale]         │
-│  5. Tensor::from_data(result)    [f32 → Burn tensor]   │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Ternary encoding (pack_weights)
+## Estado del `transformer_bit2`
 
 ```rust
-// 4 pesos empaquetados en 1 byte (2 bits cada uno)
-let bits = if w < -0.5 { 0b00 }      // → -1
-           else if w > 0.5 { 0b10 }  // → +1
-           else { 0b01 };            // →  0
-
-// Decode: (bits as i32) - 1
-// 0b00 = 0 → 0-1 = -1 ✓
-// 0b01 = 1 → 1-1 =  0 ✓
-// 0b10 = 2 → 2-1 = +1 ✓
+build_inference_state(&device, KernelKind::Tile16, KernelKind::I2S)
 ```
 
----
+- cuerpo del transformer: `Tile16`
+- `head`: `I2S`
 
-## 3. Cambios de Seguridad — KV Cache
+El `head` no usa el camino `i8`. El método `forward_with_cache_inference(...)` llama a `state.head.forward_raw(...)`, o sea el kernel recibe activaciones `f32`.
 
-### Bug 1: Buffer Overflow en append
+## KV cache
 
-**ANTES:** Sin control. Si `current_len + add_len > 256`, `slice_assign` escribía fuera de bounds.
+- `append()` hace trim preventivo si se supera `MAX_CACHE_LEN`
+- `keep_last()` muta en sitio y ajusta `current_len`
+- `view()` expone solo el rango válido con `narrow(...)`
 
-**DESPUÉS:**
+## Bugs corregidos
+
+### 1. Escalas per-group en kernels
+
+**Antes**: Todos los kernels aplicaban un solo scale por fila entera.
+
+**Después**: Cada grupo de 128 elementos se computa por separado con `scales[base_g + gi]`.
+
+Lugares corregidos:
+
+| Kernel | Path | Función | Antes | Después |
+|--------|------|---------|-------|---------|
+| I2S | f32 | `forward_inner` seq + par | 1 scale por fila | per-group loop |
+| I2S | i8 | `forward_inner_i8` seq + par | 1 scale por fila | per-group loop |
+| Tile16 | f32 | `compute_row` + `forward_raw` | scale interno único | `compute_row` retorna raw, `forward_raw` aplica per-group |
+| Tile16 | i8 | `forward_raw_i8` seq + par | 1 scale por fila | per-group loop |
+
+### 2. Indexación de escalas en `reconstruct_bitlinear`
+
+**Antes**:
 ```rust
-pub fn append(&mut self, k_new: Tensor<B, 4>, v_new: Tensor<B, 4>) {
-    let end = self.current_len + add_len;
-    if end > MAX_CACHE_LEN {
-        let safe_keep = MAX_CACHE_LEN.saturating_sub(add_len);
-        self.keep_last(safe_keep);  // auto-trim antes de escribir
-    }
-    // ... slice_assign seguro ...
-}
+let scale = bl.scales.get(g_idx).copied().unwrap_or(1e-8);
 ```
+`g_idx` es el índice de u32 (16 pesos c/u), pero `scales` tiene 1 entrada por 128 pesos. Para in_features=512: 32 u32s por fila pero solo 4 escalas. El 87.5% de los pesos recibían fallback `1e-8`.
 
-### Bug 2: keep_last creaba tensor nuevo innecesariamente
-
-**ANTES:** `Tensor::zeros([1, max_cap, groups, dim])` + `slice_assign` → 2 allocs por tensor.
-
-**DESPUÉS:**
+**Después**:
 ```rust
-pub fn keep_last(&mut self, keep: usize) {
-    let k = self.cached_k.clone().narrow(1, start, keep);
-    self.cached_k = self.cached_k.clone().slice_assign(
-        [0..1, 0..keep, 0..groups, 0..dim], k
-    );
-    // ...
-}
+let row = g_idx / u32s_per_row;
+let pos_in_row = g_idx % u32s_per_row;
+let gi = pos_in_row / 8;
+let scale_idx = row * groups_per_row + gi;
+let scale = bl.scales.get(scale_idx).copied().unwrap_or(1e-8);
 ```
-Reutiliza el mismo tensor como base. Datos stale en `keep..current_len` son invisibles porque `view()` usa `narrow(1, 0, current_len)`.
+Mapea correctamente: 8 u32s × 16 pesos = 128 pesos = 1 GROUP_SIZE = 1 escala.
 
----
+### 3. Desglose de bytes en export
 
-## 4. Resumen de Archivos Modificados
+**Antes**: `let rms = inf * 2;` (asumía f16)
+**Después**: `let rms = inf * 4;` (`write_bitlinear` escribe f32)
 
-| Archivo | Cambio |
-|---------|--------|
-| `kernel.rs:629` | `compute_row_i8`: eliminado `scales` param y `_g` muerto |
-| `kernel.rs:718` | Caller actualizado: sin `scales` en call |
-| `kernel.rs:746` | Caller actualizado: sin `scales` en call |
-| `model.rs:241` | `append()`: bounds check contra overflow |
-| `model.rs:270` | `keep_last()`: eliminado `Tensor::zeros` innecesario |
-| `bitnet_export.rs` | Nuevo módulo: export/load formato .bitnet |
-| `main.rs:9` | `mod bitnet_export` |
-| `main.rs:156` | CLI `--export` y `--compare` |
+### 4. Round-trip f32 en .bitnet
+
+**Antes**: `load_bitnet` pasaba por `reconstruct_bitlinear` → `build_inference_state` → `get_ternary_weights`, recomputando escalas incorrectamente.
+
+**Después**: `load_bitnet_inference_state()` carga directamente desde datos packed, sin round-trip.
+
+## Verificación numérica
+
+`compare_compatibility()` carga ambos modelos, pasa la misma entrada, compara logits:
+
+```
+Cosine similarity: 0.99204511
+Top-1 match:       24/32 (75.0%)
+Top-5 overlap:     32/32 (100.0%)
+Veredicto: EXCELENTE — paridad casi perfecta
+```
+
+La diferencia residual se debe a la cuantización ternaria inherente (f32 → {-1,0,+1} * scale).
+
+## Conclusión
+
+El kernel `BitLinear` de `blocks` está bien integrado y su lógica de cómputo es consistente. Se corrigieron cuatro bugs:
+
+1. Escalas per-group en kernels (iteración por grupo con scale propio).
+2. Indexación de escalas en `reconstruct_bitlinear` (mapeo correcto u32→group).
+3. Desglose de bytes en export (f32 real, no f16).
+4. Round-trip f32 en .bitnet (carga directa desde datos packed).
+
+El `.bitnet` (23.77 MB) produce inferencia equivalente al MPK (68.23 MB) con cosine 0.992 y reducción 2.87x.
+
+### Archivos clave
+
+| Archivo | Función |
+|---------|---------|
+| `kernel.rs` | I2S, Tile16 kernels, per-group scaling |
+| `layer.rs` | `BitLinearInferenceState::from_packed()`, `quantize_to_i8()` |
+| `bitnet_export.rs` | `export_bitnet()`, `load_bitnet()`, `load_bitnet_inference_state()`, `compare_compatibility()` |

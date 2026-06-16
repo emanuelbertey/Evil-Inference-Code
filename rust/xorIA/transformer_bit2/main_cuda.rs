@@ -6,6 +6,7 @@
 // Usage: cargo run --bin transformer_bit2_cuda --release -- xorIA/input.txt
 
 mod model;
+mod bitnet_export;
 
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::decay::WeightDecayConfig;
@@ -18,6 +19,7 @@ use burn::{
     nn::EmbeddingConfig,
 };
 use burn_autodiff::Autodiff;
+use burn_flex::Flex;
 use std::error::Error;
 use std::io::{self, Write};
 use std::path::Path;
@@ -31,6 +33,7 @@ use model::{
     BitLinearTransformerStack, TransformerBitLinearLM, TransformerInferenceState, KVCache,
     create_batch, sample_from_logits,
 };
+use bitnet_export::{export_bitnet, load_bitnet, is_bitnet_file, compare_models};
 
 type MyBackend = Autodiff<burn_cuda::Cuda<f32>>;
 
@@ -62,10 +65,10 @@ fn generate_text_cached<B: burn::tensor::backend::Backend>(
     let mut generated = Vec::new();
     current_offset += seed_len;
 
-    if current_offset >= 255 {
-        if let Some(Some(first)) = caches.get(0) {
-            let seq = first.cached_k.dims()[1];
-            if seq > 70 { let keep = seq - 160.min(seq); for c in caches.iter_mut() { if let Some(ref kv) = c { *c = Some(kv.keep_last(keep)); } }; current_offset = current_offset.saturating_sub(160); }
+    if current_offset >= 200 {
+        if current_offset >= 200 {
+            for c in caches.iter_mut() { if let Some(ref mut kv) = c { kv.keep_last(70); } }
+            current_offset = 70;
         }
     }
 
@@ -85,11 +88,9 @@ fn generate_text_cached<B: burn::tensor::backend::Backend>(
         caches = new_caches.into_iter().map(Some).collect();
         current_offset += 1;
 
-        if current_offset >= 255 {
-            if let Some(Some(first)) = caches.get(0) {
-                let seq = first.cached_k.dims()[1];
-                if seq > 70 { let keep = seq - 160.min(seq); for c in caches.iter_mut() { if let Some(ref kv) = c { *c = Some(kv.keep_last(keep)); } }; current_offset = current_offset.saturating_sub(160); }
-            }
+        if current_offset >= 200 {
+            for c in caches.iter_mut() { if let Some(ref mut kv) = c { kv.keep_last(70); } }
+            current_offset = 70;
         }
 
         let [_, _, v] = logits.dims();
@@ -113,7 +114,63 @@ fn main() -> Result<(), Box<dyn Error>> {
     let model_path = "transformer_bit2";
     let model_file = format!("{}.mpk", model_path);
     let tokenizer_file = format!("{}_tokenizer.json", model_path);
+    let bitnet_file = format!("{}.bitnet", model_path);
     let model_exists = Path::new(&model_file).exists();
+    let bitnet_exists = Path::new(&bitnet_file).exists();
+
+    // ─── CLI Modes ─────────────────────────────────────────────────────
+    if args.iter().any(|a| a == "--export") {
+        if !model_exists { println!("No hay modelo .mpk para exportar."); return Ok(()); }
+        let device = Default::default();
+        let d_model: usize = 512;
+        let num_layers: usize = 6;
+        let num_heads: usize = 8;
+        let num_kv_groups: usize = 4;
+        let head_dim = d_model / num_heads;
+        let ffn_dim = ((4.0 * d_model as f64 * 2.0 / 3.0) as usize / 64 + 1) * 64;
+        let vocab_size = 16000;
+        type FlexModel = TransformerBitLinearLM<Flex<f32>>;
+        let layers: Vec<BitLinearTransformerLayer<Flex<f32>>> = (0..num_layers).map(|_| {
+            BitLinearTransformerLayer {
+                attn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
+                qkv: BitLinearQKVProjection {
+                    q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    num_heads, num_kv_groups, head_dim,
+                },
+                o_proj: BitLinearOutputProjection { o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device), num_heads, head_dim },
+                ffn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
+                ffn: BitLinearSwiGLUFeedForward {
+                    gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    dropout: burn::nn::DropoutConfig::new(0.0).init(), intermediate_dim: ffn_dim,
+                },
+                residual_dropout: burn::nn::DropoutConfig::new(0.0).init(),
+            }
+        }).collect();
+        let mut model: FlexModel = TransformerBitLinearLM {
+            embedding: EmbeddingConfig::new(vocab_size, d_model).init(&device),
+            transformer: BitLinearTransformerStack { final_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device), num_layers, d_model, layers },
+            head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+            vocab_size, d_model, num_layers,
+        };
+        println!("Cargando modelo MPK para exportar...");
+        let record = CompactRecorder::new().load(model_file.clone().into(), &device)?;
+        model = model.load_record(record);
+        export_bitnet(&model, &bitnet_file)?;
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--compare") {
+        if !model_exists || !bitnet_exists {
+            println!("Necesitás ambos archivos: {} y {}", model_file, bitnet_file);
+            return Ok(());
+        }
+        let device = Default::default();
+        compare_models::<Flex<f32>>(&model_file, &bitnet_file, &device)?;
+        return Ok(());
+    }
 
     let target_vocab_size = 16000;
     let tokenizer = if Path::new(&tokenizer_file).exists() {
@@ -204,10 +261,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         vocab_size, d_model, num_layers,
     };
 
-    if model_exists {
-        println!("Cargando modelo...");
+    if modo_inferencia && bitnet_exists && is_bitnet_file(&bitnet_file) {
+        println!("Cargando modelo BitNet directamente...");
+        let (loaded_model, warnings) = load_bitnet::<MyBackend>(&bitnet_file, &device)?;
+        model = loaded_model;
+        for w in &warnings { println!("  {}", w); }
+    } else if model_exists {
+        println!("Cargando modelo MPK...");
         let record = CompactRecorder::new().load(model_file.clone().into(), &device)?;
         model = model.load_record(record);
+    } else {
+        println!("No se encontró modelo previo.");
     }
 
     if modo_inferencia {
@@ -278,7 +342,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if cl.is_nan() { println!("\n[!] NaN"); return Ok(()); }
                 total_loss += cl; batch_count += 1;
                 let grads = loss.backward();
-                model = optim.step(lr, model, burn::optim::GradientsParams::from_grads(grads, &model));
+                let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
+                model = optim.step(lr, model, grads_p);
                 let tps = (batch_count * batch_size * seq_len) as f32 / start_epoch.elapsed().as_secs_f32();
                 print!("\rEpoch {}/{} | Frag {} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s", epoch+1, num_epochs, frag_idx, b+1, nb, total_loss/batch_count as f32, tps);
                 io::stdout().flush().unwrap();
@@ -286,7 +351,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         println!("\nEpoch {} Loss: {:.4} ({:.2}s)", epoch+1, total_loss/batch_count.max(1) as f32, start_epoch.elapsed().as_secs_f32());
-        CompactRecorder::new().clone().save_file(&model_file, &model.clone())?;
+        let recorder = CompactRecorder::new();
+        model.clone().save_file(&model_file, &recorder)?;
+
+        // Auto-export bitnet ternary format
+        if let Err(e) = export_bitnet(&model, &bitnet_file) {
+            println!("  ⚠ Error exportando .bitnet: {}", e);
+        }
 
         if (epoch+1) % 2 == 0 {
             let inf_state = model.valid().build_inference_state(&device, KernelKind::I2S, KernelKind::I2S);

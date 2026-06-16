@@ -110,13 +110,25 @@ impl I2SKernel {
         out_features: usize, in_features: usize,
         out_data: &mut [f32],
     ) {
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+
         if batch * out_features <= 2 {
             for b in 0..batch {
                 let x_off = b * in_features;
                 for o in 0..out_features {
-                    let raw = Self::compute_row_aligned(x_data, x_off, packed_w, o * in_features, in_features);
-                    let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = raw * *scales.get_unchecked(g); }
+                    let w_row = o * in_features;
+                    let base_g = o * n_groups_per_row;
+                    let mut row_sum = 0.0f32;
+                    for gi in 0..n_groups_per_row {
+                        let raw = Self::compute_row_aligned(x_data, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                        row_sum += raw * unsafe { *scales.get_unchecked(base_g + gi) };
+                    }
+                    if rem > 0 {
+                        let raw = Self::compute_row_aligned(x_data, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                        row_sum += raw * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                    }
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = row_sum; }
                 }
             }
             return;
@@ -140,10 +152,17 @@ impl I2SKernel {
                         let o = idx % out_features;
                         let w_row = o * in_features;
                         let x_off = b * in_features;
-
-                        let raw = Self::compute_row_aligned(x_data, x_off, packed_w, w_row, in_features);
-                        let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-                        unsafe { *chunk.get_unchecked_mut(local_idx) = raw * *scales.get_unchecked(g); }
+                        let base_g = o * n_groups_per_row;
+                        let mut row_sum = 0.0f32;
+                        for gi in 0..n_groups_per_row {
+                            let raw = Self::compute_row_aligned(x_data, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                            row_sum += raw * unsafe { *scales.get_unchecked(base_g + gi) };
+                        }
+                        if rem > 0 {
+                            let raw = Self::compute_row_aligned(x_data, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                            row_sum += raw * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                        }
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = row_sum; }
                     }
                 });
             }
@@ -247,13 +266,25 @@ impl I2SKernel {
         out_features: usize, in_features: usize,
         out_data: &mut [f32],
     ) {
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+
         if batch * out_features <= 2 {
             for b in 0..batch {
                 let x_off = b * in_features;
                 for o in 0..out_features {
-                    let raw = Self::compute_row_aligned_i8(x_i8, x_off, packed_w, o * in_features, in_features);
-                    let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = raw as f32 * *scales.get_unchecked(g); }
+                    let w_row = o * in_features;
+                    let base_g = o * n_groups_per_row;
+                    let mut row_sum = 0.0f32;
+                    for gi in 0..n_groups_per_row {
+                        let raw = Self::compute_row_aligned_i8(x_i8, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                        row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + gi) };
+                    }
+                    if rem > 0 {
+                        let raw = Self::compute_row_aligned_i8(x_i8, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                        row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                    }
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = row_sum; }
                 }
             }
             return;
@@ -275,9 +306,19 @@ impl I2SKernel {
                         let idx = start_row + local_idx;
                         let b = idx / out_features;
                         let o = idx % out_features;
-                        let raw = Self::compute_row_aligned_i8(x_i8, b * in_features, packed_w, o * in_features, in_features);
-                        let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-                        unsafe { *chunk.get_unchecked_mut(local_idx) = raw as f32 * *scales.get_unchecked(g); }
+                        let w_row = o * in_features;
+                        let x_off = b * in_features;
+                        let base_g = o * n_groups_per_row;
+                        let mut row_sum = 0.0f32;
+                        for gi in 0..n_groups_per_row {
+                            let raw = Self::compute_row_aligned_i8(x_i8, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                            row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + gi) };
+                        }
+                        if rem > 0 {
+                            let raw = Self::compute_row_aligned_i8(x_i8, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                            row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                        }
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = row_sum; }
                     }
                 });
             }
@@ -500,7 +541,7 @@ impl I2STile16Kernel {
     fn compute_row(
         x_data: &[f32], x_off: usize,
         packed_w: &[u32], w_row: usize,
-        scales: &[f32], in_features: usize,
+        in_features: usize,
     ) -> f32 {
         unsafe {
             let mut sum = 0.0f32;
@@ -570,8 +611,7 @@ impl I2STile16Kernel {
                 if bits == 0b10 { sum += x_val; } else if bits == 0b00 { sum -= x_val; }
                 i += 1;
             }
-            let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
-            sum * *scales.get_unchecked(g)
+            sum
         }
     }
 
@@ -582,14 +622,25 @@ impl I2STile16Kernel {
     ) -> Vec<f32> {
         let mut out = vec![0.0f32; batch * out_features];
         let total = batch * out_features;
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+
         if total < 16 {
             for b in 0..batch {
                 let x_off = b * in_features;
                 for o in 0..out_features {
-                    unsafe {
-                        *out.get_unchecked_mut(b * out_features + o) =
-                            Self::compute_row(x_data, x_off, packed_w, o * in_features, scales, in_features);
+                    let w_row = o * in_features;
+                    let base_g = o * n_groups_per_row;
+                    let mut row_sum = 0.0f32;
+                    for gi in 0..n_groups_per_row {
+                        let raw = Self::compute_row(x_data, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                        row_sum += raw * unsafe { *scales.get_unchecked(base_g + gi) };
                     }
+                    if rem > 0 {
+                        let raw = Self::compute_row(x_data, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                        row_sum += raw * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                    }
+                    unsafe { *out.get_unchecked_mut(b * out_features + o) = row_sum; }
                 }
             }
             return out;
@@ -613,10 +664,19 @@ impl I2STile16Kernel {
                         let idx = sr + local_idx;
                         let b = idx / out_features;
                         let o = idx % out_features;
-                        unsafe {
-                            *chunk.get_unchecked_mut(local_idx) =
-                                Self::compute_row(x_data, b * in_features, packed_w, o * in_features, scales, in_features);
+                        let w_row = o * in_features;
+                        let x_off = b * in_features;
+                        let base_g = o * n_groups_per_row;
+                        let mut row_sum = 0.0f32;
+                        for gi in 0..n_groups_per_row {
+                            let raw = Self::compute_row(x_data, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                            row_sum += raw * unsafe { *scales.get_unchecked(base_g + gi) };
                         }
+                        if rem > 0 {
+                            let raw = Self::compute_row(x_data, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                            row_sum += raw * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                        }
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = row_sum; }
                     }
                 });
             }
@@ -629,7 +689,7 @@ impl I2STile16Kernel {
     fn compute_row_i8(
         x_i8: &[i8], x_off: usize,
         packed_w: &[u32], w_row: usize,
-        scales: &[f32], in_features: usize,
+        in_features: usize,
     ) -> i32 {
         unsafe {
             let mut sum = 0i32;
@@ -699,7 +759,6 @@ impl I2STile16Kernel {
                 sum += (bits as i32 - 1) * x_val;
                 i += 1;
             }
-            let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
             sum
         }
     }
@@ -711,15 +770,25 @@ impl I2STile16Kernel {
     ) -> Vec<f32> {
         let mut out = vec![0.0f32; batch * out_features];
         let total = batch * out_features;
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+
         if total < 16 {
             for b in 0..batch {
                 let x_off = b * in_features;
                 for o in 0..out_features {
-                    unsafe {
-                        let raw = Self::compute_row_i8(x_i8, x_off, packed_w, o * in_features, scales, in_features);
-                        let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-                        *out.get_unchecked_mut(b * out_features + o) = raw as f32 * *scales.get_unchecked(g);
+                    let w_row = o * in_features;
+                    let base_g = o * n_groups_per_row;
+                    let mut row_sum = 0.0f32;
+                    for gi in 0..n_groups_per_row {
+                        let raw = Self::compute_row_i8(x_i8, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                        row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + gi) };
                     }
+                    if rem > 0 {
+                        let raw = Self::compute_row_i8(x_i8, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                        row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                    }
+                    unsafe { *out.get_unchecked_mut(b * out_features + o) = row_sum; }
                 }
             }
             return out;
@@ -743,11 +812,19 @@ impl I2STile16Kernel {
                         let idx = sr + local_idx;
                         let b = idx / out_features;
                         let o = idx % out_features;
-                        unsafe {
-                            let raw = Self::compute_row_i8(x_i8, b * in_features, packed_w, o * in_features, scales, in_features);
-                            let g = (o * in_features / GROUP_SIZE).min(scales.len() - 1);
-                            *chunk.get_unchecked_mut(local_idx) = raw as f32 * *scales.get_unchecked(g);
+                        let w_row = o * in_features;
+                        let x_off = b * in_features;
+                        let base_g = o * n_groups_per_row;
+                        let mut row_sum = 0.0f32;
+                        for gi in 0..n_groups_per_row {
+                            let raw = Self::compute_row_i8(x_i8, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                            row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + gi) };
                         }
+                        if rem > 0 {
+                            let raw = Self::compute_row_i8(x_i8, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                            row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                        }
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = row_sum; }
                     }
                 });
             }
