@@ -42,6 +42,10 @@ pub struct BitLinearInferenceState {
 }
 
 impl BitLinearInferenceState {
+    pub fn from_packed(packed_w: Vec<u32>, scales: Vec<f32>, in_features: usize, out_features: usize, kernel: KernelKind) -> Self {
+        BitLinearInferenceState { packed_w, scales, in_features, out_features, bias: None, kernel }
+    }
+
     pub fn forward_raw(&self, x_quant_data: &[f32], batch: usize) -> Vec<f32> {
         let mut out = match self.kernel {
             KernelKind::I2S => I2SKernel::forward_raw(

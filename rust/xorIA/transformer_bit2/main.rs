@@ -6,6 +6,7 @@
 // Usage: cargo run --bin transformer_bit2 --release -- xorIA/input.txt
 
 mod model;
+mod bitnet_export;
 
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::decay::WeightDecayConfig;
@@ -32,6 +33,7 @@ use model::{
     BitLinearTransformerStack, TransformerBitLinearLM, TransformerInferenceState, KVCache,
     create_batch, sample_from_logits,
 };
+use bitnet_export::{export_bitnet, load_bitnet, load_bitnet_inference_state, is_bitnet_file, compare_models};
 
 type MyBackend = Autodiff<Flex<f32>>;
 
@@ -71,13 +73,11 @@ fn generate_text_cached<B: Backend>(
     current_offset += seed_len;
 
     // Trim rule
-    if current_offset >= 255 {
+    if current_offset > 255 {
         if let Some(Some(first)) = caches.get(0) {
-            let seq = first.cached_k.dims()[1];
-            if seq > 70 {
-                let keep = seq - 160.min(seq);
-                for c in caches.iter_mut() { if let Some(ref kv) = c { *c = Some(kv.keep_last(keep)); } }
-                current_offset = current_offset.saturating_sub(160);
+            if first.current_len > 254 {
+                for c in caches.iter_mut() { if let Some(ref mut kv) = c { kv.keep_last(170); } }
+                current_offset = 85;
             }
         }
     }
@@ -113,13 +113,11 @@ fn generate_text_cached<B: Backend>(
         current_offset += 1;
 
         // Trim rule during generation
-        if current_offset >= 255 {
+        if current_offset > 255 {
             if let Some(Some(first)) = caches.get(0) {
-                let seq = first.cached_k.dims()[1];
-                if seq > 70 {
-                    let keep = seq - 160.min(seq);
-                    for c in caches.iter_mut() { if let Some(ref kv) = c { *c = Some(kv.keep_last(keep)); } }
-                    current_offset = current_offset.saturating_sub(160);
+                if first.current_len > 254 {
+                    for c in caches.iter_mut() { if let Some(ref mut kv) = c { kv.keep_last(170); } }
+                    current_offset = 85;
                 }
             }
         }
@@ -154,10 +152,82 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     let text_file = if args.len() >= 2 { args[1].clone() } else { "xorIA/input.txt".to_string() };
 
+    // ─── CLI Modes ─────────────────────────────────────────────────────
+    if args.iter().any(|a| a == "--export") {
+        let mpk_file = "transformer_bit2.mpk";
+        if !Path::new(mpk_file).exists() {
+            println!("Error: {} no encontrado. Primero entrená el modelo.", mpk_file);
+            return Ok(());
+        }
+        let device = Default::default();
+        let d_model: usize = 512;
+        let num_layers: usize = 6;
+        let num_heads: usize = 8;
+        let num_kv_groups: usize = 4;
+        let head_dim = d_model / num_heads;
+        let ffn_dim = ((4.0 * d_model as f64 * 2.0 / 3.0) as usize / 64 + 1) * 64;
+        let vocab_size = 16000;
+
+        let layers: Vec<BitLinearTransformerLayer<Flex<f32>>> = (0..num_layers).map(|_| {
+            BitLinearTransformerLayer {
+                attn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
+                qkv: BitLinearQKVProjection {
+                    q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    num_heads, num_kv_groups, head_dim,
+                },
+                o_proj: BitLinearOutputProjection {
+                    o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    num_heads, head_dim,
+                },
+                ffn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
+                ffn: BitLinearSwiGLUFeedForward {
+                    gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    dropout: burn::nn::DropoutConfig::new(0.1).init(),
+                    intermediate_dim: ffn_dim,
+                },
+                residual_dropout: burn::nn::DropoutConfig::new(0.1).init(),
+            }
+        }).collect();
+
+        let mut model: TransformerBitLinearLM<Flex<f32>> = TransformerBitLinearLM {
+            embedding: burn::nn::EmbeddingConfig::new(vocab_size, d_model).init(&device),
+            transformer: BitLinearTransformerStack { final_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device), num_layers, d_model, layers },
+            head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+            vocab_size, d_model, num_layers,
+        };
+
+        println!("Cargando modelo MPK para exportar...");
+        let record = CompactRecorder::new().load(mpk_file.into(), &device)?;
+        model = model.load_record(record);
+        let bn_path = "transformer_bit2.bitnet";
+        export_bitnet(&model, bn_path)?;
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--compare") {
+        let mpk_file = "transformer_bit2.mpk";
+        let bn_file = "transformer_bit2.bitnet";
+        if !Path::new(mpk_file).exists() || !Path::new(bn_file).exists() {
+            println!("Necesitás ambos archivos: {} y {}", mpk_file, bn_file);
+            return Ok(());
+        }
+        let device = Default::default();
+        compare_models::<Flex<f32>>(mpk_file, bn_file, &device)?;
+        return Ok(());
+    }
+
     let model_path = "transformer_bit2";
     let model_file = format!("{}.mpk", model_path);
     let tokenizer_file = format!("{}_tokenizer.json", model_path);
     let model_exists = Path::new(&model_file).exists();
+    let bitnet_file = format!("{}.bitnet", model_path);
+    let bitnet_exists = Path::new(&bitnet_file).exists();
+
+    println!("  [debug] model_file: {} (exists={})", model_file, model_exists);
+    println!("  [debug] bitnet_file: {} (exists={})", bitnet_file, bitnet_exists);
 
     let target_vocab_size = 16000;
     let tokenizer = if Path::new(&tokenizer_file).exists() {
@@ -228,46 +298,60 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  d_model={} | layers={} | heads={} | kv_groups={}", d_model, num_layers, num_heads, num_kv_groups);
     println!("  head_dim={} | ffn_dim={} | SwiGLU | RoPE | I2S Kernel\n", head_dim, ffn_dim);
 
-    let layers = (0..num_layers).map(|_| {
-        BitLinearTransformerLayer {
-            attn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
-            qkv: BitLinearQKVProjection {
-                q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                num_heads, num_kv_groups, head_dim,
-            },
-            o_proj: BitLinearOutputProjection {
-                o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                num_heads, head_dim,
-            },
-            ffn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
-            ffn: BitLinearSwiGLUFeedForward {
-                gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                dropout: burn::nn::DropoutConfig::new(0.1).init(),
-                intermediate_dim: ffn_dim,
-            },
-            residual_dropout: burn::nn::DropoutConfig::new(0.1).init(),
-        }
-    }).collect();
+    let mut model: TransformerBitLinearLM<MyBackend>;
+    let mut loaded_from_bitnet = false;
 
-    let mut model: TransformerBitLinearLM<MyBackend> = TransformerBitLinearLM {
-        embedding: EmbeddingConfig::new(vocab_size, d_model).init(&device),
-        transformer: BitLinearTransformerStack { final_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device), num_layers, d_model, layers },
-        head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-        vocab_size, d_model, num_layers,
-    };
-
-    let param_count = (d_model * d_model * 4 + d_model * ffn_dim * 3) as f64 * num_layers as f64;
-    println!("Total parameters (approx): {:.2} M\n", param_count / 1e6);
-
-    if model_exists {
-        println!("Cargando pesos del modelo...");
-        let record = CompactRecorder::new().load(model_file.clone().into(), &device)?;
-        model = model.load_record(record);
+    if modo_inferencia && bitnet_exists && is_bitnet_file(&bitnet_file) {
+        println!("Cargando modelo BitNet directamente ({} MB)...", std::fs::metadata(&bitnet_file).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0));
+        let (loaded_model, warnings) = load_bitnet::<MyBackend>(&bitnet_file, &device)?;
+        model = loaded_model;
+        loaded_from_bitnet = true;
+        for w in &warnings { println!("  {}", w); }
     } else {
-        println!("No se encontró modelo previo. Iniciando desde cero.");
+        let layers = (0..num_layers).map(|_| {
+            BitLinearTransformerLayer {
+                attn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
+                qkv: BitLinearQKVProjection {
+                    q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    num_heads, num_kv_groups, head_dim,
+                },
+                o_proj: BitLinearOutputProjection {
+                    o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    num_heads, head_dim,
+                },
+                ffn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
+                ffn: BitLinearSwiGLUFeedForward {
+                    gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    dropout: burn::nn::DropoutConfig::new(0.1).init(),
+                    intermediate_dim: ffn_dim,
+                },
+                residual_dropout: burn::nn::DropoutConfig::new(0.1).init(),
+            }
+        }).collect();
+
+        model = TransformerBitLinearLM {
+            embedding: EmbeddingConfig::new(vocab_size, d_model).init(&device),
+            transformer: BitLinearTransformerStack { final_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device), num_layers, d_model, layers },
+            head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+            vocab_size, d_model, num_layers,
+        };
+
+        if bitnet_exists && is_bitnet_file(&bitnet_file) {
+            println!("Cargando modelo desde formato BitNet...");
+            let (loaded_model, warnings) = load_bitnet::<MyBackend>(&bitnet_file, &device)?;
+            model = loaded_model;
+            loaded_from_bitnet = true;
+            for w in &warnings { println!("  {}", w); }
+        } else if model_exists {
+            println!("Cargando pesos del modelo MPK...");
+            let record = CompactRecorder::new().load(model_file.clone().into(), &device)?;
+            model = model.load_record(record);
+        } else {
+            println!("No se encontró modelo previo. Iniciando desde cero.");
+        }
     }
 
     if modo_inferencia {
@@ -277,7 +361,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("Pre-computando kernels ternarios...");
         let inf_start = Instant::now();
         let mut model_v = model.valid();
-        let inf_state = model_v.build_inference_state(&device, KernelKind::Tile16, KernelKind::I2S);
+        let inf_state = if loaded_from_bitnet {
+            println!("  Cargando inference state directamente desde .bitnet (sin round-trip f32)...");
+            load_bitnet_inference_state(
+                &bitnet_file, d_model, num_heads, num_kv_groups, head_dim, ffn_dim, vocab_size,
+                KernelKind::Tile16, KernelKind::I2S,
+            )?
+        } else {
+            let state = model_v.build_inference_state(&device, KernelKind::Tile16, KernelKind::I2S);
+            state
+        };
         model_v.release_all_weights(&device);
         println!("Kernels listos en {:.2}s (RAM 16-bit liberada)\n", inf_start.elapsed().as_secs_f32());
         println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'reset', 'salir'\n");
@@ -367,6 +460,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let recorder = CompactRecorder::new();
         model.clone().save_file(model_path, &recorder)?;
+
+        // Auto-export bitnet ternary format
+        if let Err(e) = export_bitnet(&model, &bitnet_file) {
+            println!("  ⚠ Error exportando .bitnet: {}", e);
+        }
 
         if (epoch + 1) % 2 == 0 {
             println!("--- Generación de prueba (I2S Kernel) ---");

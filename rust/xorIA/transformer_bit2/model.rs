@@ -220,22 +220,67 @@ impl<B: Backend> BitLinearRMSNorm<B> {
 
 // ─── KV Cache ──────────────────────────────────────────────────────────────
 
+pub const MAX_CACHE_LEN: usize = 256;
+
 #[derive(Clone, Debug)]
 pub struct KVCache<B: Backend> {
     pub cached_k: Tensor<B, 4>,
     pub cached_v: Tensor<B, 4>,
+    pub current_len: usize,
 }
 
 impl<B: Backend> KVCache<B> {
-    pub fn keep_last(&self, keep: usize) -> KVCache<B> {
-        let [b, seq, g, d] = self.cached_k.dims();
-        if keep == 0 { return self.clone(); }
-        let keep = keep.min(seq);
-        if keep == seq { return self.clone(); }
-        let start = seq - keep;
-        let k = self.cached_k.clone().slice([0..b, start..seq, 0..g, 0..d]);
-        let v = self.cached_v.clone().slice([0..b, start..seq, 0..g, 0..d]);
-        KVCache { cached_k: k, cached_v: v }
+    pub fn new(num_kv_groups: usize, head_dim: usize, device: &B::Device) -> Self {
+        KVCache {
+            cached_k: Tensor::zeros([1, MAX_CACHE_LEN, num_kv_groups, head_dim], device),
+            cached_v: Tensor::zeros([1, MAX_CACHE_LEN, num_kv_groups, head_dim], device),
+            current_len: 0,
+        }
+    }
+
+    pub fn append(&mut self, k_new: Tensor<B, 4>, v_new: Tensor<B, 4>) {
+        let add_len = k_new.dims()[1];
+        let groups = k_new.dims()[2];
+        let dim = k_new.dims()[3];
+        let end = self.current_len + add_len;
+
+        if end > MAX_CACHE_LEN {
+            let safe_keep = MAX_CACHE_LEN.saturating_sub(add_len);
+            self.keep_last(safe_keep);
+        }
+
+        let start = self.current_len;
+        let end = start + add_len;
+        self.cached_k = self.cached_k.clone().slice_assign(
+            [0..1, start..end, 0..groups, 0..dim], k_new
+        );
+        self.cached_v = self.cached_v.clone().slice_assign(
+            [0..1, start..end, 0..groups, 0..dim], v_new
+        );
+        self.current_len = end;
+    }
+
+    pub fn view(&self) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        (
+            self.cached_k.clone().narrow(1, 0, self.current_len),
+            self.cached_v.clone().narrow(1, 0, self.current_len),
+        )
+    }
+
+    pub fn keep_last(&mut self, keep: usize) {
+        if keep >= self.current_len { return; }
+        let start = self.current_len - keep;
+        let groups = self.cached_k.dims()[2];
+        let dim = self.cached_k.dims()[3];
+        let k = self.cached_k.clone().narrow(1, start, keep);
+        let v = self.cached_v.clone().narrow(1, start, keep);
+        self.cached_k = self.cached_k.clone().slice_assign(
+            [0..1, 0..keep, 0..groups, 0..dim], k
+        );
+        self.cached_v = self.cached_v.clone().slice_assign(
+            [0..1, 0..keep, 0..groups, 0..dim], v
+        );
+        self.current_len = keep;
     }
 }
 
@@ -379,13 +424,9 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
         let (q, k_new, v_new) = self.qkv.forward(x);
         let (q, k_new) = apply_rope(q, k_new, offset);
 
-        let (k_full, v_full) = if let Some(prev) = cache {
-            (Tensor::cat(vec![prev.cached_k, k_new.clone()], 1), Tensor::cat(vec![prev.cached_v, v_new.clone()], 1))
-        } else {
-            (k_new.clone(), v_new.clone())
-        };
-
-        let new_cache = KVCache { cached_k: k_full.clone(), cached_v: v_full.clone() };
+        let mut kv_cache = cache.unwrap_or_else(|| KVCache::new(k_new.dims()[2], k_new.dims()[3], &k_new.device()));
+        kv_cache.append(k_new, v_new);
+        let (k_full, v_full) = kv_cache.view();
         let k_exp = repeat_kv(k_full, self.qkv.num_heads, self.qkv.num_kv_groups);
         let v_exp = repeat_kv(v_full, self.qkv.num_heads, self.qkv.num_kv_groups);
 
@@ -399,7 +440,7 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
         if q_len > 1 { scores = apply_causal_mask_with_offset(scores, q_len, kv_len); }
 
         let attn_output = burn::tensor::activation::softmax(scores, 3).matmul(v).swap_dims(1, 2);
-        (self.o_proj.forward(attn_output), new_cache)
+        (self.o_proj.forward(attn_output), kv_cache)
     }
 
     pub fn forward_with_cache_inference(&self, x: Tensor<B, 3>, offset: usize, cache: Option<KVCache<B>>, states: (&BitLinearInferenceState, &BitLinearInferenceState, &BitLinearInferenceState, &BitLinearInferenceState, &BitLinearInferenceState, &BitLinearInferenceState)) -> (Tensor<B, 3>, KVCache<B>) {
@@ -416,13 +457,9 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
         let (q, k_new, v_new) = self.qkv.forward_inference(x, q_state, k_state, v_state);
         let (q, k_new) = apply_rope(q, k_new, offset);
 
-        let (k_full, v_full) = if let Some(prev) = cache {
-            (Tensor::cat(vec![prev.cached_k, k_new.clone()], 1), Tensor::cat(vec![prev.cached_v, v_new.clone()], 1))
-        } else {
-            (k_new.clone(), v_new.clone())
-        };
-
-        let new_cache = KVCache { cached_k: k_full.clone(), cached_v: v_full.clone() };
+        let mut kv_cache = cache.unwrap_or_else(|| KVCache::new(k_new.dims()[2], k_new.dims()[3], &k_new.device()));
+        kv_cache.append(k_new, v_new);
+        let (k_full, v_full) = kv_cache.view();
         let k_exp = repeat_kv(k_full, self.qkv.num_heads, self.qkv.num_kv_groups);
         let v_exp = repeat_kv(v_full, self.qkv.num_heads, self.qkv.num_kv_groups);
 
@@ -436,7 +473,7 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
         if q_len > 1 { scores = apply_causal_mask_with_offset(scores, q_len, kv_len); }
 
         let attn_output = burn::tensor::activation::softmax(scores, 3).matmul(v).swap_dims(1, 2);
-        (self.o_proj.forward_inference(attn_output, o_state), new_cache)
+        (self.o_proj.forward_inference(attn_output, o_state), kv_cache)
     }
 }
 
