@@ -209,22 +209,22 @@ impl I2SKernel {
                 let x14 = *x_i8.get_unchecked(x_base + 14) as i32;
                 let x15 = *x_i8.get_unchecked(x_base + 15) as i32;
 
-                sum += ((b0  >> 1) as i32 - (b0  & 1) as i32) * x0;
-                sum += ((b1  >> 1) as i32 - (b1  & 1) as i32) * x1;
-                sum += ((b2  >> 1) as i32 - (b2  & 1) as i32) * x2;
-                sum += ((b3  >> 1) as i32 - (b3  & 1) as i32) * x3;
-                sum += ((b4  >> 1) as i32 - (b4  & 1) as i32) * x4;
-                sum += ((b5  >> 1) as i32 - (b5  & 1) as i32) * x5;
-                sum += ((b6  >> 1) as i32 - (b6  & 1) as i32) * x6;
-                sum += ((b7  >> 1) as i32 - (b7  & 1) as i32) * x7;
-                sum += ((b8  >> 1) as i32 - (b8  & 1) as i32) * x8;
-                sum += ((b9  >> 1) as i32 - (b9  & 1) as i32) * x9;
-                sum += ((b10 >> 1) as i32 - (b10 & 1) as i32) * x10;
-                sum += ((b11 >> 1) as i32 - (b11 & 1) as i32) * x11;
-                sum += ((b12 >> 1) as i32 - (b12 & 1) as i32) * x12;
-                sum += ((b13 >> 1) as i32 - (b13 & 1) as i32) * x13;
-                sum += ((b14 >> 1) as i32 - (b14 & 1) as i32) * x14;
-                sum += ((b15 >> 1) as i32 - (b15 & 1) as i32) * x15;
+                sum += (b0  as i32 - 1) * x0;
+                sum += (b1  as i32 - 1) * x1;
+                sum += (b2  as i32 - 1) * x2;
+                sum += (b3  as i32 - 1) * x3;
+                sum += (b4  as i32 - 1) * x4;
+                sum += (b5  as i32 - 1) * x5;
+                sum += (b6  as i32 - 1) * x6;
+                sum += (b7  as i32 - 1) * x7;
+                sum += (b8  as i32 - 1) * x8;
+                sum += (b9  as i32 - 1) * x9;
+                sum += (b10 as i32 - 1) * x10;
+                sum += (b11 as i32 - 1) * x11;
+                sum += (b12 as i32 - 1) * x12;
+                sum += (b13 as i32 - 1) * x13;
+                sum += (b14 as i32 - 1) * x14;
+                sum += (b15 as i32 - 1) * x15;
 
                 i += 16;
             }
@@ -233,7 +233,7 @@ impl I2SKernel {
                 let local = i & 15;
                 let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
                 let x_val = *x_i8.get_unchecked(x_off + i) as i32;
-                sum += ((bits >> 1) as i32 - (bits & 1) as i32) * x_val;
+                sum += (bits as i32 - 1) * x_val;
                 i += 1;
             }
 
@@ -673,22 +673,22 @@ impl I2STile16Kernel {
                 let x14 = *x_i8.get_unchecked(x_base + 14) as i32;
                 let x15 = *x_i8.get_unchecked(x_base + 15) as i32;
 
-                sum += ((b0  >> 1) as i32 - (b0  & 1) as i32) * x0;
-                sum += ((b1  >> 1) as i32 - (b1  & 1) as i32) * x1;
-                sum += ((b2  >> 1) as i32 - (b2  & 1) as i32) * x2;
-                sum += ((b3  >> 1) as i32 - (b3  & 1) as i32) * x3;
-                sum += ((b4  >> 1) as i32 - (b4  & 1) as i32) * x4;
-                sum += ((b5  >> 1) as i32 - (b5  & 1) as i32) * x5;
-                sum += ((b6  >> 1) as i32 - (b6  & 1) as i32) * x6;
-                sum += ((b7  >> 1) as i32 - (b7  & 1) as i32) * x7;
-                sum += ((b8  >> 1) as i32 - (b8  & 1) as i32) * x8;
-                sum += ((b9  >> 1) as i32 - (b9  & 1) as i32) * x9;
-                sum += ((b10 >> 1) as i32 - (b10 & 1) as i32) * x10;
-                sum += ((b11 >> 1) as i32 - (b11 & 1) as i32) * x11;
-                sum += ((b12 >> 1) as i32 - (b12 & 1) as i32) * x12;
-                sum += ((b13 >> 1) as i32 - (b13 & 1) as i32) * x13;
-                sum += ((b14 >> 1) as i32 - (b14 & 1) as i32) * x14;
-                sum += ((b15 >> 1) as i32 - (b15 & 1) as i32) * x15;
+                sum += (b0  as i32 - 1) * x0;
+                sum += (b1  as i32 - 1) * x1;
+                sum += (b2  as i32 - 1) * x2;
+                sum += (b3  as i32 - 1) * x3;
+                sum += (b4  as i32 - 1) * x4;
+                sum += (b5  as i32 - 1) * x5;
+                sum += (b6  as i32 - 1) * x6;
+                sum += (b7  as i32 - 1) * x7;
+                sum += (b8  as i32 - 1) * x8;
+                sum += (b9  as i32 - 1) * x9;
+                sum += (b10 as i32 - 1) * x10;
+                sum += (b11 as i32 - 1) * x11;
+                sum += (b12 as i32 - 1) * x12;
+                sum += (b13 as i32 - 1) * x13;
+                sum += (b14 as i32 - 1) * x14;
+                sum += (b15 as i32 - 1) * x15;
 
                 i += 16;
             }
@@ -696,7 +696,7 @@ impl I2STile16Kernel {
                 let local = i & 15;
                 let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
                 let x_val = *x_i8.get_unchecked(x_off + i) as i32;
-                sum += ((bits >> 1) as i32 - (bits & 1) as i32) * x_val;
+                sum += (bits as i32 - 1) * x_val;
                 i += 1;
             }
             let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
