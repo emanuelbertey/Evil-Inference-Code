@@ -228,3 +228,7 @@ path = "xorIA/bin/kernel_sum.rs"
 [[bin]]
 name = "test_i2s_vs_i8"
 path = "xorIA/bin/test_i2s_vs_i8.rs"
+
+[[bin]]
+name = "test_avx2_vs_i2s"
+path = "xorIA/bin/test_avx2_vs_i2s.rs"

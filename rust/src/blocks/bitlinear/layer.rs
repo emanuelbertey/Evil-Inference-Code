@@ -479,26 +479,31 @@ impl<B: Backend> BitLinear<B> {
         }
     }
 
-    /// Forward pass for inference using CPU I2_S Kernel
-    /// Quantizes activations to i8 first, then uses branchless i8 kernel.
     pub fn forward_inference(&self, x: Tensor<B, 3>, state: &BitLinearInferenceState) -> Tensor<B, 3> {
         let [batch, seq, _d_in] = x.dims();
         let device = x.device();
+        let n = batch * seq;
 
-        // 1. Sub-LN: RMSNorm
         let x_norm = self.rms_norm.forward(x);
+        let x_flat = x_norm.reshape([n, self.in_features]);
+        let x_data = x_flat.into_data();
+        let x_slice = x_data.as_slice::<f32>().unwrap();
 
-        // 2. Quantize activations to i8 (NO dequantize)
-        let x_flat = x_norm.reshape([batch * seq, self.in_features]);
-        let x_flat_data = x_flat.into_data();
-        let x_slice = x_flat_data.as_slice::<f32>().unwrap();
+        let (x_i8, gammas) = quantize_to_i8(x_slice, self.in_features, n);
+        let out_data = state.forward_raw_i8(&x_i8, n);
 
-        let (x_i8, _gammas) = quantize_to_i8(x_slice, self.in_features, batch * seq);
+        let q_b: f32 = 127.0;
+        let mut result = out_data;
+        for t in 0..n {
+            let factor = gammas[t] / q_b;
+            let base = t * state.out_features;
+            for o in 0..state.out_features {
+                result[base + o] *= factor;
+            }
+        }
 
-        // 3. i8 kernel: branchless int multiply
-        let out_data = state.forward_raw_i8(&x_i8, batch * seq);
-        let output_flat = Tensor::<B, 2>::from_data(TensorData::new(out_data, [batch * seq, self.out_features]), &device);
-        output_flat.reshape([batch, seq, self.out_features])
+        Tensor::<B, 2>::from_data(TensorData::new(result, [n, self.out_features]), &device)
+            .reshape([batch, seq, self.out_features])
     }
 }
 
