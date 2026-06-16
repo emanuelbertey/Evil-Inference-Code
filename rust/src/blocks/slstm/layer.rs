@@ -179,7 +179,7 @@ impl<B: Backend> SLSTMLayer<B> {
     ) -> (Tensor<B, 3>, SLSTMLayerState<B>) {
         let [b, s, _d] = x.dims();
         let dh = self.embedding_dim / self.num_heads;
-        let device = x.device();
+        let _device = x.device();
 
         let (cell_state, conv_state) = match state {
             Some(st) => (Some(st.0), st.1),

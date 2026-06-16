@@ -152,6 +152,53 @@ pub struct KVCache<B: Backend> {
     pub cached_v: Tensor<B, 4>,
 }
 
+impl<B: Backend> KVCache<B> {
+    /// Remove the first `remove` positions from the cached K/V tensors,
+    /// keeping only the last `seq - remove` positions.
+    pub fn trim_prefix(&self, remove: usize) -> KVCache<B> {
+        let [b, seq, g, d] = self.cached_k.dims();
+        if remove == 0 || remove >= seq {
+            return self.clone();
+        }
+
+        // `slice` takes ownership, so clone tensors first.
+        let k = self
+            .cached_k
+            .clone()
+            .slice([0..b, remove..seq, 0..g, 0..d]);
+        let v = self
+            .cached_v
+            .clone()
+            .slice([0..b, remove..seq, 0..g, 0..d]);
+
+        KVCache { cached_k: k, cached_v: v }
+    }
+
+    /// Keep only the last `keep` positions in the cached K/V tensors.
+    pub fn keep_last(&self, keep: usize) -> KVCache<B> {
+        let [b, seq, g, d] = self.cached_k.dims();
+        if keep == 0 {
+            return self.clone();
+        }
+        let keep = keep.min(seq);
+        if keep == seq {
+            return self.clone();
+        }
+
+        let start = seq - keep;
+        let k = self
+            .cached_k
+            .clone()
+            .slice([0..b, start..seq, 0..g, 0..d]);
+        let v = self
+            .cached_v
+            .clone()
+            .slice([0..b, start..seq, 0..g, 0..d]);
+
+        KVCache { cached_k: k, cached_v: v }
+    }
+}
+
 impl<B: Backend> Attention<B> {
     /// Full attention forward pass (original, no cache).
     ///

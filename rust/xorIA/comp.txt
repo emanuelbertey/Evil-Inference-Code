@@ -122,9 +122,42 @@ cargo build --release --bin transformer_chat 2>&1
 
 cargo run --release --bin transformer_chat -- xorIA/input.txt
 
+cargo run --release --bin transformer_chat -- D:/data/tinychat.txt
+
+cargo run --release --bin transformer_chat -- D:/data/tinychat.txt
+
 cargo build --release --bin transformer_chat_cuda 2>&1
 
 cargo run --release --bin transformer_chat_cuda -- xorIA/input.txt
+
+cargo run --bin bit_transformer --release xorIA/input.txt
+
+cargo run --bin transformer_bit2 --release -- xorIA/input.txt
+
+cargo run --bin bench_kernels --release
+
+cargo build --release --bin kernel_sum 2>&1
+
+cargo run --release --bin kernel_sum
+
+cargo run --bin transformer_bit2_cuda --release -- xorIA/input.txt
+
+cargo run --bin transformer_bit2 --release -- xorIA/input.txt
+
+cargo test --release test_i2s_vs_i8
+
+cargo run --release --bin test_i2s_vs_i8
+
+cargo run --release --bin transformer_bit2 -- --export
+
+cargo run --release --bin transformer_bit2 -- --compare
+
+cargo run --release --bin transformer_bit2 -- --infer
+
+cargo run --bin transformer_bit2 --release -- --compare
+
+
+cargo run --bin transformer_bit2 --release -- xorIA/input.txt
 
 python main.py
  

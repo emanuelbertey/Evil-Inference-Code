@@ -30,7 +30,7 @@ use burn_autodiff::Autodiff;
 use burn_flex::Flex;
 use std::error::Error;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 use std::collections::{HashMap, BTreeSet};
 use std::time::Instant;
@@ -116,6 +116,55 @@ impl Tokenizer {
 
     pub fn id_to_token(&self, id: usize) -> Option<String> {
         self.tokenizer.id_to_token(id as u32)
+    }
+}
+
+// ─── File Fragment Iterator (Streaming) ─────────────────────────────────────
+
+struct FileFragmentIterator {
+    reader: BufReader<fs::File>,
+    buffer_size: usize,
+    finished: bool,
+}
+
+impl FileFragmentIterator {
+    fn new(path: &Path, buffer_size_mb: usize) -> io::Result<Self> {
+        let file = fs::File::open(path)?;
+        Ok(Self {
+            reader: BufReader::new(file),
+            buffer_size: buffer_size_mb * 1024 * 1024,
+            finished: false,
+        })
+    }
+}
+
+impl Iterator for FileFragmentIterator {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished { return None; }
+
+        let mut buffer = vec![0u8; self.buffer_size];
+        let mut total_read = 0;
+
+        while total_read < self.buffer_size {
+            match self.reader.read(&mut buffer[total_read..]) {
+                Ok(0) => { self.finished = true; break; }
+                Ok(n) => total_read += n,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => { self.finished = true; break; }
+            }
+        }
+
+        if total_read == 0 { return None; }
+        buffer.truncate(total_read);
+
+        while !buffer.is_empty() && String::from_utf8(buffer.clone()).is_err() {
+            buffer.pop();
+        }
+
+        if buffer.is_empty() { return None; }
+        String::from_utf8(buffer).ok()
     }
 }
 
@@ -280,6 +329,25 @@ fn generate_text_cached<B: Backend>(
     let mut generated = Vec::new();
     current_offset += seed_len;
 
+    // Trim rule: if cache length > threshold, remove `remove_count` oldest tokens
+    if current_offset >= 255 {
+        let remove_count = 160usize; // remove 30 oldest when threshold exceeded
+        if let Some(first) = caches.get(0) {
+            let mut dims = first.cached_k.dims();
+            let mut seq = dims[1];
+            if seq > 70 {
+                let remove = remove_count.min(seq);
+                let keep = seq - remove;
+                for c in caches.iter_mut() {
+                    *c = c.keep_last(keep);
+                }
+                current_offset = current_offset.saturating_sub(remove);
+                println!("(Cache trimmed: removed {} tokens; kept last {} tokens; new offset: {})", remove, keep, current_offset);
+                seq = keep;
+            }
+        }
+    }
+
     let mut next_id = sample_from_logits(
         last_logits, temperature, top_k, top_p, repetition_penalty, &history,
     );
@@ -308,6 +376,25 @@ fn generate_text_cached<B: Backend>(
         caches = new_caches;
         current_offset += 1;
 
+        // Trim rule during generation: if cache length > threshold, remove `remove_count` oldest tokens
+        if current_offset >= 255 {
+            let remove_count = 160usize; // remove 30 oldest when threshold exceeded
+            if let Some(first) = caches.get(0) {
+                let mut dims = first.cached_k.dims();
+                let mut seq = dims[1];
+                if seq > 70 {
+                    let remove = remove_count.min(seq);
+                    let keep = seq - remove;
+                    for c in caches.iter_mut() {
+                        *c = c.keep_last(keep);
+                    }
+                    current_offset = current_offset.saturating_sub(remove);
+                    println!("(Cache trimmed: removed {} tokens; kept last {} tokens; new offset: {})", remove, keep, current_offset);
+                    seq = keep;
+                }
+            }
+        }
+
         let [_, _, v] = logits.dims();
         let logits_2d = logits.reshape([1, v]);
 
@@ -326,9 +413,9 @@ fn generate_text_cached<B: Backend>(
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║     Transformer Chat — GQA + RoPE + SwiGLU                   ║");
-    println!("║     BPE-Level Language Model (Hugging Face)                  ║");
-    println!("║     + KV Cache + Top-K/P + Repetition Penalty               ║");
+    println!("║     Transformer Chat — GQA + RoPE + SwiGLU                     ║");
+    println!("║     BPE-Level Language Model (Hugging Face)                    ║");
+    println!("║     + KV Cache + Top-K/P + Repetition Penalty                  ║");
     println!("╚════════════════════════════════════════════════════════════════╝");
 
     let args: Vec<String> = std::env::args().collect();
@@ -343,13 +430,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokenizer_file = format!("{}_tokenizer.json", model_path);
     let model_exists = Path::new(&model_file).exists();
 
-    let text = fs::read_to_string(&text_file)?;
-    
-    let target_vocab_size = 2000;
+    let target_vocab_size = 16000;
     let tokenizer = if Path::new(&tokenizer_file).exists() {
         println!("Cargando tokenizer BPE desde {}...", tokenizer_file);
         Tokenizer::load(&tokenizer_file)?
     } else {
+        println!("Leyendo primeros 50MB para entrenar tokenizer...");
+        let mut frag_iter = FileFragmentIterator::new(Path::new(&text_file), 50)?;
+        let text = frag_iter.next().unwrap_or_default();
         println!("Entrenando tokenizer BPE (vocab_size={})...", target_vocab_size);
         let tok = Tokenizer::from_text(&text, target_vocab_size)?;
         tok.save(&tokenizer_file)?;
@@ -364,32 +452,96 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut top_p: f32 = 0.95;
     let mut repetition_penalty: f32 = 1.1;
 
+    // Parâmetros ajustables (expuestos en el menú 's')
+    let mut d_model: usize = 720;
+    let mut num_layers: usize = 24;
+    let mut num_heads: usize = 8;
+    let mut lr: f64 = 3e-4;
+    let mut num_epochs: usize = 50;
+    let mut batch_size: usize = 16;
+
     let mut modo_inferencia = false;
     if model_exists {
         loop {
-            print!("¡Modelo Transformer encontrado! ¿Deseas (e)ntrenar o (i)nferir? [e/i]: ");
+            println!("\n--- CONFIGURACIÓN ACTUAL ---");
+            println!("  (1) d_model: {}", d_model);
+            println!("  (2) Num layers: {}", num_layers);
+            println!("  (3) Heads:   {}", num_heads);
+            println!("  (4) LR:      {}", lr);
+            println!("  (5) Épocas:  {}", num_epochs);
+            println!("  (6) Batch:   {}", batch_size);
+            println!("  (7) Temp:    {}", temperature);
+            println!("  (8) R-Pen:   {}", repetition_penalty);
+            println!("----------------------------");
+            print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
             io::stdout().flush()?;
+
             let mut choice = String::new();
             io::stdin().read_line(&mut choice)?;
             let choice = choice.trim().to_lowercase();
-            match choice.as_str() {
-                "i" => { modo_inferencia = true; break; }
-                "e" => { break; }
-                _ => {
-                    if choice.is_empty() { continue; }
-                    println!("  → Escribe 'e' para entrenar o 'i' para inferencia.");
-                }
+
+            if choice == "i" {
+                modo_inferencia = true;
+                break;
+            } else if choice == "e" {
+                break;
+            } else if choice == "s" {
+                println!("\nAjustar parámetros (Enter para mantener actual):");
+
+                print!("d_model [{}]: ", d_model);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { d_model = v; }
+
+                print!("Num layers [{}]: ", num_layers);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_layers = v; }
+
+                print!("Heads [{}]: ", num_heads);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_heads = v; }
+
+                print!("Learning Rate [{}]: ", lr);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { lr = v; }
+
+                print!("Épocas [{}]: ", num_epochs);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { num_epochs = v; }
+
+                print!("Batch Size [{}]: ", batch_size);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { batch_size = v; }
+
+                print!("Temperatura [{}]: ", temperature);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { temperature = v; }
+
+                print!("Repetition Penalty [{}]: ", repetition_penalty);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if let Ok(v) = input.trim().parse() { repetition_penalty = v; }
             }
         }
     }
 
-    let tokens = tokenizer.encode(&text);
     let device = Default::default();
 
-    let d_model = 256;
-    let num_layers = 4;
-    let num_heads = 8;
-    let num_kv_groups = 2; 
+    let num_kv_groups = 4; 
 
     println!("\n── Configuración del Transformer ──");
     println!("  d_model:       {}", d_model);
@@ -411,7 +563,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             head_dim: None, 
             ffn_expansion: 4.0,
             use_swiglu: true,
-            max_seq_len: 1024,
+            max_seq_len: 256,
             rope_base: 10000.0,
             rope_scaling: 1.0,
             causal: true,
@@ -447,8 +599,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if modo_inferencia {
         println!("\n╔════════════════════════════════════════════════════════════════╗");
-        println!("║     MODO INTERACTIVO — Transformer Chat                      ║");
-        println!("║     KV Cache + Top-K/P + Repetition Penalty                  ║");
+        println!("║     MODO INTERACTIVO — Transformer Chat                        ║");
+        println!("║     KV Cache + Top-K/P + Repetition Penalty                    ║");
         println!("╚════════════════════════════════════════════════════════════════╝\n");
         println!("Comandos:");
         println!("  - Escribe tu semilla para generar texto.");
@@ -542,50 +694,55 @@ fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let batch_size = 16;
     let seq_len = 64;
     let stride = 64;
-    let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
-    let num_epochs = 50;
 
-    println!("Iniciando entrenamiento BPE...");
-    println!("  batch_size: {} | seq_len: {} | batches/epoch: {}\n", batch_size, seq_len, num_batches);
+    let text_path = Path::new(&text_file);
+
+    println!("Iniciando entrenamiento con streaming...");
+    println!("  batch_size: {} | seq_len: {} | stride: {}\n", batch_size, seq_len, stride);
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0;
         let mut batch_count = 0;
         let start_epoch = Instant::now();
 
-        for b in 0..num_batches {
-            let start_idx = b * batch_size * stride;
-            if start_idx + batch_size * stride + seq_len >= tokens.len() { break; }
+        let fragments = FileFragmentIterator::new(text_path, 1)?;
 
-            let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
+        for (frag_idx, fragment) in fragments.enumerate() {
+            let tokens = tokenizer.encode(&fragment);
+            let tokens_per_batch = batch_size * seq_len;
+            let num_batches = tokens.len() / tokens_per_batch;
+            if num_batches == 0 { continue; }
 
-            let logits = model.forward(x);
-            let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
-            let targets_flat = y.reshape([batch_size * seq_len]);
+            for b in 0..num_batches {
+                let start_idx = b * tokens_per_batch;
 
-            let loss = loss_fn.forward(logits_flat, targets_flat);
-            let current_loss = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+                let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
 
-            if current_loss.is_nan() {
-                println!("\n[!] Loss NaN en Batch {}. Abortando.", b);
-                return Ok(());
-            }
+                let logits = model.forward(x);
+                let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
+                let targets_flat = y.reshape([batch_size * seq_len]);
 
-            total_loss += current_loss;
-            batch_count += 1;
+                let loss = loss_fn.forward(logits_flat, targets_flat);
+                let current_loss = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
 
-            let grads = loss.backward();
-            let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
-            model = optim.step(3e-4, model, grads_p);
+                if current_loss.is_nan() {
+                    println!("\n[!] Loss NaN en Fragmento {} Batch {}. Abortando.", frag_idx, b);
+                    return Ok(());
+                }
 
-            if b % 10 == 0 {
+                total_loss += current_loss;
+                batch_count += 1;
+
+                let grads = loss.backward();
+                let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
+                model = optim.step(lr, model, grads_p);
+
                 let elapsed = start_epoch.elapsed().as_secs_f32();
-                let tps = ((b + 1) * batch_size * seq_len) as f32 / elapsed;
-                print!("\rEpoch {}/{} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s",
-                    epoch + 1, num_epochs, b, num_batches,
+                let tps = (batch_count * batch_size * seq_len) as f32 / elapsed;
+                print!("\rEpoch {} | Frag {} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s",
+                    epoch + 1, frag_idx, b + 1, num_batches,
                     total_loss / batch_count as f32, tps);
                 io::stdout().flush().unwrap();
             }

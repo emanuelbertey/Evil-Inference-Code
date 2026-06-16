@@ -1,120 +1,350 @@
-// Optimized Ternary Kernels for CPU
-// Based on BitNet b1.58 (arXiv:2410.16144) and bitnet.cpp implementations
+pub const GROUP_SIZE: usize = 128;
 
-use burn::prelude::*;
-use burn::tensor::TensorData;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KernelKind {
+    I2S,
+    Tile16,
+}
 
-/// I2_S Kernel: 2-bit Integer Signed Unpacking + MAD
-/// Packs 16 ternary weights into a 32-bit integer for memory efficiency.
 pub struct I2SKernel;
 
 impl I2SKernel {
-    /// Simulates the packing of ternary weights (-1, 0, 1) into 2-bit values (16 weights per u32)
     pub fn pack_weights(weights: &[f32]) -> Vec<u32> {
-        let mut packed = Vec::with_capacity((weights.len() + 15) / 16);
+        let mut packed = Vec::with_capacity((weights.len() + 15) >> 4);
         for chunk in weights.chunks(16) {
             let mut p: u32 = 0;
             for (i, &w) in chunk.iter().enumerate() {
-                // Map: -1.0 -> 0b00, 0.0 -> 0b01, 1.0 -> 0b10
-                let bits = if w < -0.5 {
-                    0b00
-                } else if w > 0.5 {
-                    0b10
-                } else {
-                    0b01
-                };
-                p |= bits << (i * 2);
+                let bits = if w < -0.5 { 0b00 } else if w > 0.5 { 0b10 } else { 0b01 };
+                p |= bits << (i << 1);
             }
             packed.push(p);
         }
         packed
     }
 
-    /// Forward pass simulating the I2_S CPU kernel behavior on raw slices.
-    pub fn forward_raw(
-        x_data: &[f32],
-        batch: usize,
-        packed_w: &[u32],
-        out_features: usize,
+    #[inline(always)]
+    fn compute_row_aligned(
+        x_data: &[f32], x_off: usize,
+        packed_w: &[u32], w_row_base: usize,
         in_features: usize,
-        scale: f32,
-    ) -> Vec<f32> {
-        let mut out_data = vec![0.0f32; batch * out_features];
+    ) -> f32 {
+        unsafe {
+            let mut sum_pos = 0.0f32;
+            let mut sum_neg = 0.0f32;
+            let w_idx_base = w_row_base >> 4;
+            let mut i = 0usize;
 
-        // FAST PATH: Avoid OS thread spawning overhead for small matrices
-        if out_data.len() < 4096 {
+            while i + 15 < in_features {
+                let packed = *packed_w.get_unchecked(w_idx_base + (i >> 4));
+                let x_base = x_off + i;
+
+                let bits0 = (packed) & 0b11;
+                let bits1 = (packed >> 2) & 0b11;
+                let bits2 = (packed >> 4) & 0b11;
+                let bits3 = (packed >> 6) & 0b11;
+                let bits4 = (packed >> 8) & 0b11;
+                let bits5 = (packed >> 10) & 0b11;
+                let bits6 = (packed >> 12) & 0b11;
+                let bits7 = (packed >> 14) & 0b11;
+                let bits8 = (packed >> 16) & 0b11;
+                let bits9 = (packed >> 18) & 0b11;
+                let bits10 = (packed >> 20) & 0b11;
+                let bits11 = (packed >> 22) & 0b11;
+                let bits12 = (packed >> 24) & 0b11;
+                let bits13 = (packed >> 26) & 0b11;
+                let bits14 = (packed >> 28) & 0b11;
+                let bits15 = (packed >> 30) & 0b11;
+
+                let x0 = *x_data.get_unchecked(x_base);
+                let x1 = *x_data.get_unchecked(x_base + 1);
+                let x2 = *x_data.get_unchecked(x_base + 2);
+                let x3 = *x_data.get_unchecked(x_base + 3);
+                let x4 = *x_data.get_unchecked(x_base + 4);
+                let x5 = *x_data.get_unchecked(x_base + 5);
+                let x6 = *x_data.get_unchecked(x_base + 6);
+                let x7 = *x_data.get_unchecked(x_base + 7);
+                let x8 = *x_data.get_unchecked(x_base + 8);
+                let x9 = *x_data.get_unchecked(x_base + 9);
+                let x10 = *x_data.get_unchecked(x_base + 10);
+                let x11 = *x_data.get_unchecked(x_base + 11);
+                let x12 = *x_data.get_unchecked(x_base + 12);
+                let x13 = *x_data.get_unchecked(x_base + 13);
+                let x14 = *x_data.get_unchecked(x_base + 14);
+                let x15 = *x_data.get_unchecked(x_base + 15);
+
+                if bits0 == 0b10 { sum_pos += x0; } else if bits0 == 0b00 { sum_neg += x0; }
+                if bits1 == 0b10 { sum_pos += x1; } else if bits1 == 0b00 { sum_neg += x1; }
+                if bits2 == 0b10 { sum_pos += x2; } else if bits2 == 0b00 { sum_neg += x2; }
+                if bits3 == 0b10 { sum_pos += x3; } else if bits3 == 0b00 { sum_neg += x3; }
+                if bits4 == 0b10 { sum_pos += x4; } else if bits4 == 0b00 { sum_neg += x4; }
+                if bits5 == 0b10 { sum_pos += x5; } else if bits5 == 0b00 { sum_neg += x5; }
+                if bits6 == 0b10 { sum_pos += x6; } else if bits6 == 0b00 { sum_neg += x6; }
+                if bits7 == 0b10 { sum_pos += x7; } else if bits7 == 0b00 { sum_neg += x7; }
+                if bits8 == 0b10 { sum_pos += x8; } else if bits8 == 0b00 { sum_neg += x8; }
+                if bits9 == 0b10 { sum_pos += x9; } else if bits9 == 0b00 { sum_neg += x9; }
+                if bits10 == 0b10 { sum_pos += x10; } else if bits10 == 0b00 { sum_neg += x10; }
+                if bits11 == 0b10 { sum_pos += x11; } else if bits11 == 0b00 { sum_neg += x11; }
+                if bits12 == 0b10 { sum_pos += x12; } else if bits12 == 0b00 { sum_neg += x12; }
+                if bits13 == 0b10 { sum_pos += x13; } else if bits13 == 0b00 { sum_neg += x13; }
+                if bits14 == 0b10 { sum_pos += x14; } else if bits14 == 0b00 { sum_neg += x14; }
+                if bits15 == 0b10 { sum_pos += x15; } else if bits15 == 0b00 { sum_neg += x15; }
+
+                i += 16;
+            }
+
+            while i < in_features {
+                let local = i & 15;
+                let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
+                let x_val = *x_data.get_unchecked(x_off + i);
+                if bits == 0b10 { sum_pos += x_val; } else if bits == 0b00 { sum_neg += x_val; }
+                i += 1;
+            }
+
+            sum_pos - sum_neg
+        }
+    }
+
+    fn forward_inner(
+        x_data: &[f32], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+        out_data: &mut [f32],
+    ) {
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+
+        if batch * out_features <= 2 {
             for b in 0..batch {
+                let x_off = b * in_features;
                 for o in 0..out_features {
-                    let mut sum = 0.0f32;
-                    for i in (0..in_features).step_by(16) {
-                        let w_idx = (o * in_features + i) / 16;
-                        if w_idx >= packed_w.len() { break; }
-                        let packed = packed_w[w_idx];
-                        
-                        for j in 0..16 {
-                            if i + j >= in_features { break; }
-                            let bits = (packed >> (j * 2)) & 0b11;
-                            if bits == 0b01 { continue; }
-                            
-                            let x_val = x_data[b * in_features + i + j];
-                            if bits == 0b10 { sum += x_val; } else { sum -= x_val; }
-                        }
+                    let w_row = o * in_features;
+                    let base_g = o * n_groups_per_row;
+                    let mut row_sum = 0.0f32;
+                    for gi in 0..n_groups_per_row {
+                        let raw = Self::compute_row_aligned(x_data, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                        row_sum += raw * unsafe { *scales.get_unchecked(base_g + gi) };
                     }
-                    out_data[b * out_features + o] = sum * scale;
+                    if rem > 0 {
+                        let raw = Self::compute_row_aligned(x_data, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                        row_sum += raw * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                    }
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = row_sum; }
                 }
             }
-            return out_data;
+            return;
         }
 
-        // HILOS DE RUST (Nativos) para matrices grandes
         let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let chunk_size = std::cmp::max(1, (out_data.len() + num_threads - 1) / num_threads);
 
         std::thread::scope(|s| {
-            for (thread_idx, chunk) in out_data.chunks_mut(chunk_size).enumerate() {
-                if chunk.is_empty() { continue; }
+            let rows_per_thread = (batch * out_features + num_threads - 1) / num_threads;
+            let mut remaining = out_data;
+            for t in 0..num_threads {
+                let n = rows_per_thread.min(remaining.len());
+                if n == 0 { break; }
+                let (chunk, rest) = remaining.split_at_mut(n);
+                remaining = rest;
+                let start_row = t * rows_per_thread;
                 s.spawn(move || {
-                    let start_idx = thread_idx * chunk_size;
-                    for (local_idx, out_val) in chunk.iter_mut().enumerate() {
-                        let idx = start_idx + local_idx;
+                    for local_idx in 0..chunk.len() {
+                        let idx = start_row + local_idx;
                         let b = idx / out_features;
                         let o = idx % out_features;
-                        
-                        let mut sum = 0.0f32;
-                        for i in (0..in_features).step_by(16) {
-                            let w_idx = (o * in_features + i) / 16;
-                            if w_idx >= packed_w.len() { break; }
-                            let packed = packed_w[w_idx];
-                            
-                            for j in 0..16 {
-                                if i + j >= in_features { break; }
-                                let bits = (packed >> (j * 2)) & 0b11;
-                                if bits == 0b01 { continue; }
-                                
-                                let x_val = x_data[b * in_features + i + j];
-                                if bits == 0b10 { sum += x_val; } else { sum -= x_val; }
-                            }
+                        let w_row = o * in_features;
+                        let x_off = b * in_features;
+                        let base_g = o * n_groups_per_row;
+                        let mut row_sum = 0.0f32;
+                        for gi in 0..n_groups_per_row {
+                            let raw = Self::compute_row_aligned(x_data, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                            row_sum += raw * unsafe { *scales.get_unchecked(base_g + gi) };
                         }
-                        *out_val = sum * scale;
+                        if rem > 0 {
+                            let raw = Self::compute_row_aligned(x_data, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                            row_sum += raw * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                        }
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = row_sum; }
                     }
                 });
             }
         });
+    }
 
+    pub fn forward_raw(
+        x_data: &[f32], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let mut out_data = vec![0.0f32; batch * out_features];
+        Self::forward_inner(x_data, batch, packed_w, scales, out_features, in_features, &mut out_data);
+        out_data
+    }
+
+    #[inline(always)]
+    fn compute_row_aligned_i8(
+        x_i8: &[i8], x_off: usize,
+        packed_w: &[u32], w_row_base: usize,
+        in_features: usize,
+    ) -> i32 {
+        unsafe {
+            let mut sum = 0i32;
+            let w_idx_base = w_row_base >> 4;
+            let mut i = 0usize;
+
+            while i + 15 < in_features {
+                let packed = *packed_w.get_unchecked(w_idx_base + (i >> 4));
+                let x_base = x_off + i;
+
+                let b0  = (packed)        & 0b11;
+                let b1  = (packed >> 2)   & 0b11;
+                let b2  = (packed >> 4)   & 0b11;
+                let b3  = (packed >> 6)   & 0b11;
+                let b4  = (packed >> 8)   & 0b11;
+                let b5  = (packed >> 10)  & 0b11;
+                let b6  = (packed >> 12)  & 0b11;
+                let b7  = (packed >> 14)  & 0b11;
+                let b8  = (packed >> 16)  & 0b11;
+                let b9  = (packed >> 18)  & 0b11;
+                let b10 = (packed >> 20)  & 0b11;
+                let b11 = (packed >> 22)  & 0b11;
+                let b12 = (packed >> 24)  & 0b11;
+                let b13 = (packed >> 26)  & 0b11;
+                let b14 = (packed >> 28)  & 0b11;
+                let b15 = (packed >> 30)  & 0b11;
+
+                let x0  = *x_i8.get_unchecked(x_base)      as i32;
+                let x1  = *x_i8.get_unchecked(x_base + 1)  as i32;
+                let x2  = *x_i8.get_unchecked(x_base + 2)  as i32;
+                let x3  = *x_i8.get_unchecked(x_base + 3)  as i32;
+                let x4  = *x_i8.get_unchecked(x_base + 4)  as i32;
+                let x5  = *x_i8.get_unchecked(x_base + 5)  as i32;
+                let x6  = *x_i8.get_unchecked(x_base + 6)  as i32;
+                let x7  = *x_i8.get_unchecked(x_base + 7)  as i32;
+                let x8  = *x_i8.get_unchecked(x_base + 8)  as i32;
+                let x9  = *x_i8.get_unchecked(x_base + 9)  as i32;
+                let x10 = *x_i8.get_unchecked(x_base + 10) as i32;
+                let x11 = *x_i8.get_unchecked(x_base + 11) as i32;
+                let x12 = *x_i8.get_unchecked(x_base + 12) as i32;
+                let x13 = *x_i8.get_unchecked(x_base + 13) as i32;
+                let x14 = *x_i8.get_unchecked(x_base + 14) as i32;
+                let x15 = *x_i8.get_unchecked(x_base + 15) as i32;
+
+                sum += (b0  as i32 - 1) * x0;
+                sum += (b1  as i32 - 1) * x1;
+                sum += (b2  as i32 - 1) * x2;
+                sum += (b3  as i32 - 1) * x3;
+                sum += (b4  as i32 - 1) * x4;
+                sum += (b5  as i32 - 1) * x5;
+                sum += (b6  as i32 - 1) * x6;
+                sum += (b7  as i32 - 1) * x7;
+                sum += (b8  as i32 - 1) * x8;
+                sum += (b9  as i32 - 1) * x9;
+                sum += (b10 as i32 - 1) * x10;
+                sum += (b11 as i32 - 1) * x11;
+                sum += (b12 as i32 - 1) * x12;
+                sum += (b13 as i32 - 1) * x13;
+                sum += (b14 as i32 - 1) * x14;
+                sum += (b15 as i32 - 1) * x15;
+
+                i += 16;
+            }
+
+            while i < in_features {
+                let local = i & 15;
+                let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
+                let x_val = *x_i8.get_unchecked(x_off + i) as i32;
+                sum += (bits as i32 - 1) * x_val;
+                i += 1;
+            }
+
+            sum
+        }
+    }
+
+    fn forward_inner_i8(
+        x_i8: &[i8], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+        out_data: &mut [f32],
+    ) {
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+
+        if batch * out_features <= 2 {
+            for b in 0..batch {
+                let x_off = b * in_features;
+                for o in 0..out_features {
+                    let w_row = o * in_features;
+                    let base_g = o * n_groups_per_row;
+                    let mut row_sum = 0.0f32;
+                    for gi in 0..n_groups_per_row {
+                        let raw = Self::compute_row_aligned_i8(x_i8, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                        row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + gi) };
+                    }
+                    if rem > 0 {
+                        let raw = Self::compute_row_aligned_i8(x_i8, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                        row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                    }
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = row_sum; }
+                }
+            }
+            return;
+        }
+
+        let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+
+        std::thread::scope(|s| {
+            let rows_per_thread = (batch * out_features + num_threads - 1) / num_threads;
+            let mut remaining = out_data;
+            for t in 0..num_threads {
+                let n = rows_per_thread.min(remaining.len());
+                if n == 0 { break; }
+                let (chunk, rest) = remaining.split_at_mut(n);
+                remaining = rest;
+                let start_row = t * rows_per_thread;
+                s.spawn(move || {
+                    for local_idx in 0..chunk.len() {
+                        let idx = start_row + local_idx;
+                        let b = idx / out_features;
+                        let o = idx % out_features;
+                        let w_row = o * in_features;
+                        let x_off = b * in_features;
+                        let base_g = o * n_groups_per_row;
+                        let mut row_sum = 0.0f32;
+                        for gi in 0..n_groups_per_row {
+                            let raw = Self::compute_row_aligned_i8(x_i8, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                            row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + gi) };
+                        }
+                        if rem > 0 {
+                            let raw = Self::compute_row_aligned_i8(x_i8, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                            row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                        }
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = row_sum; }
+                    }
+                });
+            }
+        });
+    }
+
+    pub fn forward_raw_i8(
+        x_i8: &[i8], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let mut out_data = vec![0.0f32; batch * out_features];
+        Self::forward_inner_i8(x_i8, batch, packed_w, scales, out_features, in_features, &mut out_data);
         out_data
     }
 }
 
-/// TL1 Kernel: Ternary Lookup Table (2 weights per 4-bit index)
 pub struct TL1Kernel;
 
 impl TL1Kernel {
     pub fn pack_weights(weights: &[f32]) -> Vec<u8> {
-        let mut packed = Vec::with_capacity((weights.len() + 1) / 2);
+        let mut packed = Vec::with_capacity((weights.len() + 1) >> 1);
         for chunk in weights.chunks(2) {
             let mut p: u8 = 0;
             for (i, &w) in chunk.iter().enumerate() {
-                let val = if w < -0.5 { 0 } else if w > 0.5 { 2 } else { 1 };
+                let val = if w < -0.5 { 0u8 } else if w > 0.5 { 2 } else { 1 };
                 p += val * 3u8.pow(i as u32);
             }
             packed.push(p);
@@ -122,84 +352,94 @@ impl TL1Kernel {
         packed
     }
 
-    pub fn forward_raw(
-        x_data: &[f32],
-        batch: usize,
-        packed_w: &[u8],
-        out_features: usize,
-        in_features: usize,
-        scale: f32,
-    ) -> Vec<f32> {
-        let mut out_data = vec![0.0f32; batch * out_features];
+    #[inline(always)]
+    fn compute_row(
+        x_data: &[f32], x_off: usize,
+        packed_w: &[u8], w_row: usize,
+        scales: &[f32], in_features: usize,
+    ) -> f32 {
+        unsafe {
+            let mut sum = 0.0f32;
+            let mut i = 0usize;
+            while i + 1 < in_features {
+                let p = *packed_w.get_unchecked((w_row + i) >> 1);
+                let x0 = *x_data.get_unchecked(x_off + i);
+                let x1 = *x_data.get_unchecked(x_off + i + 1);
+                let v = match p {
+                    0 => -x0 - x1,
+                    1 => -x1,
+                    2 => x0 - x1,
+                    3 => -x0,
+                    4 => 0.0,
+                    5 => x0,
+                    6 => -x0 + x1,
+                    7 => x1,
+                    8 => x0 + x1,
+                    _ => 0.0,
+                };
+                sum += v;
+                i += 2;
+            }
+            if i < in_features {
+                let p = *packed_w.get_unchecked((w_row + i) >> 1);
+                let x0 = *x_data.get_unchecked(x_off + i);
+                sum += match p & 3 {
+                    0 => -x0,
+                    2 => x0,
+                    _ => 0.0,
+                };
+            }
+            let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
+            sum * *scales.get_unchecked(g)
+        }
+    }
 
-        // FAST PATH: Avoid OS thread spawning overhead for small matrices
-        if out_data.len() < 4096 {
+    fn forward_inner(
+        x_data: &[f32], batch: usize,
+        packed_w: &[u8], scales: &[f32],
+        out_features: usize, in_features: usize,
+        out_data: &mut [f32],
+    ) {
+        let total_out = batch * out_features;
+        if total_out < 4 {
             for b in 0..batch {
+                let x_off = b * in_features;
                 for o in 0..out_features {
-                    let mut sum = 0.0f32;
-                    for i in (0..in_features).step_by(2) {
-                        let w_idx = (o * in_features + i) / 2;
-                        if w_idx >= packed_w.len() { break; }
-                        let p = packed_w[w_idx];
-                        
-                        let x0 = x_data[b * in_features + i];
-                        let x1 = if i + 1 < in_features { x_data[b * in_features + i + 1] } else { 0.0 };
-                        
-                        let lut_sum = match p {
-                            0 => -x0 - x1, 1 => 0.0 - x1, 2 => x0 - x1,
-                            3 => -x0 + 0.0, 4 => 0.0 + 0.0, 5 => x0 + 0.0,
-                            6 => -x0 + x1, 7 => 0.0 + x1, 8 => x0 + x1,
-                            _ => 0.0,
-                        };
-                        sum += lut_sum;
-                    }
-                    out_data[b * out_features + o] = sum * scale;
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = Self::compute_row(x_data, x_off, packed_w, o * in_features, scales, in_features); }
                 }
             }
-            return out_data;
+            return;
         }
 
-        // HILOS DE RUST (Nativos)
         let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let chunk_size = std::cmp::max(1, (out_data.len() + num_threads - 1) / num_threads);
+        let chunk_size = std::cmp::max(1, (total_out + num_threads - 1) / num_threads);
 
         std::thread::scope(|s| {
-            for (thread_idx, chunk) in out_data.chunks_mut(chunk_size).enumerate() {
-                if chunk.is_empty() { continue; }
+            for (ti, chunk) in out_data.chunks_mut(chunk_size).enumerate() {
+                let start = ti * chunk_size;
                 s.spawn(move || {
-                    let start_idx = thread_idx * chunk_size;
                     for (local_idx, out_val) in chunk.iter_mut().enumerate() {
-                        let idx = start_idx + local_idx;
+                        let idx = start + local_idx;
                         let b = idx / out_features;
                         let o = idx % out_features;
-                        
-                        let mut sum = 0.0f32;
-                        for i in (0..in_features).step_by(2) {
-                            let w_idx = (o * in_features + i) / 2;
-                            if w_idx >= packed_w.len() { break; }
-                            let p = packed_w[w_idx];
-                            
-                            let x0 = x_data[b * in_features + i];
-                            let x1 = if i + 1 < in_features { x_data[b * in_features + i + 1] } else { 0.0 };
-                            
-                            let lut_sum = match p {
-                                0 => -x0 - x1, 1 => 0.0 - x1, 2 => x0 - x1,
-                                3 => -x0 + 0.0, 4 => 0.0 + 0.0, 5 => x0 + 0.0,
-                                6 => -x0 + x1, 7 => 0.0 + x1, 8 => x0 + x1,
-                                _ => 0.0,
-                            };
-                            sum += lut_sum;
-                        }
-                        *out_val = sum * scale;
+                        *out_val = Self::compute_row(x_data, b * in_features, packed_w, o * in_features, scales, in_features);
                     }
                 });
             }
         });
+    }
+
+    pub fn forward_raw(
+        x_data: &[f32], batch: usize,
+        packed_w: &[u8], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let mut out_data = vec![0.0f32; batch * out_features];
+        Self::forward_inner(x_data, batch, packed_w, scales, out_features, in_features, &mut out_data);
         out_data
     }
 }
 
-/// TL2 Kernel: Ternary Lookup Table (3 weights per 5-bit index)
 pub struct TL2Kernel;
 
 impl TL2Kernel {
@@ -208,7 +448,7 @@ impl TL2Kernel {
         for chunk in weights.chunks(3) {
             let mut p: u8 = 0;
             for (i, &w) in chunk.iter().enumerate() {
-                let val = if w < -0.5 { 0 } else if w > 0.5 { 2 } else { 1 };
+                let val = if w < -0.5 { 0u8 } else if w > 0.5 { 2 } else { 1 };
                 p += val * 3u8.pow(i as u32);
             }
             packed.push(p);
@@ -216,77 +456,380 @@ impl TL2Kernel {
         packed
     }
 
-    pub fn forward_raw(
-        x_data: &[f32],
-        batch: usize,
-        packed_w: &[u8],
-        out_features: usize,
-        in_features: usize,
-        scale: f32,
-    ) -> Vec<f32> {
-        let mut out_data = vec![0.0f32; batch * out_features];
+    #[inline(always)]
+    fn compute_row(
+        x_data: &[f32], x_off: usize,
+        packed_w: &[u8], w_row: usize,
+        scales: &[f32], in_features: usize,
+    ) -> f32 {
+        unsafe {
+            let mut sum = 0.0f32;
+            let mut i = 0usize;
+            while i + 2 < in_features {
+                let p = *packed_w.get_unchecked((w_row + i) / 3);
+                let x0 = *x_data.get_unchecked(x_off + i);
+                let x1 = *x_data.get_unchecked(x_off + i + 1);
+                let x2 = *x_data.get_unchecked(x_off + i + 2);
+                let w0 = match p % 3 { 0 => -1.0f32, 2 => 1.0, _ => 0.0 };
+                let w1 = match (p / 3) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
+                let w2 = match (p / 9) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
+                sum += w0 * x0 + w1 * x1 + w2 * x2;
+                i += 3;
+            }
+            while i < in_features {
+                let p = *packed_w.get_unchecked((w_row + i) / 3);
+                let local = (w_row + i) % 3;
+                let w = match (p / 3u8.pow(local as u32)) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
+                sum += w * *x_data.get_unchecked(x_off + i);
+                i += 1;
+            }
+            let g = (w_row / GROUP_SIZE).min(scales.len() - 1);
+            sum * *scales.get_unchecked(g)
+        }
+    }
 
-        // FAST PATH: Avoid OS thread spawning overhead for small matrices
-        if out_data.len() < 4096 {
+    fn forward_inner(
+        x_data: &[f32], batch: usize,
+        packed_w: &[u8], scales: &[f32],
+        out_features: usize, in_features: usize,
+        out_data: &mut [f32],
+    ) {
+        let total_out = batch * out_features;
+        if total_out < 4 {
             for b in 0..batch {
+                let x_off = b * in_features;
                 for o in 0..out_features {
-                    let mut sum = 0.0f32;
-                    for i in (0..in_features).step_by(3) {
-                        let w_idx = (o * in_features + i) / 3;
-                        if w_idx >= packed_w.len() { break; }
-                        let p = packed_w[w_idx];
-                        
-                        let x0 = x_data[b * in_features + i];
-                        let x1 = if i + 1 < in_features { x_data[b * in_features + i + 1] } else { 0.0 };
-                        let x2 = if i + 2 < in_features { x_data[b * in_features + i + 2] } else { 0.0 };
-                        
-                        let w0 = match p % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-                        let w1 = match (p / 3) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-                        let w2 = match (p / 9) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-
-                        sum += w0 * x0 + w1 * x1 + w2 * x2;
-                    }
-                    out_data[b * out_features + o] = sum * scale;
+                    unsafe { *out_data.get_unchecked_mut(b * out_features + o) = Self::compute_row(x_data, x_off, packed_w, o * in_features, scales, in_features); }
                 }
             }
-            return out_data;
+            return;
         }
 
-        // HILOS DE RUST (Nativos)
         let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let chunk_size = std::cmp::max(1, (out_data.len() + num_threads - 1) / num_threads);
+        let chunk_size = std::cmp::max(1, (total_out + num_threads - 1) / num_threads);
 
         std::thread::scope(|s| {
-            for (thread_idx, chunk) in out_data.chunks_mut(chunk_size).enumerate() {
-                if chunk.is_empty() { continue; }
+            for (ti, chunk) in out_data.chunks_mut(chunk_size).enumerate() {
+                let start = ti * chunk_size;
                 s.spawn(move || {
-                    let start_idx = thread_idx * chunk_size;
                     for (local_idx, out_val) in chunk.iter_mut().enumerate() {
-                        let idx = start_idx + local_idx;
+                        let idx = start + local_idx;
                         let b = idx / out_features;
                         let o = idx % out_features;
-                        
-                        let mut sum = 0.0f32;
-                        for i in (0..in_features).step_by(3) {
-                            let w_idx = (o * in_features + i) / 3;
-                            if w_idx >= packed_w.len() { break; }
-                            let p = packed_w[w_idx];
-                            
-                            let x0 = x_data[b * in_features + i];
-                            let x1 = if i + 1 < in_features { x_data[b * in_features + i + 1] } else { 0.0 };
-                            let x2 = if i + 2 < in_features { x_data[b * in_features + i + 2] } else { 0.0 };
-                            
-                            let w0 = match p % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-                            let w1 = match (p / 3) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-                            let w2 = match (p / 9) % 3 { 0 => -1.0, 2 => 1.0, _ => 0.0 };
-
-                            sum += w0 * x0 + w1 * x1 + w2 * x2;
-                        }
-                        *out_val = sum * scale;
+                        *out_val = Self::compute_row(x_data, b * in_features, packed_w, o * in_features, scales, in_features);
                     }
                 });
             }
         });
+    }
+
+    pub fn forward_raw(
+        x_data: &[f32], batch: usize,
+        packed_w: &[u8], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let mut out_data = vec![0.0f32; batch * out_features];
+        Self::forward_inner(x_data, batch, packed_w, scales, out_features, in_features, &mut out_data);
         out_data
+    }
+}
+
+pub struct I2STile16Kernel;
+
+impl I2STile16Kernel {
+    #[inline(always)]
+    fn compute_row(
+        x_data: &[f32], x_off: usize,
+        packed_w: &[u32], w_row: usize,
+        in_features: usize,
+    ) -> f32 {
+        unsafe {
+            let mut sum = 0.0f32;
+            let w_idx_base = w_row >> 4;
+            let mut i = 0usize;
+            while i + 15 < in_features {
+                let packed = *packed_w.get_unchecked(w_idx_base + (i >> 4));
+                let x_base = x_off + i;
+
+                let x0 = *x_data.get_unchecked(x_base);
+                let x1 = *x_data.get_unchecked(x_base + 1);
+                let x2 = *x_data.get_unchecked(x_base + 2);
+                let x3 = *x_data.get_unchecked(x_base + 3);
+                let x4 = *x_data.get_unchecked(x_base + 4);
+                let x5 = *x_data.get_unchecked(x_base + 5);
+                let x6 = *x_data.get_unchecked(x_base + 6);
+                let x7 = *x_data.get_unchecked(x_base + 7);
+                let x8 = *x_data.get_unchecked(x_base + 8);
+                let x9 = *x_data.get_unchecked(x_base + 9);
+                let x10 = *x_data.get_unchecked(x_base + 10);
+                let x11 = *x_data.get_unchecked(x_base + 11);
+                let x12 = *x_data.get_unchecked(x_base + 12);
+                let x13 = *x_data.get_unchecked(x_base + 13);
+                let x14 = *x_data.get_unchecked(x_base + 14);
+                let x15 = *x_data.get_unchecked(x_base + 15);
+
+                let b0  = (packed)        & 0b11;
+                let b1  = (packed >> 2)   & 0b11;
+                let b2  = (packed >> 4)   & 0b11;
+                let b3  = (packed >> 6)   & 0b11;
+                let b4  = (packed >> 8)   & 0b11;
+                let b5  = (packed >> 10)  & 0b11;
+                let b6  = (packed >> 12)  & 0b11;
+                let b7  = (packed >> 14)  & 0b11;
+                let b8  = (packed >> 16)  & 0b11;
+                let b9  = (packed >> 18)  & 0b11;
+                let b10 = (packed >> 20)  & 0b11;
+                let b11 = (packed >> 22)  & 0b11;
+                let b12 = (packed >> 24)  & 0b11;
+                let b13 = (packed >> 26)  & 0b11;
+                let b14 = (packed >> 28)  & 0b11;
+                let b15 = (packed >> 30)  & 0b11;
+
+                if b0  == 0b10 { sum += x0;  } else if b0  == 0b00 { sum -= x0; }
+                if b1  == 0b10 { sum += x1;  } else if b1  == 0b00 { sum -= x1; }
+                if b2  == 0b10 { sum += x2;  } else if b2  == 0b00 { sum -= x2; }
+                if b3  == 0b10 { sum += x3;  } else if b3  == 0b00 { sum -= x3; }
+                if b4  == 0b10 { sum += x4;  } else if b4  == 0b00 { sum -= x4; }
+                if b5  == 0b10 { sum += x5;  } else if b5  == 0b00 { sum -= x5; }
+                if b6  == 0b10 { sum += x6;  } else if b6  == 0b00 { sum -= x6; }
+                if b7  == 0b10 { sum += x7;  } else if b7  == 0b00 { sum -= x7; }
+                if b8  == 0b10 { sum += x8;  } else if b8  == 0b00 { sum -= x8; }
+                if b9  == 0b10 { sum += x9;  } else if b9  == 0b00 { sum -= x9; }
+                if b10 == 0b10 { sum += x10; } else if b10 == 0b00 { sum -= x10; }
+                if b11 == 0b10 { sum += x11; } else if b11 == 0b00 { sum -= x11; }
+                if b12 == 0b10 { sum += x12; } else if b12 == 0b00 { sum -= x12; }
+                if b13 == 0b10 { sum += x13; } else if b13 == 0b00 { sum -= x13; }
+                if b14 == 0b10 { sum += x14; } else if b14 == 0b00 { sum -= x14; }
+                if b15 == 0b10 { sum += x15; } else if b15 == 0b00 { sum -= x15; }
+
+                i += 16;
+            }
+            while i < in_features {
+                let local = i & 15;
+                let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
+                let x_val = *x_data.get_unchecked(x_off + i);
+                if bits == 0b10 { sum += x_val; } else if bits == 0b00 { sum -= x_val; }
+                i += 1;
+            }
+            sum
+        }
+    }
+
+    pub fn forward_raw(
+        x_data: &[f32], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; batch * out_features];
+        let total = batch * out_features;
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+
+        if total < 16 {
+            for b in 0..batch {
+                let x_off = b * in_features;
+                for o in 0..out_features {
+                    let w_row = o * in_features;
+                    let base_g = o * n_groups_per_row;
+                    let mut row_sum = 0.0f32;
+                    for gi in 0..n_groups_per_row {
+                        let raw = Self::compute_row(x_data, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                        row_sum += raw * unsafe { *scales.get_unchecked(base_g + gi) };
+                    }
+                    if rem > 0 {
+                        let raw = Self::compute_row(x_data, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                        row_sum += raw * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                    }
+                    unsafe { *out.get_unchecked_mut(b * out_features + o) = row_sum; }
+                }
+            }
+            return out;
+        }
+
+        let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let rows_per_thread = (total + num_threads - 1) / num_threads;
+
+        std::thread::scope(|s| {
+            let mut remaining = &mut out[..];
+            let mut start_row = 0usize;
+            for _ in 0..num_threads {
+                let n = rows_per_thread.min(remaining.len());
+                if n == 0 { break; }
+                let (chunk, rest) = remaining.split_at_mut(n);
+                remaining = rest;
+                let sr = start_row;
+                start_row += n;
+                s.spawn(move || {
+                    for local_idx in 0..chunk.len() {
+                        let idx = sr + local_idx;
+                        let b = idx / out_features;
+                        let o = idx % out_features;
+                        let w_row = o * in_features;
+                        let x_off = b * in_features;
+                        let base_g = o * n_groups_per_row;
+                        let mut row_sum = 0.0f32;
+                        for gi in 0..n_groups_per_row {
+                            let raw = Self::compute_row(x_data, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                            row_sum += raw * unsafe { *scales.get_unchecked(base_g + gi) };
+                        }
+                        if rem > 0 {
+                            let raw = Self::compute_row(x_data, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                            row_sum += raw * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                        }
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = row_sum; }
+                    }
+                });
+            }
+        });
+
+        out
+    }
+
+    #[inline(always)]
+    fn compute_row_i8(
+        x_i8: &[i8], x_off: usize,
+        packed_w: &[u32], w_row: usize,
+        in_features: usize,
+    ) -> i32 {
+        unsafe {
+            let mut sum = 0i32;
+            let w_idx_base = w_row >> 4;
+            let mut i = 0usize;
+            while i + 15 < in_features {
+                let packed = *packed_w.get_unchecked(w_idx_base + (i >> 4));
+                let x_base = x_off + i;
+
+                let b0  = (packed)        & 0b11;
+                let b1  = (packed >> 2)   & 0b11;
+                let b2  = (packed >> 4)   & 0b11;
+                let b3  = (packed >> 6)   & 0b11;
+                let b4  = (packed >> 8)   & 0b11;
+                let b5  = (packed >> 10)  & 0b11;
+                let b6  = (packed >> 12)  & 0b11;
+                let b7  = (packed >> 14)  & 0b11;
+                let b8  = (packed >> 16)  & 0b11;
+                let b9  = (packed >> 18)  & 0b11;
+                let b10 = (packed >> 20)  & 0b11;
+                let b11 = (packed >> 22)  & 0b11;
+                let b12 = (packed >> 24)  & 0b11;
+                let b13 = (packed >> 26)  & 0b11;
+                let b14 = (packed >> 28)  & 0b11;
+                let b15 = (packed >> 30)  & 0b11;
+
+                let x0  = *x_i8.get_unchecked(x_base)      as i32;
+                let x1  = *x_i8.get_unchecked(x_base + 1)  as i32;
+                let x2  = *x_i8.get_unchecked(x_base + 2)  as i32;
+                let x3  = *x_i8.get_unchecked(x_base + 3)  as i32;
+                let x4  = *x_i8.get_unchecked(x_base + 4)  as i32;
+                let x5  = *x_i8.get_unchecked(x_base + 5)  as i32;
+                let x6  = *x_i8.get_unchecked(x_base + 6)  as i32;
+                let x7  = *x_i8.get_unchecked(x_base + 7)  as i32;
+                let x8  = *x_i8.get_unchecked(x_base + 8)  as i32;
+                let x9  = *x_i8.get_unchecked(x_base + 9)  as i32;
+                let x10 = *x_i8.get_unchecked(x_base + 10) as i32;
+                let x11 = *x_i8.get_unchecked(x_base + 11) as i32;
+                let x12 = *x_i8.get_unchecked(x_base + 12) as i32;
+                let x13 = *x_i8.get_unchecked(x_base + 13) as i32;
+                let x14 = *x_i8.get_unchecked(x_base + 14) as i32;
+                let x15 = *x_i8.get_unchecked(x_base + 15) as i32;
+
+                sum += (b0  as i32 - 1) * x0;
+                sum += (b1  as i32 - 1) * x1;
+                sum += (b2  as i32 - 1) * x2;
+                sum += (b3  as i32 - 1) * x3;
+                sum += (b4  as i32 - 1) * x4;
+                sum += (b5  as i32 - 1) * x5;
+                sum += (b6  as i32 - 1) * x6;
+                sum += (b7  as i32 - 1) * x7;
+                sum += (b8  as i32 - 1) * x8;
+                sum += (b9  as i32 - 1) * x9;
+                sum += (b10 as i32 - 1) * x10;
+                sum += (b11 as i32 - 1) * x11;
+                sum += (b12 as i32 - 1) * x12;
+                sum += (b13 as i32 - 1) * x13;
+                sum += (b14 as i32 - 1) * x14;
+                sum += (b15 as i32 - 1) * x15;
+
+                i += 16;
+            }
+            while i < in_features {
+                let local = i & 15;
+                let bits = (*packed_w.get_unchecked(w_idx_base + (i >> 4)) >> (local << 1)) & 0b11;
+                let x_val = *x_i8.get_unchecked(x_off + i) as i32;
+                sum += (bits as i32 - 1) * x_val;
+                i += 1;
+            }
+            sum
+        }
+    }
+
+    pub fn forward_raw_i8(
+        x_i8: &[i8], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; batch * out_features];
+        let total = batch * out_features;
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+
+        if total < 16 {
+            for b in 0..batch {
+                let x_off = b * in_features;
+                for o in 0..out_features {
+                    let w_row = o * in_features;
+                    let base_g = o * n_groups_per_row;
+                    let mut row_sum = 0.0f32;
+                    for gi in 0..n_groups_per_row {
+                        let raw = Self::compute_row_i8(x_i8, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                        row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + gi) };
+                    }
+                    if rem > 0 {
+                        let raw = Self::compute_row_i8(x_i8, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                        row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                    }
+                    unsafe { *out.get_unchecked_mut(b * out_features + o) = row_sum; }
+                }
+            }
+            return out;
+        }
+
+        let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let rows_per_thread = (total + num_threads - 1) / num_threads;
+
+        std::thread::scope(|s| {
+            let mut remaining = &mut out[..];
+            let mut start_row = 0usize;
+            for _ in 0..num_threads {
+                let n = rows_per_thread.min(remaining.len());
+                if n == 0 { break; }
+                let (chunk, rest) = remaining.split_at_mut(n);
+                remaining = rest;
+                let sr = start_row;
+                start_row += n;
+                s.spawn(move || {
+                    for local_idx in 0..chunk.len() {
+                        let idx = sr + local_idx;
+                        let b = idx / out_features;
+                        let o = idx % out_features;
+                        let w_row = o * in_features;
+                        let x_off = b * in_features;
+                        let base_g = o * n_groups_per_row;
+                        let mut row_sum = 0.0f32;
+                        for gi in 0..n_groups_per_row {
+                            let raw = Self::compute_row_i8(x_i8, x_off + gi * GROUP_SIZE, packed_w, w_row + gi * GROUP_SIZE, GROUP_SIZE);
+                            row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + gi) };
+                        }
+                        if rem > 0 {
+                            let raw = Self::compute_row_i8(x_i8, x_off + n_groups_per_row * GROUP_SIZE, packed_w, w_row + n_groups_per_row * GROUP_SIZE, rem);
+                            row_sum += raw as f32 * unsafe { *scales.get_unchecked(base_g + n_groups_per_row) };
+                        }
+                        unsafe { *chunk.get_unchecked_mut(local_idx) = row_sum; }
+                    }
+                });
+            }
+        });
+
+        out
     }
 }

@@ -204,3 +204,31 @@ path = "xorIA/transformer_chat_cuda.rs"
 [[bin]]
 name = "bit_transformer"
 path = "xorIA/bit_transformer/main.rs"
+
+[[bin]]
+name = "bit_transformer_cuda"
+path = "xorIA/bit_transformer/main_cuda.rs"
+
+[[bin]]
+name = "transformer_bit2"
+path = "xorIA/transformer_bit2/main.rs"
+
+[[bin]]
+name = "transformer_bit2_cuda"
+path = "xorIA/transformer_bit2/main_cuda.rs"
+
+[[bin]]
+name = "bench_kernels"
+path = "xorIA/bin/bench_kernels.rs"
+
+[[bin]]
+name = "kernel_sum"
+path = "xorIA/bin/kernel_sum.rs"
+
+[[bin]]
+name = "test_i2s_vs_i8"
+path = "xorIA/bin/test_i2s_vs_i8.rs"
+
+[[bin]]
+name = "test_avx2_vs_i2s"
+path = "xorIA/bin/test_avx2_vs_i2s.rs"
