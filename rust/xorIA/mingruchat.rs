@@ -471,3 +471,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[allow(dead_code)]
+fn main() {
+    if let Err(e) = mlstm_chat() {
+        eprintln!("Error: {}", e);
+    }
+}

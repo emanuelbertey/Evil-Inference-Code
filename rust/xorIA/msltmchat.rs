@@ -16,12 +16,12 @@ use burn::{
 use burn::grad_clipping::GradientClippingConfig;
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
+use burn_flex::Flex;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
-use burn_ndarray::NdArray;
 use tokenizers::decoders::metaspace::Metaspace as MetaspaceDecoder;
 use tokenizers::models::bpe::{BpeTrainerBuilder, BPE};
 use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
@@ -37,7 +37,7 @@ use xlstm::blocks::slstm::layer::SLSTMLayerConfig;
 use xlstm::components::feedforward::GatedFeedForwardConfig;
 
 // Use NdArray backend with Autodiff
-type MyBackend = Autodiff<NdArray<f32>>;
+type MyBackend = Autodiff<Flex<f32>>;
 
 /// Professional Tokenizer using Hugging Face 'tokenizers'
 pub struct Tokenizer {
@@ -234,7 +234,7 @@ fn generate_text<B: Backend>(
     (text, result_ids.len(), elapsed)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn msltmchat() -> Result<(), Box<dyn Error>> {
     println!("xLSTM Text Generation - Migrated to new Rust port");
     println!("================================================\n");
 
@@ -479,4 +479,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[allow(dead_code)]
+fn main() {
+    if let Err(e) = msltmchat() {
+        eprintln!("Error: {}", e);
+    }
 }

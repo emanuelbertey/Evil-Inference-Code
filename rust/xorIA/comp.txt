@@ -1,6 +1,8 @@
-cargo run --release --bin msltmchat -- input.txt
-cargo build --release --bin xlstm
+cargo run --release --bin xoria
 
+cargo run --release --bin msltmchat -- input.txt
+
+cargo build --release --bin xlstm
 
 cargo run --release --bin slstmchat -- input.txt
 

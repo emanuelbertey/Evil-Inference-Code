@@ -258,7 +258,7 @@ fn generate_text_typed<B: Backend>(
     (text, result_ids.len(), elapsed)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn msltmchat_cuda() -> Result<(), Box<dyn Error>> {
     println!("xLSTM Text Generation - GPU Port (CUDA)");
     println!("========================================\n");
 
@@ -542,4 +542,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[allow(dead_code)]
+fn main() {
+    if let Err(e) = msltmchat_cuda() {
+        eprintln!("Error: {}", e);
+    }
 }

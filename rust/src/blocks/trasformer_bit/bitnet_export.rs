@@ -522,7 +522,6 @@ fn skip_bytes<R: Read>(r: &mut R, n: usize) -> io::Result<()> {
 }
 
 // ─── Memory Report ──────────────────────────────────────────────────────────
-
 fn bitlinear_bytes(bl: &BitLinearInferenceState) -> usize {
     bl.packed_w.len() * std::mem::size_of::<u32>() + bl.scales.len() * std::mem::size_of::<f32>()
 }

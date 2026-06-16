@@ -289,7 +289,7 @@ fn generate_text_typed<B: Backend>(
     (text, result_ids.len(), elapsed)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn large_chat_cuda() -> Result<(), Box<dyn Error>> {
     println!("xLSTMLarge Text Generation - GPU Port (CUDA)");
     println!("========================================\n");
 
@@ -535,4 +535,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn main() {
+    if let Err(e) = large_chat_cuda() { eprintln!("Error: {}", e); }
 }

@@ -366,6 +366,7 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn main() {
     if let Err(e) = xoria_cuda() {
         eprintln!("Error: {}", e);

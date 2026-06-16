@@ -1,30 +1,53 @@
-// ─── xoria_bit Panel — Selección CPU / CUDA ─────────────────────────────────
+// ─── Panel — Selección de Apps ───────────────────────────────────────────────
 //
-// Panel interactivo que llama a xoria_cpu() o xoria_cuda() directamente.
-// Usage: cargo run --release
+// Usage: cargo run --release --bin xoria
 
 use std::io::{self, Write};
 
 #[path = "../xorIA/xoria_bit.rs"]
 mod xoria_bit;
-
 #[path = "../xorIA/xoria_bit_cuda.rs"]
 mod xoria_bit_cuda;
+#[path = "../xorIA/large_chat.rs"]
+mod large_chat;
+#[path = "../xorIA/large_chat_cuda.rs"]
+mod large_chat_cuda;
+#[path = "../xorIA/msltmchat.rs"]
+mod msltmchat;
+#[path = "../xorIA/msltmchat (cuda).rs"]
+mod msltmchat_cuda;
+#[path = "../xorIA/transformer_chat.rs"]
+mod transformer_chat;
+#[path = "../xorIA/transformer_chat_cuda.rs"]
+mod transformer_chat_cuda;
 
 fn main() {
     println!();
-    println!("╔══════════════════════════════════════════════════════╗");
-    println!("║         xoria_bit — Panel de Selección               ║");
-    println!("╠══════════════════════════════════════════════════════╣");
-    println!("║                                                      ║");
-    println!("║   1.  CPU   (xoria_bit)        Entrenamiento/Infer.  ║");
-    println!("║   2.  CUDA  (xoria_bit_cuda)   Entrenamiento GPU     ║");
-    println!("║                                                      ║");
-    println!("║   q.  Salir                                          ║");
-    println!("║                                                      ║");
-    println!("╚══════════════════════════════════════════════════════╝");
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║                    Panel de Selección                    ║");
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("║                                                          ║");
+    println!("║   xoria_bit:                                             ║");
+    println!("║     1.  xoria_bit        (CPU)    BitLinear 1.58-bit     ║");
+    println!("║     2.  xoria_bit_cuda   (CUDA)   BitLinear GPU          ║");
+    println!("║                                                          ║");
+    println!("║   xLSTM Large:                                           ║");
+    println!("║     3.  large_chat       (CPU)    xLSTM Large Chat       ║");
+    println!("║     4.  large_chat_cuda  (CUDA)   xLSTM Large GPU        ║");
+    println!("║                                                          ║");
+    println!("║   mSLTM:                                                 ║");
+    println!("║     5.  msltmchat        (CPU)    mSLTM Chat             ║");
+    println!("║     6.  msltmchat_cuda   (CUDA)   mSLTM GPU              ║");
+    println!("║                                                          ║");
+    println!("║   Transformer:                                           ║");
+    println!("║     7.  transformer_chat (CPU)    Transformer Chat       ║");
+    println!("║     8.  transformer_chat_cuda (CUDA) Transformer GPU     ║");
+    println!("║                                                          ║");
+    println!("║     q.  Salir                                            ║");
+    println!("║                                                          ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
     println!();
-    print!("  Seleccioná una opción [1/2/q]: ");
+    print!("  Seleccioná una opción [1-8/q]: ");
     io::stdout().flush().unwrap();
 
     let mut choice = String::new();
@@ -32,17 +55,37 @@ fn main() {
     let choice = choice.trim().to_lowercase();
 
     match choice.as_str() {
-        "1" | "cpu" => {
-            println!("\n  → Iniciando xoria_bit (CPU)...\n");
-            if let Err(e) = xoria_bit::xoria_cpu() {
-                eprintln!("Error: {}", e);
-            }
+        "1" => {
+            println!("\n  → xoria_bit (CPU)...\n");
+            if let Err(e) = xoria_bit::xoria_cpu() { eprintln!("Error: {}", e); }
         }
-        "2" | "cuda" => {
-            println!("\n  → Iniciando xoria_bit_cuda (CUDA)...\n");
-            if let Err(e) = xoria_bit_cuda::xoria_cuda() {
-                eprintln!("Error: {}", e);
-            }
+        "2" => {
+            println!("\n  → xoria_bit_cuda (CUDA)...\n");
+            if let Err(e) = xoria_bit_cuda::xoria_cuda() { eprintln!("Error: {}", e); }
+        }
+        "3" => {
+            println!("\n  → large_chat (CPU)...\n");
+            if let Err(e) = large_chat::large_chat() { eprintln!("Error: {}", e); }
+        }
+        "4" => {
+            println!("\n  → large_chat_cuda (CUDA)...\n");
+            if let Err(e) = large_chat_cuda::large_chat_cuda() { eprintln!("Error: {}", e); }
+        }
+        "5" => {
+            println!("\n  → msltmchat (CPU)...\n");
+            if let Err(e) = msltmchat::msltmchat() { eprintln!("Error: {}", e); }
+        }
+        "6" => {
+            println!("\n  → msltmchat_cuda (CUDA)...\n");
+            if let Err(e) = msltmchat_cuda::msltmchat_cuda() { eprintln!("Error: {}", e); }
+        }
+        "7" => {
+            println!("\n  → transformer_chat (CPU)...\n");
+            if let Err(e) = transformer_chat::transformer_chat() { eprintln!("Error: {}", e); }
+        }
+        "8" => {
+            println!("\n  → transformer_chat_cuda (CUDA)...\n");
+            if let Err(e) = transformer_chat_cuda::transformer_chat_cuda() { eprintln!("Error: {}", e); }
         }
         "q" | "quit" | "salir" | "" => {
             println!("  Saliendo.");

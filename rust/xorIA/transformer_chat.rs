@@ -411,7 +411,7 @@ fn generate_text_cached<B: Backend>(
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
     println!("╔════════════════════════════════════════════════════════════════╗");
     println!("║     Transformer Chat — GQA + RoPE + SwiGLU                     ║");
     println!("║     BPE-Level Language Model (Hugging Face)                    ║");
@@ -775,4 +775,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[allow(dead_code)]
+fn main() {
+    if let Err(e) = transformer_chat() {
+        eprintln!("Error: {}", e);
+    }
 }

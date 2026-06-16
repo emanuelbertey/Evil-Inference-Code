@@ -15,7 +15,7 @@ use burn::{
 use burn::grad_clipping::GradientClippingConfig;
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
-use burn_ndarray::NdArray;
+use burn_flex::Flex;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -30,8 +30,7 @@ use tokenizers::models::TrainerWrapper;
 
 use xlstm::blocks::xlstm_large::{XLSTMLarge, XLSTMLargeConfig};
 
-// Use NdArray backend with Autodiff (CPU)
-type MyBackend = Autodiff<NdArray<f32>>;
+type MyBackend = Autodiff<Flex<f32>>;
 
 /// Professional Tokenizer using Hugging Face 'tokenizers'
 pub struct Tokenizer {
@@ -297,7 +296,7 @@ fn generate_text_typed<B: Backend>(
     (text, result_ids.len(), elapsed)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn large_chat() -> Result<(), Box<dyn Error>> {
     println!("xLSTMLarge Text Generation - Rust Port");
     println!("========================================\n");
 
@@ -601,4 +600,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn main() {
+    if let Err(e) = large_chat() { eprintln!("Error: {}", e); }
 }

@@ -487,6 +487,7 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn main() {
     if let Err(e) = xoria_cpu() {
         eprintln!("Error: {}", e);
