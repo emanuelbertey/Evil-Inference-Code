@@ -239,12 +239,20 @@ pub fn msltmchat() -> Result<(), Box<dyn Error>> {
     println!("================================================\n");
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Uso: cargo run --bin msltmchat -- <archivo.txt>");
-        std::process::exit(1);
-    }
-
-    let text_file = &args[1];
+    let text_file = if args.len() >= 2 {
+        args[1].clone()
+    } else {
+        print!("Archivo de dataset (txt): ");
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        let trimmed = input.trim().to_string();
+        if trimmed.is_empty() {
+            eprintln!("No se proporcionó archivo.");
+            std::process::exit(1);
+        }
+        trimmed
+    };
     let tokenizer_path = "tokenizer.json";
     let model_path = "xlstm_chat_model"; 
 
@@ -255,7 +263,7 @@ pub fn msltmchat() -> Result<(), Box<dyn Error>> {
         Tokenizer::load(tokenizer_path)?
     } else {
         println!("Entrenando nuevo tokenizador BPE...");
-        let text = fs::read_to_string(text_file)?;
+        let text = fs::read_to_string(&text_file)?;
         let tokenizer = Tokenizer::from_text(&text, target_vocab_size)?;
         tokenizer.save(tokenizer_path)?;
         tokenizer
@@ -264,7 +272,7 @@ pub fn msltmchat() -> Result<(), Box<dyn Error>> {
     let vocab_size = tokenizer.vocab_size();
     println!("Tamaño del vocabulario: {}\n", vocab_size);
 
-    let text = fs::read_to_string(text_file)?;
+    let text = fs::read_to_string(&text_file)?;
     let tokens = tokenizer.encode(&text);
     println!("Tokens totales: {}\n", tokens.len());
 

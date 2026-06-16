@@ -294,12 +294,20 @@ pub fn large_chat_cuda() -> Result<(), Box<dyn Error>> {
     println!("========================================\n");
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Uso: cargo run --bin large_chat_cuda -- <archivo.txt>");
-        std::process::exit(1);
-    }
-
-    let text_file = &args[1];
+    let text_file = if args.len() >= 2 {
+        args[1].clone()
+    } else {
+        print!("Archivo de dataset (txt): ");
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        let trimmed = input.trim().to_string();
+        if trimmed.is_empty() {
+            eprintln!("No se proporcionó archivo.");
+            std::process::exit(1);
+        }
+        trimmed
+    };
     let tokenizer_path = "large_v1_cuda.json";
     let model_file = "large_v1_model_cuda.mpk";
 
@@ -309,7 +317,7 @@ pub fn large_chat_cuda() -> Result<(), Box<dyn Error>> {
         Tokenizer::load(tokenizer_path)?
     } else {
         println!("Entrenando nuevo tokenizador BPE...");
-        let text = fs::read_to_string(text_file)?;
+        let text = fs::read_to_string(&text_file)?;
         let tokenizer = Tokenizer::from_text(&text, target_vocab_size)?;
         tokenizer.save(tokenizer_path)?;
         tokenizer
@@ -442,7 +450,7 @@ pub fn large_chat_cuda() -> Result<(), Box<dyn Error>> {
 
         for epoch in 0..num_epochs {
             let mut total_loss = 0.0;
-            let fragments = FileFragmentIterator::new(Path::new(text_file), 1)?;
+            let fragments = FileFragmentIterator::new(Path::new(&text_file), 1)?;
             let mut batch_count = 0;
             let epoch_start = Instant::now();
 
