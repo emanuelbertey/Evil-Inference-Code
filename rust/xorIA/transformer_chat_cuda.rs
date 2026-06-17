@@ -355,10 +355,9 @@ fn generate_text_cached<B: Backend>(
                     current_offset = current_offset.saturating_sub(remove);
                     println!("(Cache trimmed: removed {} tokens; kept last {} tokens; new offset: {})", remove, keep, current_offset);
                     seq = keep;
-                }
             }
         }
-
+    }
         let [_, _, v] = logits.dims();
         let logits_2d = logits.reshape([1, v]);
 
@@ -375,7 +374,7 @@ fn generate_text_cached<B: Backend>(
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
     println!("╔════════════════════════════════════════════════════════════════╗");
     println!("║     Transformer Chat CUDA — GQA + RoPE + SwiGLU             ║");
     println!("║     BPE-Level Language Model (Hugging Face) [CUDA]          ║");
@@ -501,12 +500,38 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if let Ok(v) = input.trim().parse() { repetition_penalty = v; }
             }
         }
+    } else {
+        loop {
+            println!("\n--- NUEVO MODELO — CONFIGURACIÓN (CUDA) ---");
+            println!("  (1) d_model: {}", d_model);
+            println!("  (2) Num layers: {}", num_layers);
+            println!("  (3) Heads:   {}", num_heads);
+            println!("  (4) LR:      {}", lr);
+            println!("  (5) Épocas:  {}", num_epochs);
+            println!("  (6) Batch:   {}", batch_size);
+            println!("--------------------------------------------");
+            print!("¿Entrenar (e) o Ajustar parámetros (s)? [e/s]: ");
+            io::stdout().flush()?;
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice)?;
+            let choice = choice.trim().to_lowercase();
+            if choice == "e" { break; }
+            else if choice == "s" {
+                println!("\nAjustar parámetros (Enter para mantener actual):");
+                print!("d_model [{}]: ", d_model); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { d_model = v; }
+                print!("Num layers [{}]: ", num_layers); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { num_layers = v; }
+                print!("Heads [{}]: ", num_heads); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { num_heads = v; }
+                print!("Learning Rate [{}]: ", lr); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { lr = v; }
+                print!("Épocas [{}]: ", num_epochs); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { num_epochs = v; }
+                print!("Batch Size [{}]: ", batch_size); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { batch_size = v; }
+            }
+        }
     }
 
     let tokens = tokenizer.encode(&text);
     let device = CudaDevice::default();
 
-    let num_kv_groups = 4; 
+    let num_kv_groups = 4;
 
     println!("\n── Configuración del Transformer (CUDA) ──");
     println!("  d_model:       {}", d_model);
@@ -745,4 +770,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[allow(dead_code)]
+fn main() {
+    if let Err(e) = transformer_chat_cuda() {
+        eprintln!("Error: {}", e);
+    }
 }

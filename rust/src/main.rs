@@ -1,135 +1,97 @@
-// xLSTM demo — builds and runs a simple xLSTM language model
+// ─── Panel — Selección de Apps ───────────────────────────────────────────────
+//
+// Usage: cargo run --release --bin xoria
 
-use burn::backend::NdArray;
-use burn::prelude::*;
+use std::io::{self, Write};
 
-use xlstm::blocks::mlstm::block::MLSTMBlockConfig;
-use xlstm::blocks::mlstm::layer::MLSTMLayerConfig;
-use xlstm::blocks::slstm::block::SLSTMBlockConfig;
-use xlstm::blocks::slstm::layer::SLSTMLayerConfig;
-use xlstm::components::feedforward::GatedFeedForwardConfig;
-use xlstm::xlstm_block_stack::XLSTMBlockStackConfig;
-use xlstm::xlstm_lm_model::{XLSTMLMModel, XLSTMLMModelConfig};
-
-type MyBackend = NdArray<f32>;
+#[path = "../xorIA/xoria_bit.rs"]
+mod xoria_bit;
+#[path = "../xorIA/xoria_bit_cuda.rs"]
+mod xoria_bit_cuda;
+#[path = "../xorIA/large_chat.rs"]
+mod large_chat;
+#[path = "../xorIA/large_chat_cuda.rs"]
+mod large_chat_cuda;
+#[path = "../xorIA/msltmchat.rs"]
+mod msltmchat;
+#[path = "../xorIA/msltmchat (cuda).rs"]
+mod msltmchat_cuda;
+#[path = "../xorIA/transformer_chat.rs"]
+mod transformer_chat;
+#[path = "../xorIA/transformer_chat_cuda.rs"]
+mod transformer_chat_cuda;
 
 fn main() {
-    let device = Default::default();
+    println!();
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║                    Panel de Selección                    ║");
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("║                                                          ║");
+    println!("║   xoria_bit:                                             ║");
+    println!("║     1.  xoria_bit        (CPU)    BitLinear 1.58-bit     ║");
+    println!("║     2.  xoria_bit_cuda   (CUDA)   BitLinear GPU          ║");
+    println!("║                                                          ║");
+    println!("║   xLSTM Large:                                           ║");
+    println!("║     3.  large_chat       (CPU)    xLSTM Large Chat       ║");
+    println!("║     4.  large_chat_cuda  (CUDA)   xLSTM Large GPU        ║");
+    println!("║                                                          ║");
+    println!("║   mSLTM:                                                 ║");
+    println!("║     5.  msltmchat        (CPU)    mSLTM Chat             ║");
+    println!("║     6.  msltmchat_cuda   (CUDA)   mSLTM GPU              ║");
+    println!("║                                                          ║");
+    println!("║   Transformer:                                           ║");
+    println!("║     7.  transformer_chat (CPU)    Transformer Chat       ║");
+    println!("║     8.  transformer_chat_cuda (CUDA) Transformer GPU     ║");
+    println!("║                                                          ║");
+    println!("║     q.  Salir                                            ║");
+    println!("║                                                          ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+    println!();
+    print!("  Seleccioná una opción [1-8/q]: ");
+    io::stdout().flush().unwrap();
 
-    // ── Configure a small xLSTM language model ──────────────────────────
-    let embedding_dim = 64;
-    let vocab_size = 256;
-    let num_blocks = 4;
+    let mut choice = String::new();
+    io::stdin().read_line(&mut choice).unwrap();
+    let choice = choice.trim().to_lowercase();
 
-    let mlstm_layer_cfg = MLSTMLayerConfig {
-        embedding_dim, // will be overridden by block_stack
-        num_heads: 4,
-        conv1d_kernel_size: 4,
-        qkv_proj_blocksize: 4,
-        proj_factor: 2.0,
-        bias: false,
-        dropout: 0.0,
-        context_length: 64,
-    };
-
-    let slstm_layer_cfg = SLSTMLayerConfig {
-        embedding_dim,
-        num_heads: 4,
-        conv1d_kernel_size: 4,
-        dropout: 0.0,
-    };
-
-    let slstm_ff_cfg = GatedFeedForwardConfig {
-        embedding_dim,
-        proj_factor: 1.3,
-        bias: false,
-        dropout: 0.0,
-    };
-
-    let block_stack_cfg = XLSTMBlockStackConfig {
-        embedding_dim,
-        num_blocks,
-        context_length: 64,
-        add_post_blocks_norm: true,
-        bias: false,
-        dropout: 0.0,
-        mlstm_block: Some(MLSTMBlockConfig {
-            mlstm: mlstm_layer_cfg,
-        }),
-        slstm_block: Some(SLSTMBlockConfig {
-            slstm: slstm_layer_cfg,
-            feedforward: Some(slstm_ff_cfg),
-        }),
-        // blocks 1 and 3 are sLSTM, 0 and 2 are mLSTM
-        slstm_at: vec![1, 3],
-    };
-
-    let model_cfg = XLSTMLMModelConfig {
-        vocab_size,
-        add_embedding_dropout: false,
-        block_stack: block_stack_cfg,
-    };
-
-    // ── Build the model ─────────────────────────────────────────────────
-    println!("Building xLSTM LM model...");
-    println!("  Embedding dim: {}", embedding_dim);
-    println!("  Vocab size: {}", vocab_size);
-    println!("  Num blocks: {}", num_blocks);
-    println!("  Block map: [mLSTM, sLSTM, mLSTM, sLSTM]");
-
-    let model: XLSTMLMModel<MyBackend> = model_cfg.init(&device);
-
-    // ── Forward pass ────────────────────────────────────────────────────
-    let batch_size = 2;
-    let seq_len = 16;
-    let input_data: Vec<i32> = (0..batch_size * seq_len)
-        .map(|i| i % vocab_size as i32)
-        .collect();
-    let input = Tensor::<MyBackend, 1, Int>::from_ints(input_data.as_slice(), &device)
-        .reshape([batch_size, seq_len]);
-
-    println!("\nRunning forward pass with input shape [{}, {}]...", batch_size, seq_len);
-    let logits = model.forward(input);
-    let [b, s, v] = logits.dims();
-    println!("Output logits shape: [{}, {}, {}]", b, s, v);
-    println!("\n✓ xLSTM model built and ran successfully!");
-
-    // ── Configure a small xLSTMLarge model ──────────────────────────────
-    println!("\n--- Testing xLSTMLarge ---");
-    use xlstm::blocks::xlstm_large::XLSTMLargeConfig;
-    use xlstm::blocks::xlstm_large::model::XLSTMLarge;
-
-    let large_config = XLSTMLargeConfig {
-        embedding_dim: 64,
-        num_heads: 4,
-        num_blocks: 2,
-        vocab_size: 256,
-        use_bias: true,
-        norm_eps: 1e-6,
-        norm_reduction_force_float32: true,
-        add_out_norm: true,
-        qk_dim_factor: 0.5,
-        v_dim_factor: 1.0,
-        mlstm_backend: xlstm::blocks::xlstm_large::config::MLSTMBackendConfig::new(),
-        ffn_proj_factor: 2.6667,
-        ffn_round_up_to_multiple_of: 64,
-        gate_soft_cap: Some(15.0),
-        output_logit_soft_cap: Some(30.0),
-        weight_mode: "single".to_string(),
-    };
-
-    println!("Building xLSTMLarge model...");
-    let large_model: XLSTMLarge<MyBackend> = XLSTMLarge::init(&large_config, &device);
-
-    let input_large_data: Vec<i32> = (0..batch_size * seq_len)
-        .map(|i| i % vocab_size as i32)
-        .collect();
-    let input_large = Tensor::<MyBackend, 1, Int>::from_ints(input_large_data.as_slice(), &device)
-        .reshape([batch_size, seq_len]);
-
-    println!("Running forward pass for xLSTMLarge...");
-    let (logits_large, _) = large_model.forward(input_large, None);
-    let [bl, sl, vl] = logits_large.dims();
-    println!("xLSTMLarge Output logits shape: [{}, {}, {}]", bl, sl, vl);
-    println!("✓ xLSTMLarge model built and ran successfully!");
+    match choice.as_str() {
+        "1" => {
+            println!("\n  → xoria_bit (CPU)...\n");
+            if let Err(e) = xoria_bit::xoria_cpu() { eprintln!("Error: {}", e); }
+        }
+        "2" => {
+            println!("\n  → xoria_bit_cuda (CUDA)...\n");
+            if let Err(e) = xoria_bit_cuda::xoria_cuda() { eprintln!("Error: {}", e); }
+        }
+        "3" => {
+            println!("\n  → large_chat (CPU)...\n");
+            if let Err(e) = large_chat::large_chat() { eprintln!("Error: {}", e); }
+        }
+        "4" => {
+            println!("\n  → large_chat_cuda (CUDA)...\n");
+            if let Err(e) = large_chat_cuda::large_chat_cuda() { eprintln!("Error: {}", e); }
+        }
+        "5" => {
+            println!("\n  → msltmchat (CPU)...\n");
+            if let Err(e) = msltmchat::msltmchat() { eprintln!("Error: {}", e); }
+        }
+        "6" => {
+            println!("\n  → msltmchat_cuda (CUDA)...\n");
+            if let Err(e) = msltmchat_cuda::msltmchat_cuda() { eprintln!("Error: {}", e); }
+        }
+        "7" => {
+            println!("\n  → transformer_chat (CPU)...\n");
+            if let Err(e) = transformer_chat::transformer_chat() { eprintln!("Error: {}", e); }
+        }
+        "8" => {
+            println!("\n  → transformer_chat_cuda (CUDA)...\n");
+            if let Err(e) = transformer_chat_cuda::transformer_chat_cuda() { eprintln!("Error: {}", e); }
+        }
+        "q" | "quit" | "salir" | "" => {
+            println!("  Saliendo.");
+        }
+        _ => {
+            eprintln!("  Opción inválida: '{}'", choice);
+        }
+    }
 }

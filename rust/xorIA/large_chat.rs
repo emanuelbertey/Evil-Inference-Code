@@ -15,7 +15,7 @@ use burn::{
 use burn::grad_clipping::GradientClippingConfig;
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
-use burn_ndarray::NdArray;
+use burn_flex::Flex;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -30,8 +30,7 @@ use tokenizers::models::TrainerWrapper;
 
 use xlstm::blocks::xlstm_large::{XLSTMLarge, XLSTMLargeConfig};
 
-// Use NdArray backend with Autodiff (CPU)
-type MyBackend = Autodiff<NdArray<f32>>;
+type MyBackend = Autodiff<Flex<f32>>;
 
 /// Professional Tokenizer using Hugging Face 'tokenizers'
 pub struct Tokenizer {
@@ -297,17 +296,25 @@ fn generate_text_typed<B: Backend>(
     (text, result_ids.len(), elapsed)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn large_chat() -> Result<(), Box<dyn Error>> {
     println!("xLSTMLarge Text Generation - Rust Port");
     println!("========================================\n");
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Uso: cargo run --bin large_chat -- <archivo.txt>");
-        std::process::exit(1);
-    }
-
-    let text_file = &args[1];
+    let text_file = if args.len() >= 2 {
+        args[1].clone()
+    } else {
+        print!("Archivo de dataset (txt): ");
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        let trimmed = input.trim().to_string();
+        if trimmed.is_empty() {
+            eprintln!("No se proporcionó archivo.");
+            std::process::exit(1);
+        }
+        trimmed
+    };
     let mut tokenizer_path = "llarge_v1_cuda.json".to_string();
     let mut model_file = "llarge_v1_model_cuda.mpk".to_string();
 
@@ -438,7 +445,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Tokenizer::load(&tokenizer_path.to_string())?
     } else {
         println!("Entrenando nuevo tokenizador BPE...");
-        let text = fs::read_to_string(text_file)?;
+        let text = fs::read_to_string(&text_file)?;
         let tokenizer = Tokenizer::from_text(&text, target_vocab_size)?;
         tokenizer.save(&tokenizer_path.to_string())?;
         tokenizer
@@ -495,7 +502,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         for epoch in 0..num_epochs {
             let mut total_loss = 0.0;
-            let fragments = FileFragmentIterator::new(Path::new(text_file), 1)?;
+            let fragments = FileFragmentIterator::new(Path::new(&text_file), 1)?;
             let mut batch_count = 0;
             let epoch_start = Instant::now();
 
@@ -601,4 +608,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn main() {
+    if let Err(e) = large_chat() { eprintln!("Error: {}", e); }
 }

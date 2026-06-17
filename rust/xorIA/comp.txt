@@ -1,6 +1,8 @@
+cargo run --release --bin xoria
+
 cargo run --release --bin msltmchat -- input.txt
 
-
+cargo build --release --bin xlstm
 
 cargo run --release --bin slstmchat -- input.txt
 
@@ -156,6 +158,7 @@ cargo run --release --bin transformer_bit2 -- --infer
 
 cargo run --bin transformer_bit2 --release -- --compare
 
+cargo run --bin transformer_bit2_cuda --release -- --compare
 
 cargo run --bin transformer_bit2 --release -- xorIA/input.txt
 

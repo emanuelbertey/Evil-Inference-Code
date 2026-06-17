@@ -275,7 +275,7 @@ where <B as Backend>::FloatElem: num_traits::ToPrimitive {
     tokenizer.decode(&generated)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn mingruchat_cuda() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut text_file = String::new();
 
@@ -440,4 +440,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[allow(dead_code)]
+fn main() {
+    if let Err(e) = mingruchat_cuda() {
+        eprintln!("Error: {}", e);
+    }
 }

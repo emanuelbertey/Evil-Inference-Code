@@ -47,7 +47,7 @@ name = "msltmchat_gpu"
 path = "xorIA/msltmchat (webgpu).rs"
 
 [[bin]]
-name = "main"
+name = "xoria"
 path = "src/main.rs"
 
 [[bin]]
@@ -210,12 +210,12 @@ name = "bit_transformer_cuda"
 path = "xorIA/bit_transformer/main_cuda.rs"
 
 [[bin]]
-name = "transformer_bit2"
-path = "xorIA/transformer_bit2/main.rs"
+name = "xoria_bit"
+path = "xorIA/xoria_bit.rs"
 
 [[bin]]
-name = "transformer_bit2_cuda"
-path = "xorIA/transformer_bit2/main_cuda.rs"
+name = "xoria_bit_cuda"
+path = "xorIA/xoria_bit_cuda.rs"
 
 [[bin]]
 name = "bench_kernels"

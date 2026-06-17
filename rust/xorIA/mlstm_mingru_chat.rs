@@ -20,12 +20,12 @@ use burn::{
 };
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
+use burn_flex::Flex;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
-use burn_ndarray::NdArray;
 use tokenizers::decoders::metaspace::Metaspace as MetaspaceDecoder;
 use tokenizers::models::bpe::{BpeTrainerBuilder, BPE};
 use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
@@ -33,7 +33,7 @@ use tokenizers::tokenizer::Tokenizer as HFTokenizer;
 use tokenizers::models::TrainerWrapper;
 
 use xlstm::{LearningRateConfig, LstmType, XLstm, XLstmconfig, BlockType};
-type MyBackend = Autodiff<NdArray<f32>>;
+type MyBackend = Autodiff<Flex<f32>>;
 
 /// Tokenizador profesional usando la librería 'tokenizers' de Hugging Face
 pub struct Tokenizer {

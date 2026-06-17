@@ -16,12 +16,12 @@ use burn::{
 use burn::grad_clipping::GradientClippingConfig;
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
+use burn_flex::Flex;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
-use burn_ndarray::NdArray;
 use tokenizers::decoders::metaspace::Metaspace as MetaspaceDecoder;
 use tokenizers::models::bpe::{BpeTrainerBuilder, BPE};
 use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
@@ -37,7 +37,7 @@ use xlstm::blocks::slstm::layer::SLSTMLayerConfig;
 use xlstm::components::feedforward::GatedFeedForwardConfig;
 
 // Use NdArray backend with Autodiff
-type MyBackend = Autodiff<NdArray<f32>>;
+type MyBackend = Autodiff<Flex<f32>>;
 
 /// Professional Tokenizer using Hugging Face 'tokenizers'
 pub struct Tokenizer {
@@ -234,17 +234,25 @@ fn generate_text<B: Backend>(
     (text, result_ids.len(), elapsed)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn msltmchat() -> Result<(), Box<dyn Error>> {
     println!("xLSTM Text Generation - Migrated to new Rust port");
     println!("================================================\n");
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Uso: cargo run --bin msltmchat -- <archivo.txt>");
-        std::process::exit(1);
-    }
-
-    let text_file = &args[1];
+    let text_file = if args.len() >= 2 {
+        args[1].clone()
+    } else {
+        print!("Archivo de dataset (txt): ");
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        let trimmed = input.trim().to_string();
+        if trimmed.is_empty() {
+            eprintln!("No se proporcionó archivo.");
+            std::process::exit(1);
+        }
+        trimmed
+    };
     let tokenizer_path = "tokenizer.json";
     let model_path = "xlstm_chat_model"; 
 
@@ -255,7 +263,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Tokenizer::load(tokenizer_path)?
     } else {
         println!("Entrenando nuevo tokenizador BPE...");
-        let text = fs::read_to_string(text_file)?;
+        let text = fs::read_to_string(&text_file)?;
         let tokenizer = Tokenizer::from_text(&text, target_vocab_size)?;
         tokenizer.save(tokenizer_path)?;
         tokenizer
@@ -264,7 +272,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vocab_size = tokenizer.vocab_size();
     println!("Tamaño del vocabulario: {}\n", vocab_size);
 
-    let text = fs::read_to_string(text_file)?;
+    let text = fs::read_to_string(&text_file)?;
     let tokens = tokenizer.encode(&text);
     println!("Tokens totales: {}\n", tokens.len());
 
@@ -479,4 +487,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[allow(dead_code)]
+fn main() {
+    if let Err(e) = msltmchat() {
+        eprintln!("Error: {}", e);
+    }
 }
