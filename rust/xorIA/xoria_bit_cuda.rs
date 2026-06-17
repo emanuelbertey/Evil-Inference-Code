@@ -344,12 +344,19 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
         let mut batch_count = 0;
         let start_epoch = Instant::now();
         let fragments = FileFragmentIterator::new(Path::new(&text_file), 1)?;
+        let mut total_frags = 0usize;
 
         for (frag_idx, fragment) in fragments.enumerate() {
+            total_frags += 1;
             let tokens = tokenizer.encode(&fragment);
             let tpb = batch_size * seq_len;
             let nb = tokens.len() / tpb;
-            if nb == 0 { continue; }
+            if nb == 0 {
+                if frag_idx == 0 || frag_idx == total_frags - 1 {
+                    println!("\n  [debug] Frag {}: {} bytes, {} tokens, {} batches (skipped)", frag_idx, fragment.len(), tokens.len(), nb);
+                }
+                continue;
+            }
 
             for b in 0..nb {
                 let (x, y) = create_batch::<MyBackend>(&tokens, b * tpb, batch_size, seq_len, stride, &device);

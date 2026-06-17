@@ -453,12 +453,19 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
         let mut batch_count = 0;
         let start_epoch = Instant::now();
         let fragments = FileFragmentIterator::new(text_path, 1)?;
+        let mut total_frags = 0usize;
 
         for (frag_idx, fragment) in fragments.enumerate() {
+            total_frags += 1;
             let tokens = tokenizer.encode(&fragment);
             let tokens_per_batch = batch_size * seq_len;
             let num_batches = tokens.len() / tokens_per_batch;
-            if num_batches == 0 { continue; }
+            if num_batches == 0 {
+                if frag_idx == 0 || frag_idx == total_frags - 1 {
+                    println!("\n  [debug] Frag {}: {} bytes, {} tokens, {} batches (skipped)", frag_idx, fragment.len(), tokens.len(), num_batches);
+                }
+                continue;
+            }
 
             for b in 0..num_batches {
                 let start_idx = b * tokens_per_batch;
