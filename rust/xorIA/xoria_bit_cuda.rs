@@ -220,6 +220,26 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
                 _ => continue,
             }
         }
+    } else {
+        loop {
+            println!("\n--- NUEVO MODELO — CONFIGURACIÓN ---");
+            println!("  (1) d_model: {}  (2) Layers: {}  (3) Heads: {}", d_model, num_layers, num_heads);
+            println!("  (4) LR: {}  (5) Épocas: {}  (6) Batch: {}", lr, num_epochs, batch_size);
+            println!("------------------------------------");
+            print!("¿Entrenar (e) o Ajustar (s)? [e/s]: ");
+            io::stdout().flush()?;
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice)?;
+            match choice.trim().to_lowercase().as_str() {
+                "e" => break,
+                "s" => {
+                    macro_rules! rp { ($l:expr, $v:expr) => { print!("{} [{}]: ", $l, $v); io::stdout().flush().unwrap(); let mut b = String::new(); io::stdin().read_line(&mut b).unwrap(); if let Ok(v) = b.trim().parse() { $v = v; } }; }
+                    rp!("d_model", d_model); rp!("Layers", num_layers); rp!("Heads", num_heads);
+                    rp!("LR", lr); rp!("Épocas", num_epochs); rp!("Batch", batch_size);
+                }
+                _ => continue,
+            }
+        }
     }
 
     let device = Default::default();

@@ -284,6 +284,28 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
                 read_param!("R-Pen", repetition_penalty);
             }
         }
+    } else {
+        loop {
+            println!("\n--- NUEVO MODELO — CONFIGURACIÓN ---");
+            println!("  (1) d_model: {}  (2) Layers: {}  (3) Heads: {}", d_model, num_layers, num_heads);
+            println!("  (4) LR: {}  (5) Épocas: {}  (6) Batch: {}", lr, num_epochs, batch_size);
+            println!("------------------------------------");
+            print!("¿Entrenar (e) o Ajustar (s)? [e/s]: ");
+            io::stdout().flush()?;
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice)?;
+            let choice = choice.trim().to_lowercase();
+            if choice == "e" { break; }
+            else if choice == "s" {
+                macro_rules! read_param { ($label:expr, $val:expr) => { print!("{} [{}]: ", $label, $val); io::stdout().flush()?; let mut buf = String::new(); io::stdin().read_line(&mut buf)?; if let Ok(v) = buf.trim().parse() { $val = v; } }; }
+                read_param!("d_model", d_model);
+                read_param!("Layers", num_layers);
+                read_param!("Heads", num_heads);
+                read_param!("LR", lr);
+                read_param!("Épocas", num_epochs);
+                read_param!("Batch", batch_size);
+            }
+        }
     }
 
     let device = Default::default();
