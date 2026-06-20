@@ -4,7 +4,7 @@ use burn_flex::Flex;
 
 type B = Flex<f32>;
 
-const MAX_CACHE: usize = 4096;
+const MAX_CACHE: usize = 16096;
 const HEAD_DIM: usize = 128;
 const NUM_KV_GROUPS: usize = 8;
 
