@@ -156,4 +156,196 @@ fn main() {
         run::<B>("bucket64+take", 4096, *seq_ppc, 2, &d);
         println!();
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // RoPE Benchmark
+    // ═══════════════════════════════════════════════════════════════
+    println!("\n=== RoPE Benchmark ===\n");
+    rope_benchmark::run::<B>(&d);
+}
+
+mod rope_benchmark {
+    use std::time::Instant;
+    use burn::tensor::{Tensor, backend::Backend, TensorData};
+    use super::{B, HEAD_DIM, NUM_KV_GROUPS};
+
+    fn make_qk<Bt: Backend>(batch: usize, seq: usize, nheads: usize, nkv: usize, dim: usize, d: &Bt::Device)
+        -> (Tensor<Bt,4>, Tensor<Bt,4>)
+    {
+        let n = batch * seq * nheads * dim;
+        let nk = batch * seq * nkv * dim;
+        (Tensor::from_data(TensorData::new(vec![0.5f32; n], [batch, seq, nheads, dim]), d),
+         Tensor::from_data(TensorData::new(vec![0.3f32; nk], [batch, seq, nkv, dim]), d))
+    }
+
+    fn precompute_cos_sin_2d<Bt: Backend>(max_seq: usize, dim: usize, d: &Bt::Device) -> (Tensor<Bt,2>, Tensor<Bt,2>) {
+        let theta: Vec<f32> = (0..dim/2).map(|i| 1.0/10000.0f32.powf(2.0*i as f32/dim as f32)).collect();
+        let theta_t = Tensor::<Bt,1>::from_data(TensorData::new(theta, [dim/2]), d);
+        let pos: Vec<f32> = (0..max_seq).map(|p| p as f32).collect();
+        let pos_t = Tensor::<Bt,1>::from_data(TensorData::new(pos, [max_seq]), d);
+        let ang = pos_t.reshape([max_seq,1]) * theta_t.reshape([1,dim/2]);
+        (ang.clone().cos(), ang.sin())
+    }
+
+    fn precompute_cos_sin_4d<Bt: Backend>(max_seq: usize, dim: usize, d: &Bt::Device) -> (Tensor<Bt,4>, Tensor<Bt,4>) {
+        let theta: Vec<f32> = (0..dim/2).map(|i| 1.0/10000.0f32.powf(2.0*i as f32/dim as f32)).collect();
+        let theta_t = Tensor::<Bt,1>::from_data(TensorData::new(theta, [dim/2]), d);
+        let pos: Vec<f32> = (0..max_seq).map(|p| p as f32).collect();
+        let pos_t = Tensor::<Bt,1>::from_data(TensorData::new(pos, [max_seq]), d);
+        let ang = pos_t.reshape([max_seq,1]) * theta_t.reshape([1,dim/2]);
+        (ang.clone().cos().reshape([max_seq,1,1,dim/2]), ang.sin().reshape([max_seq,1,1,dim/2]))
+    }
+
+    // ── Strategy 0: OLD apply_rope (recompute theta every call) ──
+    fn apply_rope_old<Bt: Backend>(q: Tensor<Bt,4>, k: Tensor<Bt,4>, offset: usize) -> (Tensor<Bt,4>, Tensor<Bt,4>) {
+        let [_, seq_len, _nh, head_dim] = q.dims();
+        let theta: Vec<f32> = (0..head_dim/2).map(|i| 1.0/10000.0f32.powf(2.0*i as f32/head_dim as f32)).collect();
+        let theta_t = Tensor::<Bt,1>::from_data(TensorData::new(theta, [head_dim/2]), &q.device());
+        let pos: Vec<f32> = (offset..offset+seq_len).map(|p| p as f32).collect();
+        let pos_t = Tensor::<Bt,1>::from_data(TensorData::new(pos, [seq_len]), &q.device());
+        let ang = pos_t.reshape([seq_len,1]) * theta_t.reshape([1,head_dim/2]);
+        let cos = ang.clone().cos().reshape([1,seq_len,1,head_dim/2]);
+        let sin = ang.sin().reshape([1,seq_len,1,head_dim/2]);
+
+        let q1 = q.clone().slice([0..1,0..seq_len,0.._nh,0..head_dim/2]);
+        let q2 = q.clone().slice([0..1,0..seq_len,0.._nh,head_dim/2..head_dim]);
+        let k1 = k.clone().slice([0..1,0..seq_len,0..k.dims()[2],0..head_dim/2]);
+        let k2 = k.clone().slice([0..1,0..seq_len,0..k.dims()[2],head_dim/2..head_dim]);
+
+        (Tensor::cat(vec![q1.clone()*cos.clone()-q2.clone()*sin.clone(), q1*sin.clone()+q2*cos.clone()],3),
+         Tensor::cat(vec![k1.clone()*cos.clone()-k2.clone()*sin.clone(), k1*sin+k2*cos],3))
+    }
+
+    // ── Strategy 1: apply_rope_cached with narrow+reshape+chunk (BEFORE optimization) ──
+    fn apply_rope_cached_old<Bt: Backend>(q: Tensor<Bt,4>, k: Tensor<Bt,4>, cos_sin: (&Tensor<Bt,2>, &Tensor<Bt,2>), offset: usize) -> (Tensor<Bt,4>, Tensor<Bt,4>) {
+        let [_, seq_len, _nh, head_dim] = q.dims();
+        let cos = cos_sin.0.clone().narrow(0, offset, seq_len)
+            .reshape([1, seq_len, 1, head_dim/2]);
+        let sin = cos_sin.1.clone().narrow(0, offset, seq_len)
+            .reshape([1, seq_len, 1, head_dim/2]);
+
+        let q_chunks = q.chunk(2, 3);
+        let (q1, q2) = (q_chunks[0].clone(), q_chunks[1].clone());
+        let k_chunks = k.chunk(2, 3);
+        let (k1, k2) = (k_chunks[0].clone(), k_chunks[1].clone());
+
+        (Tensor::cat(vec![q1.clone()*cos.clone()-q2.clone()*sin.clone(), q1*sin.clone()+q2*cos.clone()],3),
+         Tensor::cat(vec![k1.clone()*cos.clone()-k2.clone()*sin.clone(), k1*sin+k2*cos],3))
+    }
+
+    // ── Strategy 2: apply_rope_cached with narrow (no reshape, 4D cache) ──
+    fn apply_rope_cached_new<Bt: Backend>(q: Tensor<Bt,4>, k: Tensor<Bt,4>, cos_sin: (&Tensor<Bt,4>, &Tensor<Bt,4>), offset: usize) -> (Tensor<Bt,4>, Tensor<Bt,4>) {
+        let [_, seq_len, _nh, head_dim] = q.dims();
+        let cos = cos_sin.0.clone().narrow(0, offset, seq_len);
+        let sin = cos_sin.1.clone().narrow(0, offset, seq_len);
+
+        let h_half = head_dim/2;
+        let b = q.dims()[0];
+        let q1 = q.clone().slice([0..b,0..seq_len,0.._nh,0..h_half]);
+        let q2 = q.clone().slice([0..b,0..seq_len,0.._nh,h_half..head_dim]);
+        let k_nkv = k.dims()[2];
+        let k1 = k.clone().slice([0..b,0..seq_len,0..k_nkv,0..h_half]);
+        let k2 = k.clone().slice([0..b,0..seq_len,0..k_nkv,h_half..head_dim]);
+
+        (Tensor::cat(vec![q1.clone()*cos.clone()-q2.clone()*sin.clone(), q1*sin.clone()+q2*cos.clone()],3),
+         Tensor::cat(vec![k1.clone()*cos.clone()-k2.clone()*sin.clone(), k1*sin+k2*cos],3))
+    }
+
+    // ── Strategy 3: FUSED kernel (raw as_slice, in-place mutation) ──
+    fn apply_rope_fused<Bt: Backend>(q: Tensor<Bt,4>, k: Tensor<Bt,4>, offset: usize) -> (Tensor<Bt,4>, Tensor<Bt,4>) {
+        let [batch, seq_len, nheads, head_dim] = q.dims();
+        let nkv = k.dims()[2];
+        let hh = head_dim / 2;
+
+        let device = q.device();
+        let q_data = q.into_data();
+        let k_data = k.into_data();
+        let mut q_slice = q_data.as_slice::<f32>().unwrap().to_vec();
+        let mut k_slice = k_data.as_slice::<f32>().unwrap().to_vec();
+
+        let theta: Vec<f32> = (0..hh).map(|i| 1.0 / 10000.0f32.powf(2.0 * i as f32 / head_dim as f32)).collect();
+
+        for b in 0..batch {
+            for s in 0..seq_len {
+                let pos = offset + s;
+                for h in 0..nheads {
+                    let base_q = (b * seq_len + s) * nheads * head_dim + h * head_dim;
+                    for i in 0..hh {
+                        let cos = (pos as f32 * theta[i]).cos();
+                        let sin = (pos as f32 * theta[i]).sin();
+                        let q1 = q_slice[base_q + i];
+                        let q2 = q_slice[base_q + i + hh];
+                        q_slice[base_q + i] = q1 * cos - q2 * sin;
+                        q_slice[base_q + i + hh] = q1 * sin + q2 * cos;
+                    }
+                }
+                for h in 0..nkv {
+                    let base_k = (b * seq_len + s) * nkv * head_dim + h * head_dim;
+                    for i in 0..hh {
+                        let cos = (pos as f32 * theta[i]).cos();
+                        let sin = (pos as f32 * theta[i]).sin();
+                        let k1 = k_slice[base_k + i];
+                        let k2 = k_slice[base_k + i + hh];
+                        k_slice[base_k + i] = k1 * cos - k2 * sin;
+                        k_slice[base_k + i + hh] = k1 * sin + k2 * cos;
+                    }
+                }
+            }
+        }
+
+        let q_out = Tensor::<Bt,4>::from_data(TensorData::new(q_slice, [batch, seq_len, nheads, head_dim]), &device);
+        let k_out = Tensor::<Bt,4>::from_data(TensorData::new(k_slice, [batch, seq_len, nkv, head_dim]), &device);
+        (q_out, k_out)
+    }
+
+    pub fn run<Bt: Backend>(d: &Bt::Device) {
+        let nheads = NUM_KV_GROUPS; // simplified: nheads == nkv for test
+        let nkv = NUM_KV_GROUPS;
+
+        let (cos2, sin2) = precompute_cos_sin_2d::<Bt>(4096, HEAD_DIM, d);
+        let (cos4, sin4) = precompute_cos_sin_4d::<Bt>(4096, HEAD_DIM, d);
+
+        // Prefill: seq_len=128 tokens all at once
+        // Inference: seq_len=1 token at a time
+        for &seq_len in &[1usize, 128] {
+            let iters = if seq_len == 1 { 4096 } else { 32 };
+            let (q, k) = make_qk(1, seq_len, nheads, nkv, HEAD_DIM, d);
+
+            // ── OLD apply_rope (no cache, recompute theta) ──
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                let _ = apply_rope_old(q.clone(), k.clone(), 0);
+            }
+            let t_old = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+            // verify correctness by running once
+            let _ = apply_rope_old(q.clone(), k.clone(), 0);
+
+            // ── CACHED old: narrow+reshape+chunk ──
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                let _ = apply_rope_cached_old(q.clone(), k.clone(), (&cos2, &sin2), 0);
+            }
+            let t_cached_old = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            // ── CACHED new: slice direct ──
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                let _ = apply_rope_cached_new(q.clone(), k.clone(), (&cos4, &sin4), 0);
+            }
+            let t_cached_new = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            // ── FUSED: raw slice in-place ──
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                let _ = apply_rope_fused(q.clone(), k.clone(), 0);
+            }
+            let t_fused = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            println!("seq_len={}:", seq_len);
+            println!("  apply_rope (recompute theta)     {:8.3}ms", t_old);
+            println!("  apply_rope_cached (narrow+chunk)  {:8.3}ms", t_cached_old);
+            println!("  apply_rope_cached (slice direct)  {:8.3}ms", t_cached_new);
+            println!("  apply_rope_fused (raw as_slice)   {:8.3}ms", t_fused);
+        }
+    }
 }
