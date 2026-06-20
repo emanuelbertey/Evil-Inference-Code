@@ -34,6 +34,22 @@ use xlstm::blocks::trasformer_bit::bitnet_export::{export_bitnet, load_bitnet, i
 
 type MyBackend = Autodiff<burn_cuda::Cuda<f32>>;
 
+#[derive(serde::Deserialize, Debug)]
+struct TrainConfig {
+    layers: Option<usize>,
+    d_model: Option<usize>,
+    num_heads: Option<usize>,
+    batch: Option<usize>,
+    lr: Option<f64>,
+    epochs: Option<usize>,
+}
+
+fn load_config() -> Option<TrainConfig> {
+    let path = std::env::args().nth(1).clone().unwrap_or_else(|| "config.toml".to_string());
+    let content = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&content).ok()
+}
+
 fn generate_text_cached<B: burn::tensor::backend::Backend>(
     model: &TransformerBitLinearLM<B>,
     inf_state: &TransformerInferenceState,
@@ -197,7 +213,18 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
     let mut batch_size: usize = 8;
 
     let mut modo_inferencia = false;
-    if model_exists {
+
+    // ─── Auto-config desde config.toml ──────────────────────────────
+    if let Some(cfg) = load_config() {
+        println!("config.toml encontrado — usando parámetros automáticos.");
+        d_model = cfg.d_model.unwrap_or(d_model);
+        num_layers = cfg.layers.unwrap_or(num_layers);
+        num_heads = cfg.num_heads.unwrap_or(num_heads);
+        lr = cfg.lr.unwrap_or(lr);
+        num_epochs = cfg.epochs.unwrap_or(num_epochs);
+        batch_size = cfg.batch.unwrap_or(batch_size);
+        if model_exists { modo_inferencia = true; }
+    } else if model_exists {
         loop {
             println!("\n--- CONFIGURACIÓN ACTUAL ---");
             println!("  (1) d_model: {}  (2) Layers: {}  (3) Heads: {}", d_model, num_layers, num_heads);
@@ -383,12 +410,12 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
             println!("  ⚠ Error exportando .bitnet: {}", e);
         }
 
-        if (epoch+1) % 2 == 0 {
+       /* if (epoch+1) % 2 == 0 {
             let inf_state = model.valid().build_inference_state(&device, KernelKind::I2S, KernelKind::I2S);
             let empty: Vec<Option<KVCache<burn_cuda::Cuda<f32>>>> = (0..num_layers).map(|_| None).collect();
             let (_, tc, el, _, _) = generate_text_cached(&model.clone().valid(), &inf_state, &tokenizer, "The world ", 30, temperature, top_k, top_p, repetition_penalty, empty, 0);
             println!("[{:.1} tok/s]", tc as f32 / el.max(0.001));
-        }
+        }*/
     }
     Ok(())
 }

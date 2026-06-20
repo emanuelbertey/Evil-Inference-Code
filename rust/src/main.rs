@@ -20,6 +20,10 @@ mod msltmchat_cuda;
 mod transformer_chat;
 #[path = "../xorIA/transformer_chat_cuda.rs"]
 mod transformer_chat_cuda;
+#[path = "../xorIA/auto_train.rs"]
+mod auto_train;
+#[path = "../xorIA/testlist.rs"]
+mod testlist;
 
 fn main() {
     println!();
@@ -43,11 +47,15 @@ fn main() {
     println!("║     7.  transformer_chat (CPU)    Transformer Chat       ║");
     println!("║     8.  transformer_chat_cuda (CUDA) Transformer GPU     ║");
     println!("║                                                          ║");
+    println!("║   Tools:                                                 ║");
+    println!("║     9.  auto_train      (auto)   HF + Training           ║");
+    println!("║     10. testlist                 Test Suite               ║");
+    println!("║                                                          ║");
     println!("║     q.  Salir                                            ║");
     println!("║                                                          ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
-    print!("  Seleccioná una opción [1-8/q]: ");
+    print!("  Seleccioná una opción [1-10/q]: ");
     io::stdout().flush().unwrap();
 
     let mut choice = String::new();
@@ -86,6 +94,14 @@ fn main() {
         "8" => {
             println!("\n  → transformer_chat_cuda (CUDA)...\n");
             if let Err(e) = transformer_chat_cuda::transformer_chat_cuda() { eprintln!("Error: {}", e); }
+        }
+        "9" => {
+            println!("\n  → auto_train (HF + Launcher)...\n");
+            if let Err(e) = auto_train::auto_train_main() { eprintln!("Error: {}", e); }
+        }
+        "10" => {
+            println!("\n  → testlist (Test Suite)...\n");
+            testlist::testlist_main();
         }
         "q" | "quit" | "salir" | "" => {
             println!("  Saliendo.");

@@ -1,0 +1,11 @@
+name = "transformer_bit2"
+url = "https://huggingface.co/ScortexIA/laurelia"
+model_mpk = "transformer_bit2.mpk"
+bpejson = "transformer_bit2_tokenizer.json"
+dataset = "dataset.txt"
+layers = 24
+d_model = 768
+batch = 29
+lr = 1e-3
+epochs = 10
+upload_interval_minutes = 10

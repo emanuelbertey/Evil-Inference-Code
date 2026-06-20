@@ -35,6 +35,22 @@ use xlstm::blocks::trasformer_bit::infer_bit;
 
 type MyBackend = Autodiff<Flex<f32>>;
 
+#[derive(serde::Deserialize, Debug)]
+struct TrainConfig {
+    layers: Option<usize>,
+    d_model: Option<usize>,
+    num_heads: Option<usize>,
+    batch: Option<usize>,
+    lr: Option<f64>,
+    epochs: Option<usize>,
+}
+
+fn load_config() -> Option<TrainConfig> {
+    let path = std::env::args().nth(1).clone().unwrap_or_else(|| "config.toml".to_string());
+    let content = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&content).ok()
+}
+
 // ─── Text Generation with I2S Kernel Inference ─────────────────────────────
 
 fn generate_text_cached<B: Backend>(
@@ -260,7 +276,18 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
     let mut batch_size: usize = 8;
 
     let mut modo_inferencia = false;
-    if model_exists {
+
+    // ─── Auto-config desde config.toml ──────────────────────────────
+    if let Some(cfg) = load_config() {
+        println!("config.toml encontrado — usando parámetros automáticos.");
+        d_model = cfg.d_model.unwrap_or(d_model);
+        num_layers = cfg.layers.unwrap_or(num_layers);
+        num_heads = cfg.num_heads.unwrap_or(num_heads);
+        lr = cfg.lr.unwrap_or(lr);
+        num_epochs = cfg.epochs.unwrap_or(num_epochs);
+        batch_size = cfg.batch.unwrap_or(batch_size);
+        if model_exists { modo_inferencia = true; }
+    } else if model_exists {
         loop {
             println!("\n--- CONFIGURACIÓN ACTUAL ---");
             println!("  (1) d_model: {}  (2) Layers: {}  (3) Heads: {}", d_model, num_layers, num_heads);
