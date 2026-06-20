@@ -220,7 +220,7 @@ impl<B: Backend> BitLinearRMSNorm<B> {
 
 // ─── KV Cache ──────────────────────────────────────────────────────────────
 
-pub const MAX_CACHE_LEN: usize = 256;
+pub const MAX_CACHE_LEN: usize = 4096; // 512 for short-term, can be increased if needed but will use more memory
 
 #[derive(Clone, Debug)]
 pub struct KVCache<B: Backend> {
