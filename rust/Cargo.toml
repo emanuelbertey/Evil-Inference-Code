@@ -232,3 +232,7 @@ path = "xorIA/bin/test_i2s_vs_i8.rs"
 [[bin]]
 name = "test_avx2_vs_i2s"
 path = "xorIA/bin/test_avx2_vs_i2s.rs"
+
+[[bin]]
+name = "test_kv_cache"
+path = "xorIA/bin/test_kv_cache.rs"
