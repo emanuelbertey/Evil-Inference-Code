@@ -1,12 +1,12 @@
 // ─── KuantGrad: Gradient Compression ──────────────────────────────
 //
 // Scheme: 8 gradientes por grupo.
-//   - 1 × f32  = intensidad del grupo (max abs)
+//   - 1 × f16  = intensidad del grupo (max abs, media precisión)
 //   - 8 × 5-bit = cuánto de esa intensidad aplica (0-31)
 //   - decoding: value = scale * ((q as f32) / 15.5 - 1.0)
 //     (q=0→-scale, q=15.5→0, q=31→+scale)
 //
-// Por grupo de 8: 4 + 5 = 9 bytes (vs 32 bytes sin comprimir) → 3.56×
+// Por grupo de 8: 2 + 5 = 7 bytes (vs 32 bytes sin comprimir) → 4.57×
 //
 // Las funciones trabajan con &[f32] y producen/consumen Vec<u8>.
 

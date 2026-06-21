@@ -27,7 +27,7 @@ use burn::prelude::*;
 use burn::module::{Module, Param};
 use burn::config::Config;
 use burn::tensor::TensorData;
-use super::kernel::{I2SKernel, I2STile16Kernel, KernelKind};
+use super::kernel::{I2SKernel, I2STile16Kernel, I2SAVX2Kernel, Tile16AVX2Kernel, KernelKind};
 
 // ─── Pure Raw Inference State ───────────────────────────────────────────────
 /// State completely detached from Burn Tensors for maximum CPU inference speed
@@ -64,6 +64,22 @@ impl BitLinearInferenceState {
                 self.out_features,
                 self.in_features,
             ),
+            KernelKind::Tile16AVX2 => I2SKernel::forward_raw(
+                x_quant_data, batch, &self.packed_w, &self.scales,
+                self.out_features, self.in_features,
+            ),
+            KernelKind::I2SAVX2 => {
+                match I2SAVX2Kernel::try_forward_raw_f32(
+                    x_quant_data, batch, &self.packed_w, &self.scales,
+                    self.out_features, self.in_features,
+                ) {
+                    Some(r) => r,
+                    None => I2SKernel::forward_raw(
+                        x_quant_data, batch, &self.packed_w, &self.scales,
+                        self.out_features, self.in_features,
+                    ),
+                }
+            },
         };
         
         if let Some(b) = &self.bias {
@@ -85,6 +101,22 @@ impl BitLinearInferenceState {
                 self.out_features, self.in_features,
             ),
             KernelKind::Tile16 => I2STile16Kernel::forward_raw_i8(
+                x_i8, batch, &self.packed_w, &self.scales,
+                self.out_features, self.in_features,
+            ),
+            KernelKind::Tile16AVX2 => {
+                match Tile16AVX2Kernel::try_forward_raw_i8(
+                    x_i8, batch, &self.packed_w, &self.scales,
+                    self.out_features, self.in_features,
+                ) {
+                    Some(r) => r,
+                    None => I2STile16Kernel::forward_raw_i8(
+                        x_i8, batch, &self.packed_w, &self.scales,
+                        self.out_features, self.in_features,
+                    ),
+                }
+            },
+            KernelKind::I2SAVX2 => I2STile16Kernel::forward_raw_i8(
                 x_i8, batch, &self.packed_w, &self.scales,
                 self.out_features, self.in_features,
             ),

@@ -16,6 +16,7 @@ use burn_autodiff::Autodiff;
 use burn::module::Module;
 use burn::optim::{AdamConfig, Optimizer, GradientsParams};
 use xlstm::blocks::bitlinear::layer::{BitLinear, BitLinearConfig};
+use xlstm::blocks::kuantgrad::adamw::{AdamWConfig, AdamWState};
 use xlstm::blocks::kuantgrad::compress::{compress, decompress};
 
 type MyBackend = Autodiff<Flex<f32>>;
@@ -131,31 +132,8 @@ impl TinyBitNet {
     }
 }
 
-// ─── AdamW simple ─────────────────────────────────────────────────
-struct AdamWState {
-    m: Vec<f32>,
-    v: Vec<f32>,
-    t: i32,
-}
-
-impl AdamWState {
-    fn new(n: usize) -> Self {
-        Self { m: vec![0.0; n], v: vec![0.0; n], t: 0 }
-    }
-
-    fn step(params: &mut [f32], grads: &[f32], state: &mut Self, lr: f32,
-            beta1: f32, beta2: f32, eps: f32, wd: f32) {
-        state.t += 1;
-        for i in 0..params.len() {
-            let g = grads[i] + wd * params[i];
-            state.m[i] = beta1 * state.m[i] + (1.0 - beta1) * g;
-            state.v[i] = beta2 * state.v[i] + (1.0 - beta2) * g * g;
-            let m_hat = state.m[i] / (1.0 - beta1.powi(state.t));
-            let v_hat = state.v[i] / (1.0 - beta2.powi(state.t));
-            params[i] -= lr * m_hat / (v_hat.sqrt() + eps);
-        }
-    }
-}
+// ─── AdamW del módulo kuantgrad ───────────────────────────────────
+// Se usa AdamWConfig + AdamWState de xlstm::blocks::kuantgrad::adamw
 
 // ─── BitNet real con BitLinear del codebase ───────────────────────
 #[derive(Module, Debug)]
@@ -262,11 +240,7 @@ pub fn test_kuantgrad_main() -> Result<(), Box<dyn Error>> {
     let mut model_b = model_a.clone();
 
     let eps = 1e-4;
-    let lr = 0.01;
-    let beta1 = 0.9;
-    let beta2 = 0.999;
-    let adam_eps = 1e-8;
-    let wd = 1e-4;
+    let adam_cfg = AdamWConfig { lr: 0.01, beta1: 0.9, beta2: 0.999, eps: 1e-8, wd: 1e-4 };
 
     // Inicializar estados AdamW
     let pnl = param_names_and_lens(&model_a);
@@ -277,9 +251,9 @@ pub fn test_kuantgrad_main() -> Result<(), Box<dyn Error>> {
     let device = Default::default();
     let mut model_c = BitNet3Layer::<MyBackend>::new(&device);
     let mut optim_c = AdamConfig::new()
-        .with_weight_decay(Some(burn::optim::decay::WeightDecayConfig::new(wd)))
+        .with_weight_decay(Some(burn::optim::decay::WeightDecayConfig::new(adam_cfg.wd)))
         .init::<MyBackend, BitNet3Layer<MyBackend>>();
-    let lr_c = lr as f64;
+    let lr_c = adam_cfg.lr as f64;
 
     // Pre-convertir datos a tensores Burn una sola vez
     let (train_xs, train_ys) = data_to_tensors(&train);
@@ -319,8 +293,8 @@ pub fn test_kuantgrad_main() -> Result<(), Box<dyn Error>> {
 
         // Aplicar AdamW a modelos A y B
         for pi in 0..pnl.len() {
-            AdamWState::step(param_mut(&mut model_a, pi), &grads_a[pi], &mut states_a[pi], lr, beta1, beta2, adam_eps, wd);
-            AdamWState::step(param_mut(&mut model_b, pi), &grads_b[pi], &mut states_b[pi], lr, beta1, beta2, adam_eps, wd);
+            states_a[pi].step(param_mut(&mut model_a, pi), &grads_a[pi], &adam_cfg);
+            states_b[pi].step(param_mut(&mut model_b, pi), &grads_b[pi], &adam_cfg);
         }
 
         // ── Modelo C: BitNet real + Burn AdamW ──
