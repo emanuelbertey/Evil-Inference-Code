@@ -173,3 +173,7 @@ cargo run --release --bin bitlinear_comparisons
 cargo run --release --bin lstm_chat_test_dual
 
 cargo run --release --bin bitlinear_comparison
+
+cargo build --release --bin test_kv_cache
+
+cargo run --release --bin test_kv_cache

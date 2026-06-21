@@ -6,4 +6,5 @@ pub mod minrnn;
 pub mod bitlinear;
 pub mod trasformer;
 pub mod trasformer_bit;
-
+pub mod kuantgrad;
+pub mod turbokuant;

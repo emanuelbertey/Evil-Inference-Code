@@ -4,6 +4,8 @@ pub const GROUP_SIZE: usize = 128;
 pub enum KernelKind {
     I2S,
     Tile16,
+    Tile16AVX2,
+    I2SAVX2,
 }
 
 pub struct I2SKernel;
@@ -831,5 +833,262 @@ impl I2STile16Kernel {
         });
 
         out
+    }
+}
+
+// ─── Tile16AVX2Kernel: AVX2 single-thread (Tile16-style) ────────
+pub struct Tile16AVX2Kernel;
+
+#[cfg(target_arch = "x86_64")]
+impl Tile16AVX2Kernel {
+    pub fn pack_weights(weights: &[f32]) -> Vec<u32> {
+        I2SKernel::pack_weights(weights)
+    }
+
+    /// Forward i8 single-thread con AVX2.
+    /// Retorna None si AVX2 no está disponible en la CPU.
+    pub fn try_forward_raw_i8(
+        x_i8: &[i8], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Option<Vec<f32>> {
+        if !is_x86_feature_detected!("avx2") {
+            return None;
+        }
+        Some(unsafe { Self::forward_raw_i8_avx2(x_i8, batch, packed_w, scales, out_features, in_features) })
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn forward_raw_i8_avx2(
+        x_i8: &[i8], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+        let mut out = vec![0.0f32; batch * out_features];
+        let sc_len = scales.len();
+        for b in 0..batch {
+            let x_off = b * in_features;
+            for o in 0..out_features {
+                let base_g = o * n_groups_per_row;
+                let mut row_sum = 0.0f32;
+                let w_row_base = o * in_features;
+                for gi in 0..n_groups_per_row {
+                    let raw = Self::dot_group_inline(
+                        packed_w.as_ptr().add((w_row_base + gi * GROUP_SIZE) / 16),
+                        x_i8.as_ptr().add(x_off + gi * GROUP_SIZE),
+                    );
+                    row_sum += raw as f32 * *scales.get_unchecked((base_g + gi).min(sc_len - 1));
+                }
+                if rem > 0 {
+                    let mut tail_sum = 0i32;
+                    let w_base = w_row_base + n_groups_per_row * GROUP_SIZE;
+                    let x_base = x_off + n_groups_per_row * GROUP_SIZE;
+                    for j in 0..rem {
+                        let local = j & 15;
+                        let bits = (*packed_w.get_unchecked((w_base + j) >> 4) >> (local << 1)) & 0b11;
+                        tail_sum += (bits as i32 - 1) * *x_i8.get_unchecked(x_base + j) as i32;
+                    }
+                    row_sum += tail_sum as f32 * *scales.get_unchecked((base_g + n_groups_per_row).min(sc_len - 1));
+                }
+                *out.get_unchecked_mut(b * out_features + o) = row_sum;
+            }
+        }
+        out
+    }
+
+    /// AVX2: descomprime 32 pesos ternarios desde packed u32 y hace dot con 32 i8.
+    #[target_feature(enable = "avx2")]
+    unsafe fn dot_group_inline(packed: *const u32, x: *const i8) -> i32 {
+        use std::arch::x86_64::*;
+        let mut sum = _mm256_setzero_si256();
+        let mut c = 0usize;
+        while c + 31 < GROUP_SIZE {
+            let word_idx = c >> 4;
+            let p0 = *packed.add(word_idx);
+            let p1 = *packed.add(word_idx + 1);
+            let mut vals = [0i8; 32];
+            let mut i = 0usize;
+            while i < 16 {
+                *vals.get_unchecked_mut(i) = ((p0 >> (i << 1)) & 3) as i8 - 1;
+                *vals.get_unchecked_mut(i + 16) = ((p1 >> (i << 1)) & 3) as i8 - 1;
+                i += 1;
+            }
+            let w = _mm256_loadu_si256(vals.as_ptr() as *const __m256i);
+            let x_vec = _mm256_loadu_si256(x.add(c) as *const __m256i);
+            let w_lo = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(w, 0));
+            let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(w, 1));
+            let x_lo = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(x_vec, 0));
+            let x_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(x_vec, 1));
+            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(w_lo, x_lo));
+            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(w_hi, x_hi));
+            c += 32;
+        }
+        let hi128 = _mm256_extracti128_si256(sum, 1);
+        let lo128 = _mm256_castsi256_si128(sum);
+        let pair = _mm_add_epi32(lo128, hi128);
+        let shuf = _mm_shuffle_epi32(pair, 0x4E);
+        let pair2 = _mm_add_epi32(pair, shuf);
+        let shuf2 = _mm_shuffle_epi32(pair2, 0xB1);
+        let result = _mm_add_epi32(pair2, shuf2);
+        _mm_cvtsi128_si32(result)
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+impl Tile16AVX2Kernel {
+    pub fn pack_weights(weights: &[f32]) -> Vec<u32> {
+        I2SKernel::pack_weights(weights)
+    }
+    pub fn try_forward_raw_i8(
+        _x_i8: &[i8], _batch: usize,
+        _packed_w: &[u32], _scales: &[f32],
+        _out_features: usize, _in_features: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+}
+
+// ─── I2SAVX2Kernel: I2S-style para f32 con AVX2 ─────────────────
+pub struct I2SAVX2Kernel;
+
+#[cfg(target_arch = "x86_64")]
+impl I2SAVX2Kernel {
+    pub fn pack_weights(weights: &[f32]) -> Vec<u32> {
+        I2SKernel::pack_weights(weights)
+    }
+
+    /// Forward f32 single-thread con I2S-style AVX2 (split pos/neg, sin mul).
+    pub fn try_forward_raw_f32(
+        x_data: &[f32], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Option<Vec<f32>> {
+        if !is_x86_feature_detected!("avx2") {
+            return None;
+        }
+        Some(unsafe { Self::forward_raw_f32_avx2(x_data, batch, packed_w, scales, out_features, in_features) })
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn forward_raw_f32_avx2(
+        x_data: &[f32], batch: usize,
+        packed_w: &[u32], scales: &[f32],
+        out_features: usize, in_features: usize,
+    ) -> Vec<f32> {
+        let n_groups_per_row = in_features / GROUP_SIZE;
+        let rem = in_features % GROUP_SIZE;
+        let mut out = vec![0.0f32; batch * out_features];
+        let sc_len = scales.len();
+        for b in 0..batch {
+            let x_off = b * in_features;
+            for o in 0..out_features {
+                let base_g = o * n_groups_per_row;
+                let mut row_sum = 0.0f32;
+                for gi in 0..n_groups_per_row {
+                    let raw = Self::compute_row_f32(
+                        x_data, x_off + gi * GROUP_SIZE,
+                        packed_w, o * in_features + gi * GROUP_SIZE,
+                        GROUP_SIZE,
+                    );
+                    row_sum += raw * *scales.get_unchecked((base_g + gi).min(sc_len - 1));
+                }
+                if rem > 0 {
+                    let mut sum = 0.0f32;
+                    let w_base = o * in_features + n_groups_per_row * GROUP_SIZE;
+                    let x_base = x_off + n_groups_per_row * GROUP_SIZE;
+                    for j in 0..rem {
+                        let bits = (*packed_w.get_unchecked((w_base + j) >> 4) >> ((j & 15) << 1)) & 0b11;
+                        let x_val = *x_data.get_unchecked(x_base + j);
+                        if bits == 0b10 { sum += x_val; }
+                        else if bits == 0b00 { sum -= x_val; }
+                    }
+                    row_sum += sum * *scales.get_unchecked((base_g + n_groups_per_row).min(sc_len - 1));
+                }
+                *out.get_unchecked_mut(b * out_features + o) = row_sum;
+            }
+        }
+        out
+    }
+
+    /// I2S-style row de un grupo: split pos/neg con AVX2 blendv (sin multiplicación).
+    #[target_feature(enable = "avx2")]
+    unsafe fn compute_row_f32(
+        x_data: &[f32], x_off: usize,
+        packed_w: &[u32], w_row_base: usize,
+        in_features: usize,
+    ) -> f32 {
+        use std::arch::x86_64::*;
+        let mut pos_acc = _mm256_setzero_ps();
+        let mut neg_acc = _mm256_setzero_ps();
+        let w_idx_base = w_row_base >> 4;
+        let zero = _mm256_setzero_ps();
+        let mut i = 0usize;
+
+        while i + 15 < in_features {
+            let packed = *packed_w.get_unchecked(w_idx_base + (i >> 4));
+            let x_base = x_off + i;
+
+            for half in 0..2 {
+                let shift = half * 16;
+                let x_ptr = x_data.as_ptr().add(x_base + half * 8);
+                let x_v = _mm256_loadu_ps(x_ptr);
+
+                let mut plus_bits = 0u8;
+                let mut minus_bits = 0u8;
+                for j in 0..8 {
+                    let bits = (packed >> (shift + j * 2)) & 0b11;
+                    if bits == 0b10 { plus_bits |= 1 << j; }
+                    else if bits == 0b00 { minus_bits |= 1 << j; }
+                }
+
+                let mut mask_arr = [-0.0f32; 8];
+                for j in 0..8 {
+                    if (plus_bits >> j) & 1 != 0 {
+                        mask_arr[j] = -1.0;
+                    }
+                }
+                let mask = _mm256_loadu_ps(mask_arr.as_ptr());
+                pos_acc = _mm256_add_ps(pos_acc, _mm256_blendv_ps(zero, x_v, mask));
+
+                for j in 0..8 {
+                    if (minus_bits >> j) & 1 != 0 {
+                        mask_arr[j] = -1.0;
+                    } else {
+                        mask_arr[j] = 0.0;
+                    }
+                }
+                let mask = _mm256_loadu_ps(mask_arr.as_ptr());
+                neg_acc = _mm256_add_ps(neg_acc, _mm256_blendv_ps(zero, x_v, mask));
+            }
+            i += 16;
+        }
+
+        let diff = _mm256_sub_ps(pos_acc, neg_acc);
+        let hi = _mm256_extractf128_ps(diff, 1);
+        let lo = _mm256_castps256_ps128(diff);
+        let pair = _mm_add_ps(lo, hi);
+        let shuf = _mm_shuffle_ps(pair, pair, 0x4E);
+        let pair2 = _mm_add_ps(pair, shuf);
+        let shuf2 = _mm_shuffle_ps(pair2, pair2, 0xB1);
+        let result = _mm_add_ps(pair2, shuf2);
+        let mut out = 0.0f32;
+        _mm_store_ss(&mut out as *mut f32, result);
+        out
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+impl I2SAVX2Kernel {
+    pub fn pack_weights(weights: &[f32]) -> Vec<u32> {
+        I2SKernel::pack_weights(weights)
+    }
+    pub fn try_forward_raw_f32(
+        _x_data: &[f32], _batch: usize,
+        _packed_w: &[u32], _scales: &[f32],
+        _out_features: usize, _in_features: usize,
+    ) -> Option<Vec<f32>> {
+        None
     }
 }

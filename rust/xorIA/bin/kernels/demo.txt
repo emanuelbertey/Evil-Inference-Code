@@ -1,0 +1,5 @@
+// XOR-encrypted demo: simple vector add
+extern "C" __global__ void vec_add(float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] += b[i];
+}

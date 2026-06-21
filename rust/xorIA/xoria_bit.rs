@@ -28,11 +28,28 @@ use xlstm::blocks::trasformer_bit::model::{
     Tokenizer, FileFragmentIterator, BitLinearQKVProjection, BitLinearOutputProjection,
     BitLinearSwiGLUFeedForward, BitLinearTransformerLayer, BitLinearRMSNorm,
     BitLinearTransformerStack, TransformerBitLinearLM, TransformerInferenceState, KVCache,
-    create_batch, sample_from_logits,
+    create_batch, sample_from_logits, MAX_CACHE_LEN,
 };
-use xlstm::blocks::trasformer_bit::bitnet_export::{export_bitnet, load_bitnet, load_bitnet_inference_state, is_bitnet_file, compare_models, compare_compatibility, report_inference_state_memory};
+use xlstm::blocks::trasformer_bit::bitnet_export::{export_bitnet, is_bitnet_file, compare_models, compare_compatibility, report_inference_state_memory, load_bitnet};
+use xlstm::blocks::trasformer_bit::infer_bit;
 
 type MyBackend = Autodiff<Flex<f32>>;
+
+#[derive(serde::Deserialize, Debug)]
+struct TrainConfig {
+    layers: Option<usize>,
+    d_model: Option<usize>,
+    num_heads: Option<usize>,
+    batch: Option<usize>,
+    lr: Option<f64>,
+    epochs: Option<usize>,
+}
+
+fn load_config() -> Option<TrainConfig> {
+    let path = std::env::args().nth(1).clone().unwrap_or_else(|| "config.toml".to_string());
+    let content = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&content).ok()
+}
 
 // ─── Text Generation with I2S Kernel Inference ─────────────────────────────
 
@@ -48,6 +65,7 @@ fn generate_text_cached<B: Backend>(
     repetition_penalty: f32,
     caches: Vec<Option<KVCache<B>>>,
     mut current_offset: usize,
+    max_ctx: usize,
 ) -> (String, usize, f32, Vec<Option<KVCache<B>>>, usize) {
     let ids = tokenizer.encode(seed_text);
     if ids.is_empty() { return (seed_text.to_string(), 0, 0.0, Vec::new(), current_offset); }
@@ -70,11 +88,12 @@ fn generate_text_cached<B: Backend>(
     current_offset += seed_len;
 
     // Trim rule
-    if current_offset > 255 {
+    if current_offset >= max_ctx.saturating_sub(1) {
         if let Some(Some(first)) = caches.get(0) {
-            if first.current_len > 254 {
-                for c in caches.iter_mut() { if let Some(ref mut kv) = c { kv.keep_last(170); } }
-                current_offset = 85;
+            if first.current_len >= max_ctx.saturating_sub(1) {
+                let keep = ((max_ctx as f64 * 0.2) as usize).max(1);
+                for c in caches.iter_mut() { if let Some(ref mut kv) = c { kv.keep_last(keep); } }
+                current_offset = keep;
             }
         }
     }
@@ -109,15 +128,16 @@ fn generate_text_cached<B: Backend>(
         caches = new_caches.into_iter().map(Some).collect();
         current_offset += 1;
 
-        // Trim rule during generation
-        if current_offset > 255 {
-            if let Some(Some(first)) = caches.get(0) {
-                if first.current_len > 254 {
-                    for c in caches.iter_mut() { if let Some(ref mut kv) = c { kv.keep_last(170); } }
-                    current_offset = 85;
+            // Trim rule during generation
+            if current_offset >= max_ctx.saturating_sub(1) {
+                if let Some(Some(first)) = caches.get(0) {
+                    if first.current_len >= max_ctx.saturating_sub(1) {
+                        let keep = ((max_ctx as f64 * 0.2) as usize).max(1);
+                        for c in caches.iter_mut() { if let Some(ref mut kv) = c { kv.keep_last(keep); } }
+                        current_offset = keep;
+                    }
                 }
             }
-        }
 
         let [_, _, v] = logits.dims();
         let logits_2d = logits.reshape([1, v]);
@@ -256,7 +276,18 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
     let mut batch_size: usize = 8;
 
     let mut modo_inferencia = false;
-    if model_exists {
+
+    // ─── Auto-config desde config.toml ──────────────────────────────
+    if let Some(cfg) = load_config() {
+        println!("config.toml encontrado — usando parámetros automáticos.");
+        d_model = cfg.d_model.unwrap_or(d_model);
+        num_layers = cfg.layers.unwrap_or(num_layers);
+        num_heads = cfg.num_heads.unwrap_or(num_heads);
+        lr = cfg.lr.unwrap_or(lr);
+        num_epochs = cfg.epochs.unwrap_or(num_epochs);
+        batch_size = cfg.batch.unwrap_or(batch_size);
+        if model_exists { modo_inferencia = true; }
+    } else if model_exists {
         loop {
             println!("\n--- CONFIGURACIÓN ACTUAL ---");
             println!("  (1) d_model: {}  (2) Layers: {}  (3) Heads: {}", d_model, num_layers, num_heads);
@@ -290,12 +321,13 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
             println!("  (1) d_model: {}  (2) Layers: {}  (3) Heads: {}", d_model, num_layers, num_heads);
             println!("  (4) LR: {}  (5) Épocas: {}  (6) Batch: {}", lr, num_epochs, batch_size);
             println!("------------------------------------");
-            print!("¿Entrenar (e) o Ajustar (s)? [e/s]: ");
+            print!("¿Entrenar (e){}, Ajustar (s)? [e{}/s]: ", if bitnet_exists { " Inferir (i)" } else { "" }, if bitnet_exists { "/i" } else { "" });
             io::stdout().flush()?;
             let mut choice = String::new();
             io::stdin().read_line(&mut choice)?;
             let choice = choice.trim().to_lowercase();
             if choice == "e" { break; }
+            else if choice == "i" && bitnet_exists { modo_inferencia = true; break; }
             else if choice == "s" {
                 macro_rules! read_param { ($label:expr, $val:expr) => { print!("{} [{}]: ", $label, $val); io::stdout().flush()?; let mut buf = String::new(); io::stdin().read_line(&mut buf)?; if let Ok(v) = buf.trim().parse() { $val = v; } }; }
                 read_param!("d_model", d_model);
@@ -321,12 +353,14 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
     let mut model: TransformerBitLinearLM<MyBackend>;
     let mut loaded_from_bitnet = false;
 
+    let mut loaded_state: Option<TransformerInferenceState> = None;
+
     if modo_inferencia && bitnet_exists && is_bitnet_file(&bitnet_file) {
-        println!("Cargando modelo BitNet directamente ({} MB)...", std::fs::metadata(&bitnet_file).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0));
-        let (loaded_model, warnings) = load_bitnet::<MyBackend>(&bitnet_file, &device)?;
+        println!("Cargando modelo BitNet ({} MB)...", std::fs::metadata(&bitnet_file).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0));
+        let (loaded_model, state) = infer_bit::load::<MyBackend>(&bitnet_file, &device, KernelKind::Tile16, KernelKind::I2S)?;
         model = loaded_model;
+        loaded_state = Some(state);
         loaded_from_bitnet = true;
-        for w in &warnings { println!("  {}", w); }
     } else {
         let layers = (0..num_layers).map(|_| {
             BitLinearTransformerLayer {
@@ -381,33 +415,34 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
         println!("Pre-computando kernels ternarios...");
         let inf_start = Instant::now();
         let mut model_v = model.valid();
-        let inf_state = if loaded_from_bitnet {
-            println!("  Cargando inference state directamente desde .bitnet (sin round-trip f32)...");
-            load_bitnet_inference_state(
-                &bitnet_file, d_model, num_heads, num_kv_groups, head_dim, ffn_dim, vocab_size,
-                KernelKind::Tile16, KernelKind::I2S,
-            )?
+        let inf_state = if let Some(s) = loaded_state {
+            println!("  Inference state ya cargado (sin f32).");
+            s
         } else {
-            let state = model_v.build_inference_state(&device, KernelKind::Tile16, KernelKind::I2S);
-            state
+            model_v.build_inference_state(&device, KernelKind::Tile16, KernelKind::I2S)
         };
         model_v.release_all_weights(&device);
-        println!("Kernels listos en {:.2}s (RAM 16-bit liberada)\n", inf_start.elapsed().as_secs_f32());
+        println!("Kernels listos en {:.2}s\n", inf_start.elapsed().as_secs_f32());
 
         if loaded_from_bitnet {
-            let embed_bytes = vocab_size * d_model * std::mem::size_of::<f32>();
-            let norm_bytes = (2 * num_layers + 1) * d_model * std::mem::size_of::<f32>();
-            report_inference_state_memory(&inf_state, embed_bytes, norm_bytes, d_model, num_layers);
+            let actual_layers = model_v.transformer.num_layers;
+            let actual_d = model_v.d_model;
+            let actual_vocab = model_v.vocab_size;
+            let embed_bytes = actual_vocab * actual_d * std::mem::size_of::<f32>();
+            let norm_bytes = (2 * actual_layers + 1) * actual_d * std::mem::size_of::<f32>();
+            report_inference_state_memory(&inf_state, embed_bytes, norm_bytes, actual_d, actual_layers);
         }
 
-        println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'reset', 'salir'\n");
+        let max_allowed = MAX_CACHE_LEN;
+        println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'ctx <n>', 'reset', 'salir'\n");
 
         let mut current_len = 50;
+        let mut max_ctx: usize = 256;
         let mut session_caches: Vec<Option<KVCache<Flex<f32>>>> = (0..num_layers).map(|_| None).collect();
         let mut session_offset = 0;
 
         loop {
-            print!("Chat [len:{} t:{} k:{} p:{} rp:{}] > ", current_len, temperature, top_k, top_p, repetition_penalty);
+            print!("Chat [ctx:{} len:{} t:{} k:{} p:{} rp:{}] > ", max_ctx, current_len, temperature, top_k, top_p, repetition_penalty);
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
@@ -418,13 +453,23 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
             if input.to_lowercase().starts_with("topk ") { if let Ok(v) = input[5..].trim().parse::<usize>() { top_k = v; println!("  -> Top-K: {}\n", top_k); continue; } }
             if input.to_lowercase().starts_with("topp ") { if let Ok(v) = input[5..].trim().parse::<f32>() { top_p = v; println!("  -> Top-P: {}\n", top_p); continue; } }
             if input.to_lowercase().starts_with("rpen ") { if let Ok(v) = input[5..].trim().parse::<f32>() { repetition_penalty = v; println!("  -> R-Pen: {}\n", repetition_penalty); continue; } }
+            if input.to_lowercase().starts_with("ctx ") {
+                if let Ok(v) = input[4..].trim().parse::<usize>() {
+                    let v = v.clamp(64, max_allowed);
+                    max_ctx = v;
+                    session_caches = (0..num_layers).map(|_| None).collect();
+                    session_offset = 0;
+                    println!("  -> Contexto: {} (cache reiniciada)\n", max_ctx);
+                }
+                continue;
+            }
             if input.eq_ignore_ascii_case("reset") { session_caches = (0..num_layers).map(|_| None).collect(); session_offset = 0; println!("  -> Cache reiniciada.\n"); continue; }
             if input.is_empty() { continue; }
 
             println!("\n--- TEXTO GENERADO (I2S Kernel) ---");
             let (_, tokens_count, elapsed, updated_caches, updated_offset) = generate_text_cached(
                 &model_v, &inf_state, &tokenizer, input, current_len,
-                temperature, top_k, top_p, repetition_penalty, session_caches, session_offset,
+                temperature, top_k, top_p, repetition_penalty, session_caches, session_offset, max_ctx,
             );
             session_caches = updated_caches;
             session_offset = updated_offset;
@@ -453,12 +498,19 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
         let mut batch_count = 0;
         let start_epoch = Instant::now();
         let fragments = FileFragmentIterator::new(text_path, 1)?;
+        let mut total_frags = 0usize;
 
         for (frag_idx, fragment) in fragments.enumerate() {
+            total_frags += 1;
             let tokens = tokenizer.encode(&fragment);
             let tokens_per_batch = batch_size * seq_len;
             let num_batches = tokens.len() / tokens_per_batch;
-            if num_batches == 0 { continue; }
+            if num_batches == 0 {
+                if frag_idx == 0 || frag_idx == total_frags - 1 {
+                    println!("\n  [debug] Frag {}: {} bytes, {} tokens, {} batches (skipped)", frag_idx, fragment.len(), tokens.len(), num_batches);
+                }
+                continue;
+            }
 
             for b in 0..num_batches {
                 let start_idx = b * tokens_per_batch;
@@ -499,7 +551,7 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
             let empty_caches: Vec<Option<KVCache<Flex<f32>>>> = (0..num_layers).map(|_| None).collect();
             let (_, tokens_count, elapsed, _, _) = generate_text_cached(
                 &model.valid(), &inf_state, &tokenizer, "The world ", 30,
-                temperature, top_k, top_p, repetition_penalty, empty_caches, 0,
+                temperature, top_k, top_p, repetition_penalty, empty_caches, 0, 256,
             );
             let tps = tokens_count as f32 / elapsed.max(0.001);
             println!("[{:.1} tok/s]\n---------------------------", tps);

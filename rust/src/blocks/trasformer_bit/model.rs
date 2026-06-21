@@ -4,6 +4,7 @@
 use burn::module::Module;
 use burn::tensor::{Tensor, backend::Backend, TensorData, Int};
 use crate::blocks::bitlinear::kernel::KernelKind;
+use crate::blocks::turbokuant::TurboQuant;
 use std::error::Error;
 use std::fs;
 use std::io::{self, BufReader, Read};
@@ -218,104 +219,247 @@ impl<B: Backend> BitLinearRMSNorm<B> {
     }
 }
 
-// ─── KV Cache ──────────────────────────────────────────────────────────────
+// ─── KV Cache (Vec+cat chunks) ─────────────────────────────────────────────
 
-pub const MAX_CACHE_LEN: usize = 256;
+pub const MAX_CACHE_LEN: usize = 4096;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct KVCache<B: Backend> {
-    pub cached_k: Tensor<B, 4>,
-    pub cached_v: Tensor<B, 4>,
+    k_chunks: Vec<Tensor<B, 4>>,
+    v_chunks: Vec<Tensor<B, 4>>,
     pub current_len: usize,
 }
 
 impl<B: Backend> KVCache<B> {
-    pub fn new(num_kv_groups: usize, head_dim: usize, device: &B::Device) -> Self {
-        KVCache {
-            cached_k: Tensor::zeros([1, MAX_CACHE_LEN, num_kv_groups, head_dim], device),
-            cached_v: Tensor::zeros([1, MAX_CACHE_LEN, num_kv_groups, head_dim], device),
-            current_len: 0,
-        }
+    pub fn new(_num_kv_groups: usize, _head_dim: usize, _device: &B::Device) -> Self {
+        KVCache { k_chunks: Vec::new(), v_chunks: Vec::new(), current_len: 0 }
     }
 
     pub fn append(&mut self, k_new: Tensor<B, 4>, v_new: Tensor<B, 4>) {
         let add_len = k_new.dims()[1];
-        let groups = k_new.dims()[2];
-        let dim = k_new.dims()[3];
-        let end = self.current_len + add_len;
+        let new_len = self.current_len + add_len;
 
-        if end > MAX_CACHE_LEN {
+        if new_len > MAX_CACHE_LEN {
             let safe_keep = MAX_CACHE_LEN.saturating_sub(add_len);
             self.keep_last(safe_keep);
         }
 
-        let start = self.current_len;
-        let end = start + add_len;
-        self.cached_k = self.cached_k.clone().slice_assign(
-            [0..1, start..end, 0..groups, 0..dim], k_new
-        );
-        self.cached_v = self.cached_v.clone().slice_assign(
-            [0..1, start..end, 0..groups, 0..dim], v_new
-        );
-        self.current_len = end;
+        self.k_chunks.push(k_new);
+        self.v_chunks.push(v_new);
+        self.current_len = self.k_chunks.iter().map(|t| t.dims()[1]).sum();
     }
 
     pub fn view(&self) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        (
-            self.cached_k.clone().narrow(1, 0, self.current_len),
-            self.cached_v.clone().narrow(1, 0, self.current_len),
-        )
+        if self.k_chunks.len() == 1 {
+            (self.k_chunks[0].clone(), self.v_chunks[0].clone())
+        } else {
+            (Tensor::cat(self.k_chunks.iter().map(|t| t.clone()).collect(), 1),
+             Tensor::cat(self.v_chunks.iter().map(|t| t.clone()).collect(), 1))
+        }
     }
 
     pub fn keep_last(&mut self, keep: usize) {
         if keep >= self.current_len { return; }
-        let start = self.current_len - keep;
-        let groups = self.cached_k.dims()[2];
-        let dim = self.cached_k.dims()[3];
-        let k = self.cached_k.clone().narrow(1, start, keep);
-        let v = self.cached_v.clone().narrow(1, start, keep);
-        self.cached_k = self.cached_k.clone().slice_assign(
-            [0..1, 0..keep, 0..groups, 0..dim], k
-        );
-        self.cached_v = self.cached_v.clone().slice_assign(
-            [0..1, 0..keep, 0..groups, 0..dim], v
-        );
+        let mut remaining = keep;
+        let mut new_k = Vec::new();
+        let mut new_v = Vec::new();
+        let mut rev_k = Vec::new();
+        let mut rev_v = Vec::new();
+        for (k, v) in self.k_chunks.drain(..).rev().zip(self.v_chunks.drain(..).rev()) {
+            let seq = k.dims()[1];
+            if remaining >= seq {
+                rev_k.push(k);
+                rev_v.push(v);
+                remaining -= seq;
+            } else {
+                rev_k.push(k.narrow(1, seq - remaining, remaining));
+                rev_v.push(v.narrow(1, seq - remaining, remaining));
+                break;
+            }
+        }
+        for (k, v) in rev_k.into_iter().rev().zip(rev_v.into_iter().rev()) {
+            new_k.push(k);
+            new_v.push(v);
+        }
+        self.k_chunks = new_k;
+        self.v_chunks = new_v;
         self.current_len = keep;
     }
 }
 
-// ─── RoPE ──────────────────────────────────────────────────────────────────
+// ─── Fused RoPE (raw slice, no cache, no Tensor ops) ───────────────────────
 
-pub fn apply_rope<B: Backend>(q: Tensor<B, 4>, k: Tensor<B, 4>, offset: usize) -> (Tensor<B, 4>, Tensor<B, 4>) {
-    let [_batch, seq_len, _num_heads, head_dim] = q.dims();
+#[derive(Debug)]
+pub struct KuantKVCache {
+    tq: TurboQuant,
+    num_kv_groups: usize,
+    head_dim: usize,
+    key_stride: usize,
+    value_stride: usize,
+    keys: Vec<Vec<u8>>,
+    values: Vec<Vec<u8>>,
+    pub current_len: usize,
+}
 
-    let theta: Vec<f32> = (0..head_dim / 2)
+impl KuantKVCache {
+    pub fn new(num_kv_groups: usize, head_dim: usize, bits: usize, seed: u64) -> Self {
+        let tq = TurboQuant::new(head_dim, bits, seed).expect("invalid TurboQuant cache shape");
+        let key_stride = tq.key_bytes();
+        let value_stride = tq.value_bytes();
+        Self {
+            tq,
+            num_kv_groups,
+            head_dim,
+            key_stride,
+            value_stride,
+            keys: vec![Vec::new(); num_kv_groups],
+            values: vec![Vec::new(); num_kv_groups],
+            current_len: 0,
+        }
+    }
+
+    pub fn append<B: Backend>(&mut self, k_new: Tensor<B, 4>, v_new: Tensor<B, 4>) {
+        let [batch, seq_len, num_kv_groups, head_dim] = k_new.dims();
+        assert_eq!(batch, 1, "KuantKVCache currently supports batch=1 inference");
+        assert_eq!(num_kv_groups, self.num_kv_groups);
+        assert_eq!(head_dim, self.head_dim);
+
+        let k_data = k_new.into_data();
+        let v_data = v_new.into_data();
+        let k = k_data.as_slice::<f32>().unwrap();
+        let v = v_data.as_slice::<f32>().unwrap();
+
+        for s in 0..seq_len {
+            for g in 0..self.num_kv_groups {
+                let base = (s * self.num_kv_groups + g) * self.head_dim;
+                self.keys[g].extend_from_slice(&self.tq.quantize_key(&k[base..base + self.head_dim]).unwrap());
+                self.values[g].extend_from_slice(&self.tq.quantize_value(&v[base..base + self.head_dim]).unwrap());
+            }
+            self.current_len += 1;
+        }
+    }
+
+    pub fn attend<B: Backend>(&self, q: Tensor<B, 4>, old_len: usize, num_heads: usize, device: &B::Device) -> Tensor<B, 4> {
+        let [batch, q_len, q_heads, head_dim] = q.dims();
+        assert_eq!(batch, 1, "KuantKVCache currently supports batch=1 inference");
+        assert_eq!(q_heads, num_heads);
+        assert_eq!(head_dim, self.head_dim);
+
+        let repeats = num_heads / self.num_kv_groups;
+        let q_data = q.into_data();
+        let q_slice = q_data.as_slice::<f32>().unwrap();
+        let mut out = vec![0.0f32; batch * q_len * num_heads * self.head_dim];
+        let scale = (self.head_dim as f32).sqrt();
+
+        for qi in 0..q_len {
+            let max_attend = old_len + qi;
+            for h in 0..num_heads {
+                let group = h / repeats;
+                let q_base = (qi * num_heads + h) * self.head_dim;
+                let rotated_q = self.tq.rotate_query(&q_slice[q_base..q_base + self.head_dim]).unwrap();
+                let mut scores = self.tq.attention_scores(
+                    &rotated_q,
+                    &self.keys[group],
+                    self.current_len,
+                    self.key_stride,
+                ).unwrap();
+
+                for (idx, score) in scores.iter_mut().enumerate() {
+                    if idx > max_attend {
+                        *score = -1.0e9;
+                    } else {
+                        *score /= scale;
+                    }
+                }
+
+                let weights = softmax_vec(&scores);
+                let combined = self.tq.attention_combine(
+                    &self.values[group],
+                    self.current_len,
+                    self.value_stride,
+                    &weights,
+                ).unwrap();
+                let out_base = (qi * num_heads + h) * self.head_dim;
+                out[out_base..out_base + self.head_dim].copy_from_slice(&combined);
+            }
+        }
+
+        Tensor::<B, 4>::from_data(TensorData::new(out, [batch, q_len, num_heads, self.head_dim]), device)
+    }
+
+    pub fn compressed_bytes(&self) -> usize {
+        self.keys.iter().map(Vec::len).sum::<usize>() + self.values.iter().map(Vec::len).sum::<usize>()
+    }
+}
+
+fn softmax_vec(scores: &[f32]) -> Vec<f32> {
+    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut exp = Vec::with_capacity(scores.len());
+    let mut sum = 0.0f32;
+    for &score in scores {
+        let v = (score - max).exp();
+        exp.push(v);
+        sum += v;
+    }
+    if sum <= 0.0 {
+        vec![0.0; scores.len()]
+    } else {
+        exp.into_iter().map(|v| v / sum).collect()
+    }
+}
+
+pub fn apply_rope_fused<B: Backend>(
+    q: Tensor<B, 4>,
+    k: Tensor<B, 4>,
+    offset: usize,
+) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    let [batch, seq_len, nheads, head_dim] = q.dims();
+    let nkv = k.dims()[2];
+    let hh = head_dim / 2;
+    let device = q.device();
+
+    let q_data = q.into_data();
+    let k_data = k.into_data();
+    let mut q_slice = q_data.as_slice::<f32>().unwrap().to_vec();
+    let mut k_slice = k_data.as_slice::<f32>().unwrap().to_vec();
+
+    let theta: Vec<f32> = (0..hh)
         .map(|i| 1.0 / 10000.0f32.powf(2.0 * i as f32 / head_dim as f32))
         .collect();
 
-    let theta_tensor = Tensor::<B, 1>::from_data(TensorData::new(theta, [head_dim / 2]), &q.device());
-    let positions: Vec<f32> = (offset..offset + seq_len).map(|p| p as f32).collect();
-    let pos_tensor = Tensor::<B, 1>::from_data(TensorData::new(positions, [seq_len]), &q.device());
+    for b in 0..batch {
+        for s in 0..seq_len {
+            let pos = (offset + s) as f32;
+            for h in 0..nheads {
+                let base_q = ((b * seq_len) + s) * nheads * head_dim + h * head_dim;
+                for i in 0..hh {
+                    let cos = (pos * theta[i]).cos();
+                    let sin = (pos * theta[i]).sin();
+                    let q1 = q_slice[base_q + i];
+                    let q2 = q_slice[base_q + i + hh];
+                    q_slice[base_q + i] = q1 * cos - q2 * sin;
+                    q_slice[base_q + i + hh] = q1 * sin + q2 * cos;
+                }
+            }
+            for h in 0..nkv {
+                let base_k = ((b * seq_len) + s) * nkv * head_dim + h * head_dim;
+                for i in 0..hh {
+                    let cos = (pos * theta[i]).cos();
+                    let sin = (pos * theta[i]).sin();
+                    let k1 = k_slice[base_k + i];
+                    let k2 = k_slice[base_k + i + hh];
+                    k_slice[base_k + i] = k1 * cos - k2 * sin;
+                    k_slice[base_k + i + hh] = k1 * sin + k2 * cos;
+                }
+            }
+        }
+    }
 
-    let angles = pos_tensor.reshape([seq_len, 1]) * theta_tensor.reshape([1, head_dim / 2]);
-    let cos = angles.clone().cos().reshape([1, seq_len, 1, head_dim / 2]);
-    let sin = angles.sin().reshape([1, seq_len, 1, head_dim / 2]);
-
-    let q_chunks = q.chunk(2, 3);
-    let (q1, q2) = (q_chunks[0].clone(), q_chunks[1].clone());
-    let k_chunks = k.chunk(2, 3);
-    let (k1, k2) = (k_chunks[0].clone(), k_chunks[1].clone());
-
-    let q_rotated = Tensor::cat(vec![
-        q1.clone() * cos.clone() - q2.clone() * sin.clone(),
-        q1 * sin.clone() + q2 * cos.clone(),
-    ], 3);
-    let k_rotated = Tensor::cat(vec![
-        k1.clone() * cos.clone() - k2.clone() * sin.clone(),
-        k1 * sin + k2 * cos,
-    ], 3);
-
-    (q_rotated, k_rotated)
+    let q_out = Tensor::<B, 4>::from_data(
+        TensorData::new(q_slice, [batch, seq_len, nheads, head_dim]), &device);
+    let k_out = Tensor::<B, 4>::from_data(
+        TensorData::new(k_slice, [batch, seq_len, nkv, head_dim]), &device);
+    (q_out, k_out)
 }
 
 // ─── KV Repeat for GQA ─────────────────────────────────────────────────────
@@ -394,7 +538,7 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
     fn attention_forward(&self, x: Tensor<B, 3>, offset: usize) -> Tensor<B, 3> {
         let [_batch, seq_len, _d] = x.dims();
         let (q, k, v) = self.qkv.forward(x);
-        let (q, k) = apply_rope(q, k, offset);
+        let (q, k) = apply_rope_fused(q, k, offset);
         let k = repeat_kv(k, self.qkv.num_heads, self.qkv.num_kv_groups);
         let v = repeat_kv(v, self.qkv.num_heads, self.qkv.num_kv_groups);
 
@@ -422,7 +566,7 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
 
     fn attention_with_cache(&self, x: Tensor<B, 3>, offset: usize, cache: Option<KVCache<B>>) -> (Tensor<B, 3>, KVCache<B>) {
         let (q, k_new, v_new) = self.qkv.forward(x);
-        let (q, k_new) = apply_rope(q, k_new, offset);
+        let (q, k_new) = apply_rope_fused(q, k_new, offset);
 
         let mut kv_cache = cache.unwrap_or_else(|| KVCache::new(k_new.dims()[2], k_new.dims()[3], &k_new.device()));
         kv_cache.append(k_new, v_new);
@@ -455,7 +599,7 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
 
     fn attention_with_cache_inference(&self, x: Tensor<B, 3>, offset: usize, cache: Option<KVCache<B>>, q_state: &BitLinearInferenceState, k_state: &BitLinearInferenceState, v_state: &BitLinearInferenceState, o_state: &BitLinearInferenceState) -> (Tensor<B, 3>, KVCache<B>) {
         let (q, k_new, v_new) = self.qkv.forward_inference(x, q_state, k_state, v_state);
-        let (q, k_new) = apply_rope(q, k_new, offset);
+        let (q, k_new) = apply_rope_fused(q, k_new, offset);
 
         let mut kv_cache = cache.unwrap_or_else(|| KVCache::new(k_new.dims()[2], k_new.dims()[3], &k_new.device()));
         kv_cache.append(k_new, v_new);
@@ -474,6 +618,57 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
 
         let attn_output = burn::tensor::activation::softmax(scores, 3).matmul(v).swap_dims(1, 2);
         (self.o_proj.forward_inference(attn_output, o_state), kv_cache)
+    }
+
+    pub fn forward_with_kuant_cache_inference(
+        &self,
+        x: Tensor<B, 3>,
+        offset: usize,
+        cache: KuantKVCache,
+        states: (
+            &BitLinearInferenceState,
+            &BitLinearInferenceState,
+            &BitLinearInferenceState,
+            &BitLinearInferenceState,
+            &BitLinearInferenceState,
+            &BitLinearInferenceState,
+        ),
+    ) -> (Tensor<B, 3>, KuantKVCache) {
+        let residual = x.clone();
+        let (h, new_cache) = self.attention_with_kuant_cache_inference(
+            self.attn_norm.forward(x),
+            offset,
+            cache,
+            states.0,
+            states.1,
+            states.2,
+            states.3,
+        );
+        let x = residual + self.residual_dropout.forward(h);
+
+        let residual = x.clone();
+        let h = self.ffn.forward_inference(self.ffn_norm.forward(x), states.4, states.5);
+        (residual + self.residual_dropout.forward(h), new_cache)
+    }
+
+    fn attention_with_kuant_cache_inference(
+        &self,
+        x: Tensor<B, 3>,
+        offset: usize,
+        mut cache: KuantKVCache,
+        q_state: &BitLinearInferenceState,
+        k_state: &BitLinearInferenceState,
+        v_state: &BitLinearInferenceState,
+        o_state: &BitLinearInferenceState,
+    ) -> (Tensor<B, 3>, KuantKVCache) {
+        let (q, k_new, v_new) = self.qkv.forward_inference(x, q_state, k_state, v_state);
+        let (q, k_new) = apply_rope_fused(q, k_new, offset);
+        let device = q.device();
+        let old_len = cache.current_len;
+
+        cache.append(k_new, v_new);
+        let attn_output = cache.attend(q, old_len, self.qkv.num_heads, &device);
+        (self.o_proj.forward_inference(attn_output, o_state), cache)
     }
 }
 
@@ -545,6 +740,22 @@ impl<B: Backend> TransformerBitLinearLM<B> {
         }
     }
 
+    pub fn build_kuant_caches(&self, bits: usize, seed: u64) -> Vec<KuantKVCache> {
+        self.transformer
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(idx, layer)| {
+                KuantKVCache::new(
+                    layer.qkv.num_kv_groups,
+                    layer.qkv.head_dim,
+                    bits,
+                    seed.wrapping_add(idx as u64),
+                )
+            })
+            .collect()
+    }
+
     pub fn forward_with_cache_inference(&self, input: Tensor<B, 2, Int>, offset: usize, caches: Vec<Option<KVCache<B>>>, state: &TransformerInferenceState) -> (Tensor<B, 3>, Vec<KVCache<B>>) {
         let device = input.device();
         let x = self.embedding.forward(input);
@@ -552,6 +763,25 @@ impl<B: Backend> TransformerBitLinearLM<B> {
         let x_flat = x;
         let [batch, seq, d] = x_flat.dims();
         let x_2d = x_flat.reshape([batch * seq, d]);
+        let x_data = x_2d.into_data();
+        let x_slice = x_data.as_slice::<f32>().unwrap();
+        let out_data = state.head.forward_raw(x_slice, batch * seq);
+        let output = Tensor::<B, 2>::from_data(TensorData::new(out_data, [batch * seq, self.vocab_size]), &device);
+        (output.reshape([batch, seq, self.vocab_size]), new_caches)
+    }
+
+    pub fn forward_with_kuant_cache_inference(
+        &self,
+        input: Tensor<B, 2, Int>,
+        offset: usize,
+        caches: Vec<KuantKVCache>,
+        state: &TransformerInferenceState,
+    ) -> (Tensor<B, 3>, Vec<KuantKVCache>) {
+        let device = input.device();
+        let x = self.embedding.forward(input);
+        let (x, new_caches) = self.transformer_forward_with_kuant_cache_inference(x, offset, caches, state);
+        let [batch, seq, d] = x.dims();
+        let x_2d = x.reshape([batch * seq, d]);
         let x_data = x_2d.into_data();
         let x_slice = x_data.as_slice::<f32>().unwrap();
         let out_data = state.head.forward_raw(x_slice, batch * seq);
@@ -579,6 +809,30 @@ impl<B: Backend> TransformerBitLinearLM<B> {
         for (idx, (layer, cache)) in self.transformer.layers.iter().zip(caches.into_iter()).enumerate() {
             let layer_states = (&state.qkv[idx].0, &state.qkv[idx].1, &state.qkv[idx].2, &state.o_proj[idx], &state.ffn_gate_up[idx], &state.ffn_down[idx]);
             let (out, new_cache) = layer.forward_with_cache_inference(x, offset, cache, layer_states);
+            x = out;
+            new_caches.push(new_cache);
+        }
+        (self.transformer.final_norm.forward(x), new_caches)
+    }
+
+    fn transformer_forward_with_kuant_cache_inference(
+        &self,
+        mut x: Tensor<B, 3>,
+        offset: usize,
+        caches: Vec<KuantKVCache>,
+        state: &TransformerInferenceState,
+    ) -> (Tensor<B, 3>, Vec<KuantKVCache>) {
+        let mut new_caches = Vec::with_capacity(self.num_layers);
+        for (idx, (layer, cache)) in self.transformer.layers.iter().zip(caches.into_iter()).enumerate() {
+            let layer_states = (
+                &state.qkv[idx].0,
+                &state.qkv[idx].1,
+                &state.qkv[idx].2,
+                &state.o_proj[idx],
+                &state.ffn_gate_up[idx],
+                &state.ffn_down[idx],
+            );
+            let (out, new_cache) = layer.forward_with_kuant_cache_inference(x, offset, cache, layer_states);
             x = out;
             new_caches.push(new_cache);
         }

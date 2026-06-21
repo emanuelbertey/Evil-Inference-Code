@@ -151,3 +151,5 @@ dmypy.json
 /prism-ml-llama.cpp
 /nanochat-rs-ternary
 *.bitnet
+rust/input.txt
+/bitnet.c
