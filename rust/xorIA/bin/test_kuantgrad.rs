@@ -1,12 +1,24 @@
-// ─── KuantGrad: BitNet 3 capas — entrenamiento normal vs gradiente comprimido ──
+// ─── KuantGrad: BitNet 3 capas — Normal vs KuantGrad vs BitLinear real ──
 //
-// Red neuronal ternaria (STE) 3 capas, d_model=16, entrenada con AdamW.
-// Compara pérdida y accuracy usando gradientes f32 normales vs
-// gradientes comprimidos con KuantGrad (8 grupos, 5-bit + f32 scale).
+// Red ternaria (STE) 3 capas, d_model=16.
+// Compara:
+//   1. TinyBitNet + AdamW manual (baseline)
+//   2. TinyBitNet + AdamW manual con gradientes KuantGrad
+//   3. BitLinear real (codebase) + AdamW nativo de Burn
 //
 // Usage: cargo run --release --bin test_kuantgrad
 
 use std::error::Error;
+
+use burn::prelude::*;
+use burn_flex::Flex;
+use burn_autodiff::Autodiff;
+use burn::module::Module;
+use burn::optim::{AdamConfig, Optimizer, GradientsParams};
+use xlstm::blocks::bitlinear::layer::{BitLinear, BitLinearConfig};
+use xlstm::blocks::kuantgrad::compress::{compress, decompress};
+
+type MyBackend = Autodiff<Flex<f32>>;
 
 // ─── Tiny BitNet (ternary weights, STE) ────────────────────────────
 #[derive(Clone)]
@@ -145,6 +157,30 @@ impl AdamWState {
     }
 }
 
+// ─── BitNet real con BitLinear del codebase ───────────────────────
+#[derive(Module, Debug)]
+struct BitNet3Layer<B: Backend> {
+    ln1: BitLinear<B>,
+    ln2: BitLinear<B>,
+    ln3: BitLinear<B>,
+}
+
+impl<B: Backend> BitNet3Layer<B> {
+    fn new(device: &B::Device) -> Self {
+        Self {
+            ln1: BitLinearConfig { in_features: 16, out_features: 16, bias: true, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+            ln2: BitLinearConfig { in_features: 16, out_features: 16, bias: true, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+            ln3: BitLinearConfig { in_features: 16, out_features: 2, bias: true, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+        }
+    }
+
+    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+        let x = self.ln1.forward_2d(x).tanh();
+        let x = self.ln2.forward_2d(x).tanh();
+        self.ln3.forward_2d(x)
+    }
+}
+
 // ─── Generar datos sintéticos ─────────────────────────────────────
 fn gen_data(n: usize) -> Vec<(Vec<f32>, usize)> {
     use rand::Rng;
@@ -174,14 +210,47 @@ fn param_mut(m: &mut TinyBitNet, pi: usize) -> &mut Vec<f32> {
     }
 }
 
+fn data_to_tensors(data: &[(Vec<f32>, usize)])
+    -> (Tensor<MyBackend, 2>, Tensor<MyBackend, 1, Int>)
+{
+    let device = Default::default();
+    let n = data.len();
+    let mut xs_flat = Vec::with_capacity(n * 16);
+    let mut ys = Vec::with_capacity(n);
+    for (x, y) in data {
+        xs_flat.extend_from_slice(x);
+        ys.push(*y as i32);
+    }
+    let xs = Tensor::<MyBackend, 2>::from_data(TensorData::new(xs_flat, [n, 16]), &device);
+    let labels = Tensor::<MyBackend, 1, Int>::from_data(TensorData::new(ys, [n]), &device);
+    (xs, labels)
+}
+
+fn compute_loss(model: &BitNet3Layer<MyBackend>, xs: Tensor<MyBackend, 2>, labels: Tensor<MyBackend, 1, Int>) -> Tensor<MyBackend, 1> {
+    let logits = model.forward(xs);
+    let loss = burn::nn::loss::CrossEntropyLossConfig::new()
+        .init(&logits.device())
+        .forward(logits, labels);
+    loss
+}
+
+fn accuracy_burn(model: &BitNet3Layer<MyBackend>, xs: &Tensor<MyBackend, 2>, ys: &Tensor<MyBackend, 1, Int>) -> f32 {
+    let logits = model.forward(xs.clone().detach());
+    let preds = logits.argmax(1);
+    let preds_s: Vec<i32> = preds.into_data().as_slice().unwrap().to_vec();
+    let ys_s: Vec<i32> = ys.clone().into_data().as_slice().unwrap().to_vec();
+    let correct: usize = preds_s.iter().zip(ys_s.iter()).filter(|(p, y)| *p == *y).count();
+    correct as f32 / ys_s.len() as f32
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     test_kuantgrad_main()
 }
 
 pub fn test_kuantgrad_main() -> Result<(), Box<dyn Error>> {
-    println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║   KuantGrad: BitNet 3 capas — Normal vs Comprimido      ║");
-    println!("╚══════════════════════════════════════════════════════════╝");
+    println!("╔══════════════════════════════════════════════════════════════════╗");
+    println!("║   KuantGrad: TinyBitNet vs TinyBitNet+Kuant vs BitNet real     ║");
+    println!("╚══════════════════════════════════════════════════════════════════╝");
 
     let data = gen_data(500);
     let train = data[..400].to_vec();
@@ -199,17 +268,27 @@ pub fn test_kuantgrad_main() -> Result<(), Box<dyn Error>> {
     let adam_eps = 1e-8;
     let wd = 1e-4;
 
-    use xlstm::blocks::kuantgrad::compress::{compress, decompress};
-
     // Inicializar estados AdamW
     let pnl = param_names_and_lens(&model_a);
     let mut states_a: Vec<AdamWState> = pnl.iter().map(|(_, n)| AdamWState::new(*n)).collect();
     let mut states_b: Vec<AdamWState> = pnl.iter().map(|(_, n)| AdamWState::new(*n)).collect();
 
+    // ─── Modelo C: BitNet real (BitLinear × 3) con Burn AdamW ──────
+    let device = Default::default();
+    let mut model_c = BitNet3Layer::<MyBackend>::new(&device);
+    let mut optim_c = AdamConfig::new()
+        .with_weight_decay(Some(burn::optim::decay::WeightDecayConfig::new(wd)))
+        .init::<MyBackend, BitNet3Layer<MyBackend>>();
+    let lr_c = lr as f64;
+
+    // Pre-convertir datos a tensores Burn una sola vez
+    let (train_xs, train_ys) = data_to_tensors(&train);
+    let (test_xs, test_ys) = data_to_tensors(&test);
+
     println!("\n  ── Entrenando (10 epochs) ──\n");
 
-    for epoch in 0..10 {
-        // Gradientes para modelo A (normal)
+    for epoch in 0..30 {
+        // ── Modelo A: TinyBitNet + AdamW normal ──
         let mut grads_a: Vec<Vec<f32>> = Vec::new();
         for (_pi, (pname, plen)) in pnl.iter().enumerate() {
             let mut g = vec![0.0; *plen];
@@ -219,7 +298,7 @@ pub fn test_kuantgrad_main() -> Result<(), Box<dyn Error>> {
             grads_a.push(g);
         }
 
-        // Gradientes para modelo B (KuantGrad)
+        // ── Modelo B: TinyBitNet + KuantGrad ──
         let mut grads_b: Vec<Vec<f32>> = Vec::new();
         {
             let model_work = model_b.clone();
@@ -228,7 +307,6 @@ pub fn test_kuantgrad_main() -> Result<(), Box<dyn Error>> {
                 for i in 0..*plen {
                     g[i] = model_work.grad_loss_wrt(pname, i, eps, &train);
                 }
-                // Comprimir y descomprimir
                 let (compressed, ng) = compress(&g);
                 grads_b.push(decompress(&compressed, ng, g.len()));
 
@@ -239,43 +317,49 @@ pub fn test_kuantgrad_main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // Aplicar AdamW a modelo A
+        // Aplicar AdamW a modelos A y B
         for pi in 0..pnl.len() {
             AdamWState::step(param_mut(&mut model_a, pi), &grads_a[pi], &mut states_a[pi], lr, beta1, beta2, adam_eps, wd);
-        }
-
-        // Aplicar AdamW a modelo B
-        for pi in 0..pnl.len() {
             AdamWState::step(param_mut(&mut model_b, pi), &grads_b[pi], &mut states_b[pi], lr, beta1, beta2, adam_eps, wd);
         }
+
+        // ── Modelo C: BitNet real + Burn AdamW ──
+        let loss_c = compute_loss(&model_c, train_xs.clone(), train_ys.clone());
+        let grads_c = loss_c.backward();
+        let grads_p_c = GradientsParams::from_grads(grads_c, &model_c);
+        model_c = optim_c.step(lr_c, model_c, grads_p_c);
 
         if epoch % 2 == 0 || epoch == 9 {
             let loss_a = model_a.cross_entropy(&train);
             let loss_b = model_b.cross_entropy(&train);
+            let loss_c_val = compute_loss(&model_c, train_xs.clone(), train_ys.clone()).into_scalar();
             let acc_a = model_a.accuracy(&test);
             let acc_b = model_b.accuracy(&test);
-            println!("  ep {:2}: Normal loss={:.4} acc={:.2}% | KuantGrad loss={:.4} acc={:.2}%",
-                     epoch + 1, loss_a, acc_a * 100.0, loss_b, acc_b * 100.0);
+            let acc_c = accuracy_burn(&model_c, &test_xs, &test_ys);
+            println!("  ep {:2}: Normal loss={:.4} acc={:.2}% | Kuant loss={:.4} acc={:.2}% | BitNet loss={:.4} acc={:.2}%",
+                     epoch + 1, loss_a, acc_a * 100.0, loss_b, acc_b * 100.0, loss_c_val, acc_c * 100.0);
         }
     }
 
     let acc_a = model_a.accuracy(&test);
     let acc_b = model_b.accuracy(&test);
+    let acc_c = accuracy_burn(&model_c, &test_xs, &test_ys);
     let loss_a = model_a.cross_entropy(&test);
     let loss_b = model_b.cross_entropy(&test);
+    let loss_c_val = compute_loss(&model_c, test_xs, test_ys).into_scalar();
 
     println!("\n  ── Final (test set) ──");
-    println!("  Normal AdamW:    loss={:.4}  acc={:.2}%", loss_a, acc_a * 100.0);
-    println!("  KuantGrad AdamW: loss={:.4}  acc={:.2}%", loss_b, acc_b * 100.0);
+    println!("  TinyBitNet Normal:    loss={:.4}  acc={:.2}%", loss_a, acc_a * 100.0);
+    println!("  TinyBitNet KuantGrad: loss={:.4}  acc={:.2}%", loss_b, acc_b * 100.0);
+    println!("  BitNet real (Burn):   loss={:.4}  acc={:.2}%", loss_c_val, acc_c * 100.0);
 
-    let diff = (acc_a - acc_b).abs() * 100.0;
-    println!("  Diferencia de accuracy: {:.2} puntos porcentuales", diff);
+    let diff_ab = (acc_a - acc_b).abs() * 100.0;
+    let diff_ac = (acc_a - acc_c).abs() * 100.0;
+    println!("\n  Diferencia Normal vs KuantGrad: {:.2} puntos porcentuales", diff_ab);
+    println!("  Diferencia Normal vs BitNet real: {:.2} puntos porcentuales", diff_ac);
 
-    if diff < 5.0 {
-        println!("  ✓ KuantGrad mantiene rendimiento similar");
-    } else {
-        println!("  ⚠ Diferencia significativa");
-    }
+    if diff_ab < 5.0 { println!("  ✓ KuantGrad mantiene rendimiento similar"); }
+    else { println!("  ⚠ Diferencia significativa KuantGrad"); }
 
     Ok(())
 }

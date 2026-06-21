@@ -187,7 +187,7 @@ fn quantize_weights_ternary<B: Backend>(w: Tensor<B, 2>) -> (Tensor<B, 2>, Tenso
         .clone()
         .abs()
         .mean_dim(1)
-        .squeeze::<1>()
+        .squeeze_dim::<1>(1)
         .clamp_min(1e-8); // [n_groups]
 
     // Normalize, round, clip to ternary
