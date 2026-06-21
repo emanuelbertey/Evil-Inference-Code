@@ -15,18 +15,19 @@ const GROUP: usize = 8;
 /// Comprime gradientes: f32[] → u8[] empaquetado.
 /// Retorna (datos comprimidos, número de grupos).
 pub fn compress(grads: &[f32]) -> (Vec<u8>, usize) {
+    use half::f16;
     let n = grads.len();
     let n_groups = (n + GROUP - 1) / GROUP;
-    let mut out = Vec::with_capacity(n_groups * 9);
+    let mut out = Vec::with_capacity(n_groups * 7);
 
     for g in 0..n_groups {
         let start = g * GROUP;
         let end = (start + GROUP).min(n);
         let slice = &grads[start..end];
 
-        // Escalar = max absolute value
+        // Escalar = max absolute value → f16
         let scale = slice.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
-        out.extend_from_slice(&scale.to_le_bytes());
+        out.extend_from_slice(&f16::from_f32(scale).to_le_bytes());
 
         if scale == 0.0 {
             // sin bits (todo cero)
@@ -61,14 +62,15 @@ pub fn compress(grads: &[f32]) -> (Vec<u8>, usize) {
 
 /// Descomprime: u8[] empaquetado → Vec<f32>.
 pub fn decompress(data: &[u8], n_groups: usize, original_len: usize) -> Vec<f32> {
+    use half::f16;
     let mut out = Vec::with_capacity(original_len);
     let mut idx = 0;
 
     for g in 0..n_groups {
-        // Leer scale (4 bytes, little-endian)
-        let scale_bytes: [u8; 4] = data[idx..idx + 4].try_into().unwrap();
-        let scale = f32::from_le_bytes(scale_bytes);
-        idx += 4;
+        // Leer scale (2 bytes, f16 little-endian)
+        let scale_bytes: [u8; 2] = data[idx..idx + 2].try_into().unwrap();
+        let scale = f16::from_le_bytes(scale_bytes).to_f32();
+        idx += 2;
 
         let n_in_group = if g == n_groups - 1 {
             let rem = original_len % GROUP;
@@ -81,19 +83,18 @@ pub fn decompress(data: &[u8], n_groups: usize, original_len: usize) -> Vec<f32>
             for _ in 0..n_in_group {
                 out.push(0.0);
             }
-            idx += 5; // skip zero bits
+            idx += 5;
             continue;
         }
 
-        // Leer 5 bytes de bits
         let bits_slice: &[u8; 5] = &data[idx..idx + 5].try_into().unwrap();
         let bits = read_40_bits(bits_slice);
         idx += 5;
 
         for j in 0..n_in_group {
             let bit_pos = j * 5;
-            let q = (bits >> bit_pos) & 0x1F; // 5-bit mask
-            let norm = (q as f32) / 15.5 - 1.0; // [q=0→-1, q=15.5→0, q=31→+1]
+            let q = (bits >> bit_pos) & 0x1F;
+            let norm = (q as f32) / 15.5 - 1.0;
             out.push(norm * scale);
         }
     }
@@ -136,6 +137,6 @@ mod tests {
         let raw_bytes = grads.len() * 4;
         let ratio = raw_bytes as f64 / compressed.len() as f64;
         println!("Raw: {} bytes, KuantGrad: {} bytes, ratio: {:.2}×", raw_bytes, compressed.len(), ratio);
-        assert!(ratio > 3.0, "ratio debería ser ~3.56×, fue {:.2}", ratio);
+        assert!(ratio > 4.0, "ratio debería ser ~4.57×, fue {:.2}", ratio);
     }
 }

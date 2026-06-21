@@ -222,6 +222,10 @@ name = "xoria_bit_cuda"
 path = "xorIA/xoria_bit_cuda.rs"
 
 [[bin]]
+name = "xoria_cuant"
+path = "xorIA/xoria_cuant.rs"
+
+[[bin]]
 name = "bench_kernels"
 path = "xorIA/bin/bench_kernels.rs"
 
@@ -260,3 +264,7 @@ path = "xorIA/bin/test_xor_embed.rs"
 [[bin]]
 name = "test_kuantgrad"
 path = "xorIA/bin/test_kuantgrad.rs"
+
+[[bin]]
+name = "test_turbokuant"
+path = "xorIA/bin/test_turbokuant.rs"
