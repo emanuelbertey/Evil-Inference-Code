@@ -247,3 +247,15 @@ path = "xorIA/auto_train.rs"
 [[bin]]
 name = "test_cuda_kernel"
 path = "xorIA/bin/test_cuda_kernel.rs"
+
+[[bin]]
+name = "test_ddos"
+path = "xorIA/bin/test_ddos.rs"
+
+[[bin]]
+name = "test_xor_embed"
+path = "xorIA/bin/test_xor_embed.rs"
+
+[[bin]]
+name = "test_kuantgrad"
+path = "xorIA/bin/test_kuantgrad.rs"

@@ -88,7 +88,10 @@ pub fn auto_train_main() -> Result<(), Box<dyn Error>> {
         }
 
         if let Some(f) = config.dataset.as_deref() {
-            let _ = hf_manager::download_file(url, f, &token, &hf_dir)?;
+            match hf_manager::download_file(url, f, &token, &hf_dir) {
+                Ok(_) => {},
+                Err(e) => eprintln!("  [WARN] Dataset '{}' no encontrado en HF ({}), continuando con dataset por defecto de xoria...", f, e),
+            }
         }
     } else {
         println!("(sin url, saltando descarga HF)");
