@@ -10,6 +10,8 @@ mod test_xor_embed;
 mod test_kuantgrad;
 #[path = "bin/test_turbokuant.rs"]
 mod test_turbokuant;
+#[path = "bin/test_cuda_kuantgrad.rs"]
+mod test_cuda_kuantgrad;
 
 pub fn testlist_main() {
     loop {
@@ -22,11 +24,12 @@ pub fn testlist_main() {
         println!("  3. test_xor_embed      XOR-Encrypted Kernel");
         println!("  4. test_kuantgrad      KuantGrad Optimizer");
         println!("  5. test_turbokuant     TurboQuant KV Cache");
+        println!("  6. test_cuda_kuantgrad CUDA KuantGrad AdamW Kernel");
         println!();
         println!("  b. Back to main menu");
         println!("========================================================");
         println!();
-        print!("  Selecciona un test [1-5/b]: ");
+        print!("  Selecciona un test [1-6/b]: ");
         io::stdout().flush().unwrap();
 
         let mut choice = String::new();
@@ -61,6 +64,12 @@ pub fn testlist_main() {
             "5" => {
                 println!("\n  -> test_turbokuant (TurboQuant KV Cache)...\n");
                 if let Err(e) = test_turbokuant::test_turbokuant_main() {
+                    eprintln!("  Error: {}", e);
+                }
+            }
+            "6" => {
+                println!("\n  -> test_cuda_kuantgrad (CUDA KuantGrad AdamW Kernel)...\n");
+                if let Err(e) = test_cuda_kuantgrad::main() {
                     eprintln!("  Error: {}", e);
                 }
             }
