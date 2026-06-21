@@ -382,13 +382,24 @@ pub fn xoria_cuant() -> Result<(), Box<dyn Error>> {
     model_v.release_all_weights(&device);
     println!("Kernels listos en {:.2}s\n", inf_start.elapsed().as_secs_f32());
 
-    let kv_bits = 3usize;
     let kv_seed = 42u64;
+    let mut kv_bits = loop {
+        print!("TurboQuant bits (2/3/4) [3]: ");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        let line = line.trim();
+        if line.is_empty() { break 3usize; }
+        match line.parse::<usize>() {
+            Ok(2 | 3 | 4) => break line.parse().unwrap(),
+            _ => println!("  Opciones: 2, 3 o 4"),
+        }
+    };
     let mut current_len = 50usize;
     let mut session_caches = model_v.build_kuant_caches(kv_bits, kv_seed);
     let mut session_offset = 0usize;
 
-    println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'reset', 'salir'\n");
+    println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'quant <n>', 'reset', 'salir'\n");
 
     loop {
         print!(
@@ -436,6 +447,20 @@ pub fn xoria_cuant() -> Result<(), Box<dyn Error>> {
             if let Ok(v) = input[5..].trim().parse::<f32>() {
                 repetition_penalty = v;
                 println!("  -> R-Pen: {}\n", repetition_penalty);
+                continue;
+            }
+        }
+        if input.to_lowercase().starts_with("quant ") {
+            if let Ok(v) = input[6..].trim().parse::<usize>() {
+                match v {
+                    2 | 3 | 4 => {
+                        kv_bits = v;
+                        session_caches = model_v.build_kuant_caches(kv_bits, kv_seed);
+                        session_offset = 0;
+                        println!("  -> TurboQuant cambiado a {} bits, cache reiniciada.\n", kv_bits);
+                    },
+                    _ => println!("  Opciones: 2, 3 o 4\n"),
+                }
                 continue;
             }
         }
