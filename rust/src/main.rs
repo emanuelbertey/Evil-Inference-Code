@@ -22,6 +22,8 @@ mod msltmchat_cuda;
 mod transformer_chat;
 #[path = "../xorIA/transformer_chat_cuda.rs"]
 mod transformer_chat_cuda;
+#[path = "../xorIA/transformer_quant_kv.rs"]
+mod transformer_quant_kv;
 #[path = "../xorIA/auto_train.rs"]
 mod auto_train;
 #[path = "../xorIA/testlist.rs"]
@@ -51,6 +53,7 @@ fn main() {
     println!("║   Transformer:                                           ║");
     println!("║     8.  transformer_chat (CPU)    Transformer Chat       ║");
     println!("║     9.  transformer_chat_cuda (CUDA) Transformer GPU     ║");
+    println!("║     13. transformer_quant_kv (CPU) Transformer+TurboQuant║");
     println!("║                                                          ║");
     println!("║   Tools:                                                 ║");
     println!("║     10. auto_train      (auto)   HF + Training           ║");
@@ -61,7 +64,7 @@ fn main() {
     println!("║                                                          ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
-    print!("  Seleccioná una opción [1-12/q]: ");
+    print!("  Seleccioná una opción [1-13/q]: ");
     io::stdout().flush().unwrap();
 
     let mut choice = String::new();
@@ -116,6 +119,10 @@ fn main() {
         "12" => {
             println!("\n  -> test_turbokuant (TurboQuant KV Cache)...\n");
             if let Err(e) = test_turbokuant::test_turbokuant_main() { eprintln!("Error: {}", e); }
+        }
+        "13" => {
+            println!("\n  → transformer_quant_kv (CPU Transformer + TurboQuant KV)...\n");
+            if let Err(e) = transformer_quant_kv::transformer_quant_kv() { eprintln!("Error: {}", e); }
         }
         "q" | "quit" | "salir" | "" => {
             println!("  Saliendo.");

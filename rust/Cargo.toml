@@ -206,6 +206,10 @@ name = "transformer_chat_cuda"
 path = "xorIA/transformer_chat_cuda.rs"
 
 [[bin]]
+name = "transformer_quant_kv"
+path = "xorIA/transformer_quant_kv.rs"
+
+[[bin]]
 name = "bit_transformer"
 path = "xorIA/bit_transformer/main.rs"
 
