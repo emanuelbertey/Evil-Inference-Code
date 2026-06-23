@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+wheels/
+
+# Rye / venv
+.venv/
+*.lock
+
+# Environment (contains HF token)
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Model cache (downloaded from HF)
+*.safetensors
+*.pt
+*.bin
+checkpoints/
+logs/training.log
+logs/510M.log
+logs/279M.log
+logs/1.1B.log
+scripts/sync_dossier.py

@@ -276,3 +276,7 @@ path = "xorIA/bin/test_rope.rs"
 [[bin]]
 name = "test_transformer_vs_bit"
 path = "xorIA/bin/test_transformer_vs_bit.rs"
+
+[[bin]]
+name = "stress_transformer_vs_bit"
+path = "xorIA/bin/stress_transformer_vs_bit.rs"

@@ -11,7 +11,9 @@ use std::error::Error;
 use std::time::Instant;
 
 use burn::prelude::*;
+use burn::grad_clipping::GradientClippingConfig;
 use burn::module::Module;
+use burn::optim::decay::WeightDecayConfig;
 use burn::optim::{AdamConfig, Optimizer, GradientsParams};
 use burn::nn::{EmbeddingConfig, LinearConfig};
 use burn::nn::loss::CrossEntropyLossConfig;
@@ -204,7 +206,10 @@ fn benchmark_training_normal(
 ) -> (Vec<f64>, f64) {
     let device = input.device();
     let mut model = model.clone();
-    let mut optim = AdamConfig::new().init();
+    let mut optim = AdamConfig::new()
+        .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
+        .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+        .init();
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
     let mut losses = Vec::with_capacity(TRAIN_STEPS);
 
@@ -222,7 +227,7 @@ fn benchmark_training_normal(
     }
     let elapsed = start.elapsed().as_secs_f64();
     let tok_s = (TRAIN_STEPS as f64 * BATCH_SIZE as f64 * SEQ_LEN as f64) / elapsed;
-    println!("  Normal FP32       {:8.3}s total  {:10.1} tok/s  loss: {:.4} → {:.4}",
+    println!("  Normal FP32       {:8.3}s total  {:10.1} tok/s  loss: {:.4} \u{2192} {:.4}",
              elapsed, tok_s, losses[0], losses[TRAIN_STEPS - 1]);
     (losses, tok_s)
 }
@@ -234,7 +239,10 @@ fn benchmark_training_bit(
 ) -> (Vec<f64>, f64) {
     let device = input.device();
     let mut model = model.clone();
-    let mut optim = AdamConfig::new().init();
+    let mut optim = AdamConfig::new()
+        .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
+        .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+        .init();
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
     let mut losses = Vec::with_capacity(TRAIN_STEPS);
 

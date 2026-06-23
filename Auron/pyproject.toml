@@ -1,0 +1,37 @@
+[project]
+name = "ouro"
+version = "0.1.0"
+description = "Ouroboros/Chimera hybrid GDN-Attention language models"
+authors = [
+    { name = "Gasquez Florian", email = "m@fy.to" }
+]
+dependencies = [
+    "torch>=2.4.0",
+    "transformers>=4.45.0",
+    "safetensors>=0.4.0",
+    "huggingface-hub>=0.25.0",
+    "flash-linear-attention>=0.1.0",
+    "einops>=0.8.0",
+    "python-dotenv>=1.0.0",
+]
+readme = "README.md"
+requires-python = ">= 3.11"
+license = "Apache-2.0"
+keywords = ["language-model", "gdn", "attention", "hybrid", "ouroboros", "chimera"]
+
+[project.scripts]
+ouro = "ouro.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["ouro"]

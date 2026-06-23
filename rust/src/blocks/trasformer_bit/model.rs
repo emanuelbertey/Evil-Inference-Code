@@ -213,8 +213,8 @@ impl<B: Backend> BitLinearRMSNorm<B> {
     }
 
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let rms = x.clone().powf_scalar(2.0).mean_dim(2).sqrt().clamp_min(self.eps as f32);
-        let normed = x / rms;
+        let denom = (x.clone().powf_scalar(2.0).mean_dim(2) + self.eps as f32).sqrt();
+        let normed = x / denom;
         normed * self.weight.val().unsqueeze::<2>().unsqueeze::<3>()
     }
 }

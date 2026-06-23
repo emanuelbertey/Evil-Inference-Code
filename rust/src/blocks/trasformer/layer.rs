@@ -39,13 +39,11 @@ impl<B: Backend> RMSNorm<B> {
 
     /// Forward for 3D: (B, S, D) → (B, S, D)
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let rms = x.clone()
+        let denom = (x.clone()
             .powf_scalar(2.0)
-            .mean_dim(2)
-            .sqrt()
-            .clamp_min(self.eps as f32);
+            .mean_dim(2) + self.eps as f32).sqrt();
         // Ensure proper broadcasting: weight -> (1, 1, D)
-        let normed = x / rms;
+        let normed = x / denom;
         let w = self.weight.val().unsqueeze::<2>().unsqueeze::<3>();
         normed * w
     }

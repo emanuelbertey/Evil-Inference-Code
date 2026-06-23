@@ -157,24 +157,20 @@ impl<B: Backend> RMSNorm<B> {
 
     /// Forward for 2D input: (B, D) → (B, D)
     pub fn forward_2d(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
-        // rms = sqrt(mean(x², dim=-1, keepdim=True) + eps)
-        let rms = x.clone()
+        // denom = sqrt(mean(x², dim=-1, keepdim=True) + eps)
+        let denom = (x.clone()
             .powf_scalar(2.0)
-            .mean_dim(1)
-            .sqrt()
-            .clamp_min(self.eps as f32);
-        let normed = x / rms;
+            .mean_dim(1) + self.eps as f32).sqrt();
+        let normed = x / denom;
         normed * self.weight.val().unsqueeze::<2>()
     }
 
     /// Forward for 3D input: (B, S, D) → (B, S, D)
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let rms = x.clone()
+        let denom = (x.clone()
             .powf_scalar(2.0)
-            .mean_dim(2)
-            .sqrt()
-            .clamp_min(self.eps as f32);
-        let normed = x / rms;
+            .mean_dim(2) + self.eps as f32).sqrt();
+        let normed = x / denom;
         normed * self.weight.val().unsqueeze::<2>().unsqueeze::<3>()
     }
 }

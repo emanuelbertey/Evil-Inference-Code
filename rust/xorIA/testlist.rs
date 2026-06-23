@@ -16,6 +16,8 @@ mod test_cuda_kuantgrad;
 mod test_rope;
 #[path = "bin/test_transformer_vs_bit.rs"]
 mod test_transformer_vs_bit;
+#[path = "bin/stress_transformer_vs_bit.rs"]
+mod stress_transformer_vs_bit;
 
 pub fn testlist_main() {
     loop {
@@ -30,12 +32,13 @@ pub fn testlist_main() {
         println!("  5. test_turbokuant     TurboQuant KV Cache");
         println!("  6. test_cuda_kuantgrad CUDA KuantGrad AdamW Kernel");
         println!("  7. test_rope           RoPE Mathematical Test");
-        println!("  8. test_transformer_vs_bit  Transformer FP32 vs BitLinear");
+        println!("  8. test_transformer_vs_bit      Transformer FP32 vs BitLinear");
+        println!("  9. stress_transformer_vs_bit    Stress Training (4 layers)");
         println!();
         println!("  b. Back to main menu");
         println!("========================================================");
         println!();
-        print!("  Selecciona un test [1-8/b]: ");
+        print!("  Selecciona un test [1-9/b]: ");
         io::stdout().flush().unwrap();
 
         let mut choice = String::new();
@@ -88,6 +91,12 @@ pub fn testlist_main() {
             "8" => {
                 println!("\n  -> test_transformer_vs_bit (FP32 vs BitLinear)...\n");
                 if let Err(e) = test_transformer_vs_bit::test_transformer_vs_bit_main() {
+                    eprintln!("  Error: {}", e);
+                }
+            }
+            "9" => {
+                println!("\n  -> stress_transformer_vs_bit (4 layers Stress Training)...\n");
+                if let Err(e) = stress_transformer_vs_bit::stress_transformer_vs_bit_main() {
                     eprintln!("  Error: {}", e);
                 }
             }
