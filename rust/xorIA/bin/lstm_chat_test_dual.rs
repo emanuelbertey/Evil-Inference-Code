@@ -354,6 +354,7 @@ fn main() {
                 bias: false,
                 activation_bits: 8,
                 rms_norm_eps: 1e-5,
+                quantized: true,
             }.init(&device),
             hidden_gate: BitLinearConfig {
                 in_features: hidden_size,
@@ -361,6 +362,7 @@ fn main() {
                 bias: false,
                 activation_bits: 8,
                 rms_norm_eps: 1e-5,
+                quantized: true,
             }.init(&device),
             hidden_size,
         },

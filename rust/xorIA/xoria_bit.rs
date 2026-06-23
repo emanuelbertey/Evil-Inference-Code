@@ -105,7 +105,10 @@ fn generate_text_cached<B: Backend>(
 
     for _ in 0..length {
         if let Some(token) = tokenizer.id_to_token(next_id) {
-            if token == "eos" { break; }
+            if token == "eos" { 
+                println!("\n[Terminado con token EOS]");
+                break; 
+            }
         }
 
         generated.push(next_id);
@@ -189,19 +192,19 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
             BitLinearTransformerLayer {
                 attn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
                 qkv: BitLinearQKVProjection {
-                    q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                    k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                    v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                    k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                    v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                     num_heads, num_kv_groups, head_dim,
                 },
                 o_proj: BitLinearOutputProjection {
-                    o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                     num_heads, head_dim,
                 },
                 ffn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
                 ffn: BitLinearSwiGLUFeedForward {
-                    gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                    down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                    down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                     dropout: burn::nn::DropoutConfig::new(0.1).init(),
                     intermediate_dim: ffn_dim,
                 },
@@ -212,7 +215,7 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
         let mut model: TransformerBitLinearLM<Flex<f32>> = TransformerBitLinearLM {
             embedding: burn::nn::EmbeddingConfig::new(vocab_size, d_model).init(&device),
             transformer: BitLinearTransformerStack { final_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device), num_layers, d_model, layers },
-            head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+            head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
             vocab_size, d_model, num_layers,
         };
 
@@ -366,19 +369,19 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
             BitLinearTransformerLayer {
                 attn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
                 qkv: BitLinearQKVProjection {
-                    q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                    k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                    v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                    k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                    v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                     num_heads, num_kv_groups, head_dim,
                 },
                 o_proj: BitLinearOutputProjection {
-                    o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                     num_heads, head_dim,
                 },
                 ffn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
                 ffn: BitLinearSwiGLUFeedForward {
-                    gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                    down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                    down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                     dropout: burn::nn::DropoutConfig::new(0.1).init(),
                     intermediate_dim: ffn_dim,
                 },
@@ -389,7 +392,7 @@ pub fn xoria_cpu() -> Result<(), Box<dyn Error>> {
         model = TransformerBitLinearLM {
             embedding: EmbeddingConfig::new(vocab_size, d_model).init(&device),
             transformer: BitLinearTransformerStack { final_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device), num_layers, d_model, layers },
-            head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+            head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
             vocab_size, d_model, num_layers,
         };
 

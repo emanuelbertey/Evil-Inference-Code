@@ -146,9 +146,9 @@ struct BitNet3Layer<B: Backend> {
 impl<B: Backend> BitNet3Layer<B> {
     fn new(device: &B::Device) -> Self {
         Self {
-            ln1: BitLinearConfig { in_features: 16, out_features: 16, bias: true, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
-            ln2: BitLinearConfig { in_features: 16, out_features: 16, bias: true, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
-            ln3: BitLinearConfig { in_features: 16, out_features: 2, bias: true, activation_bits: 8, rms_norm_eps: 1e-5 }.init(device),
+            ln1: BitLinearConfig { in_features: 16, out_features: 16, bias: true, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(device),
+            ln2: BitLinearConfig { in_features: 16, out_features: 16, bias: true, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(device),
+            ln3: BitLinearConfig { in_features: 16, out_features: 2, bias: true, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(device),
         }
     }
 

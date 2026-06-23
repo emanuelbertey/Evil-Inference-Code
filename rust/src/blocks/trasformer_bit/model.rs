@@ -266,6 +266,7 @@ impl<B: Backend> KVCache<B> {
         let mut rev_k = Vec::new();
         let mut rev_v = Vec::new();
         for (k, v) in self.k_chunks.drain(..).rev().zip(self.v_chunks.drain(..).rev()) {
+            if remaining == 0 { break; }
             let seq = k.dims()[1];
             if remaining >= seq {
                 rev_k.push(k);

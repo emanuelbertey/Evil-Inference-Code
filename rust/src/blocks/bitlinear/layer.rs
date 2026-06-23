@@ -254,23 +254,29 @@ fn quantize_weights_ternary<B: Backend>(w: Tensor<B, 2>) -> (Tensor<B, 2>, Tenso
 /// For input (B, S, D): γ = max(|X|, dim=D) per token → shape (B, S, 1)
 ///   X_q = clamp(round(X * Q_b / γ), -Q_b, Q_b)
 ///   output = X_q * (γ / Q_b)
+///
+/// gamma is DETACHED from the gradient path so the backward pass is
+/// a clean identity (STE): d(L)/d(x) ≈ d(L)/d(output). Without detach,
+/// d(gamma)/d(x) would introduce sparse noise (~0.004) through the
+/// per-token normalization factor.
 fn quantize_activations_8bit<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
     let q_b: f32 = 127.0;
 
     // Per-token absmax: max over last dim (d_model) → shape (B, S, 1)
     let gamma = x.clone().abs().max_dim(2).clamp_min(1e-8).unsqueeze::<3>();
+    let gamma_detached = gamma.detach();
 
     // Scale to [-127, 127] range per token
-    let x_scaled = x.clone() * (q_b.clone() as f32 / gamma.clone());
+    let x_scaled = x.clone() * (q_b.clone() as f32 / gamma_detached.clone());
     let x_rounded = x_scaled.clone().round();
     let x_clamped = x_rounded.clamp(-q_b, q_b);
 
-    // STE: x + (quantized - x).detach()
+    // STE: forward uses quantized, backward is identity
     let diff = x_clamped - x_scaled.clone();
     let x_quant_ste = x_scaled + diff.detach();
 
-    // Dequantize: scale back per token
-    x_quant_ste * (gamma / q_b)
+    // Dequantize: scale back per token (gamma_detached keeps gradient clean)
+    x_quant_ste * (gamma_detached / q_b)
 }
 
 /// Quantize activations to i8 without dequantizing. For inference only.
@@ -319,6 +325,10 @@ pub struct BitLinearConfig {
     /// Epsilon for RMSNorm
     #[config(default = 1e-5)]
     pub rms_norm_eps: f64,
+    /// Whether to apply weight + activation quantization (default: true).
+    /// Set to false for the LM head to avoid precision loss at the output projection.
+    #[config(default = true)]
+    pub quantized: bool,
 }
 
 // ─── BitLinear Layer ────────────────────────────────────────────────────────
@@ -331,6 +341,7 @@ pub struct BitLinear<B: Backend> {
     pub activation_bits: usize,
     pub in_features: usize,
     pub out_features: usize,
+    pub quantized: bool,
 }
 
 impl BitLinearConfig {
@@ -358,6 +369,7 @@ impl BitLinearConfig {
             activation_bits: self.activation_bits,
             in_features: self.in_features,
             out_features: self.out_features,
+            quantized: self.quantized,
         }
     }
 }
@@ -367,60 +379,84 @@ impl<B: Backend> BitLinear<B> {
     ///
     /// Pipeline:
     ///   1. RMSNorm on input (Sub-LN for stable quantization)
-    ///   2. Quantize activations to 8-bit integers (STE)
-    ///   3. Quantize weights to ternary {-1, 0, +1} (STE)
-    ///   4. Matrix multiply: output = X_q @ W_q^T
-    ///   5. Add bias if present
+    ///   2. If quantized: Quantize activations to 8-bit integers (STE)
+    ///   3. If quantized: Quantize weights to ternary {-1, 0, +1} (STE)
+    ///   4. If not quantized: use full-precision weights directly
+    ///   5. Matrix multiply: output = X @ W^T
+    ///   6. Add bias if present
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let [batch, seq, _d_in] = x.dims();
 
-        // 1. Sub-LN: RMSNorm before quantization
-        let x_norm = self.rms_norm.forward(x);
+        if self.quantized {
+            // 1. Sub-LN: RMSNorm before quantization
+            let x_norm = self.rms_norm.forward(x);
 
-        // 2. Quantize activations (8-bit with STE)
-        let x_quant = quantize_activations_8bit(x_norm);
+            // 2. Quantize activations (8-bit with STE)
+            let x_quant = quantize_activations_8bit(x_norm);
 
-        // 3. Quantize weights (ternary with STE)
-        let (w_quant, _scale) = quantize_weights_ternary(self.weight.as_ref().unwrap().val());
+            // 3. Quantize weights (ternary with STE)
+            let (w_quant, _scale) = quantize_weights_ternary(self.weight.as_ref().unwrap().val());
 
-        // 4. MatMul: x_quant @ w_quant^T
-        // Reshape for batch matmul: (B*S, D_in) @ (D_out, D_in)^T = (B*S, D_out)
-        let x_flat = x_quant.reshape([batch * seq, self.in_features]);
-        let output = x_flat.matmul(w_quant.transpose());
-        let mut output = output.reshape([batch, seq, self.out_features]);
+            // 4. MatMul: x_quant @ w_quant^T
+            let x_flat = x_quant.reshape([batch * seq, self.in_features]);
+            let output = x_flat.matmul(w_quant.transpose());
+            let mut output = output.reshape([batch, seq, self.out_features]);
 
-        // 5. Add bias
-        if let Some(b) = &self.bias {
-            output = output + b.val().unsqueeze::<2>().unsqueeze::<3>();
+            // 5. Add bias
+            if let Some(b) = &self.bias {
+                output = output + b.val().unsqueeze::<2>().unsqueeze::<3>();
+            }
+
+            output
+        } else {
+            // Unquantized forward: skip quantization for layers that need full precision
+            // (e.g. LM head). Only RMSNorm + plain matmul.
+            let x_norm = self.rms_norm.forward(x);
+            let w = self.weight.as_ref().unwrap().val();
+            let x_flat = x_norm.reshape([batch * seq, self.in_features]);
+            let output = x_flat.matmul(w.transpose());
+            let mut output = output.reshape([batch, seq, self.out_features]);
+            if let Some(b) = &self.bias {
+                output = output + b.val().unsqueeze::<2>().unsqueeze::<3>();
+            }
+            output
         }
-
-        output
     }
 
     /// Forward pass for 2D input: (B, D_in) → (B, D_out)
     pub fn forward_2d(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let [batch, _d_in] = x.dims();
 
-        // 1. Sub-LN: RMSNorm
-        let x_norm = self.rms_norm.forward_2d(x);
+        if self.quantized {
+            // 1. Sub-LN: RMSNorm
+            let x_norm = self.rms_norm.forward_2d(x);
 
-        // 2. Quantize activations (reshape to 3D for per-token quant, then back)
-        let x_3d = x_norm.reshape([batch, 1, self.in_features]);
-        let x_quant_3d = quantize_activations_8bit(x_3d);
-        let x_quant = x_quant_3d.reshape([batch, self.in_features]);
+            // 2. Quantize activations (reshape to 3D for per-token quant, then back)
+            let x_3d = x_norm.reshape([batch, 1, self.in_features]);
+            let x_quant_3d = quantize_activations_8bit(x_3d);
+            let x_quant = x_quant_3d.reshape([batch, self.in_features]);
 
-        // 3. Quantize weights
-        let (w_quant, _scale) = quantize_weights_ternary(self.weight.as_ref().unwrap().val());
+            // 3. Quantize weights
+            let (w_quant, _scale) = quantize_weights_ternary(self.weight.as_ref().unwrap().val());
 
-        // 4. MatMul
-        let mut output = x_quant.matmul(w_quant.transpose());
+            // 4. MatMul
+            let mut output = x_quant.matmul(w_quant.transpose());
 
-        // 5. Bias
-        if let Some(b) = &self.bias {
-            output = output + b.val().unsqueeze::<2>();
+            // 5. Bias
+            if let Some(b) = &self.bias {
+                output = output + b.val().unsqueeze::<2>();
+            }
+
+            output
+        } else {
+            let x_norm = self.rms_norm.forward_2d(x);
+            let w = self.weight.as_ref().unwrap().val();
+            let mut output = x_norm.matmul(w.transpose());
+            if let Some(b) = &self.bias {
+                output = output + b.val().unsqueeze::<2>();
+            }
+            output
         }
-
-        output
     }
 
     /// Get the current ternary weight values (for inspection/inference export).
@@ -585,6 +621,7 @@ impl BitLinearFeedForwardConfig {
             bias: self.bias,
             activation_bits: 8,
             rms_norm_eps: 1e-5,
+            quantized: true,
         }.init(device);
 
         let proj_down = BitLinearConfig {
@@ -593,6 +630,7 @@ impl BitLinearFeedForwardConfig {
             bias: self.bias,
             activation_bits: 8,
             rms_norm_eps: 1e-5,
+            quantized: true,
         }.init(device);
 
         let dropout = burn::nn::DropoutConfig::new(self.dropout).init();

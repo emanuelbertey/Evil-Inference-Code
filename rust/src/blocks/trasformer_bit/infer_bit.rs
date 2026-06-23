@@ -165,6 +165,7 @@ pub fn load<B: Backend>(
                 activation_bits: 8,
                 in_features: in_f,
                 out_features: out_f,
+                quantized: true,
             }
         };
 
@@ -214,6 +215,7 @@ pub fn load<B: Backend>(
         activation_bits: 8,
         in_features: d_model,
         out_features: vocab_size,
+        quantized: true,
     };
 
     let model = TransformerBitLinearLM {

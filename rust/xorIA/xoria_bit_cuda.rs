@@ -147,16 +147,16 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
             BitLinearTransformerLayer {
                 attn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
                 qkv: BitLinearQKVProjection {
-                    q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                    k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                    v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                    k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                    v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                     num_heads, num_kv_groups, head_dim,
                 },
-                o_proj: BitLinearOutputProjection { o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device), num_heads, head_dim },
+                o_proj: BitLinearOutputProjection { o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device), num_heads, head_dim },
                 ffn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
                 ffn: BitLinearSwiGLUFeedForward {
-                    gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                    down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                    gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                    down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                     dropout: burn::nn::DropoutConfig::new(0.0).init(), intermediate_dim: ffn_dim,
                 },
                 residual_dropout: burn::nn::DropoutConfig::new(0.0).init(),
@@ -165,7 +165,7 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
         let mut model: FlexModel = TransformerBitLinearLM {
             embedding: EmbeddingConfig::new(vocab_size, d_model).init(&device),
             transformer: BitLinearTransformerStack { final_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device), num_layers, d_model, layers },
-            head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+            head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: false }.init(&device),
             vocab_size, d_model, num_layers,
         };
         println!("Cargando modelo MPK para exportar...");
@@ -282,16 +282,16 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
         BitLinearTransformerLayer {
             attn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
             qkv: BitLinearQKVProjection {
-                q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                q_proj: BitLinearConfig { in_features: d_model, out_features: num_heads * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                k_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                v_proj: BitLinearConfig { in_features: d_model, out_features: num_kv_groups * head_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                 num_heads, num_kv_groups, head_dim,
             },
-            o_proj: BitLinearOutputProjection { o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device), num_heads, head_dim },
+            o_proj: BitLinearOutputProjection { o_proj: BitLinearConfig { in_features: num_heads * head_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device), num_heads, head_dim },
             ffn_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device),
             ffn: BitLinearSwiGLUFeedForward {
-                gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
-                down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+                gate_up_proj: BitLinearConfig { in_features: d_model, out_features: 2 * ffn_dim, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
+                down_proj: BitLinearConfig { in_features: ffn_dim, out_features: d_model, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: true }.init(&device),
                 dropout: burn::nn::DropoutConfig::new(0.1).init(), intermediate_dim: ffn_dim,
             },
             residual_dropout: burn::nn::DropoutConfig::new(0.1).init(),
@@ -301,7 +301,7 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
     let mut model: TransformerBitLinearLM<MyBackend> = TransformerBitLinearLM {
         embedding: EmbeddingConfig::new(vocab_size, d_model).init(&device),
         transformer: BitLinearTransformerStack { final_norm: BitLinearRMSNorm::new(d_model, 1e-5, &device), num_layers, d_model, layers },
-        head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5 }.init(&device),
+        head: BitLinearConfig { in_features: d_model, out_features: vocab_size, bias: false, activation_bits: 8, rms_norm_eps: 1e-5, quantized: false }.init(&device),
         vocab_size, d_model, num_layers,
     };
 
@@ -361,6 +361,7 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
 
     let mut optim = AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4))).with_grad_clipping(Some(GradientClippingConfig::Norm(1.0))).init();
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
+    let label_smooth_eps: f32 = 0.1;
     let seq_len = 64;
     let stride = 64;
 
@@ -388,7 +389,15 @@ pub fn xoria_cuda() -> Result<(), Box<dyn Error>> {
             for b in 0..nb {
                 let (x, y) = create_batch::<MyBackend>(&tokens, b * tpb, batch_size, seq_len, stride, &device);
                 let logits = model.forward(x);
-                let loss = loss_fn.forward(logits.reshape([batch_size * seq_len, vocab_size]), y.reshape([batch_size * seq_len]));
+                let flat_logits = logits.reshape([batch_size * seq_len, vocab_size]);
+                let flat_y = y.reshape([batch_size * seq_len]);
+                let ce_loss = loss_fn.forward(flat_logits.clone(), flat_y.clone());
+                // Label smoothing: smoothes the target distribution to prevent overconfidence
+                // loss = (1-eps)*CE + eps*uniform_KL
+                // where uniform_KL = H(uniform, softmax(logits)) = log(vocab) - entropy(softmax(logits))
+                let lprobs = burn::tensor::activation::log_softmax(flat_logits.clone(), 1);
+                let smooth_loss = lprobs.mean_dim(1).mean(); // -H(softmax) term; negated below
+                let loss = ce_loss.clone() * (1.0 - label_smooth_eps) - smooth_loss * label_smooth_eps;
                 let cl = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
                 if cl.is_nan() { println!("\n[!] NaN"); return Ok(()); }
                 total_loss += cl; batch_count += 1;

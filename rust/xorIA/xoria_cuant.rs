@@ -285,6 +285,7 @@ pub fn xoria_cuant() -> Result<(), Box<dyn Error>> {
                         bias: false,
                         activation_bits: 8,
                         rms_norm_eps: 1e-5,
+                        quantized: true,
                     }
                     .init(&device),
                     k_proj: BitLinearConfig {
@@ -293,6 +294,7 @@ pub fn xoria_cuant() -> Result<(), Box<dyn Error>> {
                         bias: false,
                         activation_bits: 8,
                         rms_norm_eps: 1e-5,
+                        quantized: true,
                     }
                     .init(&device),
                     v_proj: BitLinearConfig {
@@ -301,6 +303,7 @@ pub fn xoria_cuant() -> Result<(), Box<dyn Error>> {
                         bias: false,
                         activation_bits: 8,
                         rms_norm_eps: 1e-5,
+                        quantized: true,
                     }
                     .init(&device),
                     num_heads,
@@ -314,6 +317,7 @@ pub fn xoria_cuant() -> Result<(), Box<dyn Error>> {
                         bias: false,
                         activation_bits: 8,
                         rms_norm_eps: 1e-5,
+                        quantized: true,
                     }
                     .init(&device),
                     num_heads,
@@ -327,6 +331,7 @@ pub fn xoria_cuant() -> Result<(), Box<dyn Error>> {
                         bias: false,
                         activation_bits: 8,
                         rms_norm_eps: 1e-5,
+                        quantized: true,
                     }
                     .init(&device),
                     down_proj: BitLinearConfig {
@@ -335,6 +340,7 @@ pub fn xoria_cuant() -> Result<(), Box<dyn Error>> {
                         bias: false,
                         activation_bits: 8,
                         rms_norm_eps: 1e-5,
+                        quantized: true,
                     }
                     .init(&device),
                     dropout: burn::nn::DropoutConfig::new(0.1).init(),
@@ -358,6 +364,7 @@ pub fn xoria_cuant() -> Result<(), Box<dyn Error>> {
                 bias: false,
                 activation_bits: 8,
                 rms_norm_eps: 1e-5,
+                quantized: true,
             }
             .init(&device),
             vocab_size,

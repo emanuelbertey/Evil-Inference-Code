@@ -268,3 +268,11 @@ path = "xorIA/bin/test_kuantgrad.rs"
 [[bin]]
 name = "test_turbokuant"
 path = "xorIA/bin/test_turbokuant.rs"
+
+[[bin]]
+name = "test_rope"
+path = "xorIA/bin/test_rope.rs"
+
+[[bin]]
+name = "test_transformer_vs_bit"
+path = "xorIA/bin/test_transformer_vs_bit.rs"
