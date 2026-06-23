@@ -4,7 +4,7 @@ use burn::module::Module;
 use burn::tensor::{Tensor, backend::Backend};
 use crate::blocks::bitlinear::layer::BitLinearInferenceState;
 
-use super::ops::{apply_rope_fused, repeat_kv, apply_causal_mask, apply_causal_mask_with_offset};
+use super::ops::{apply_rope, apply_rope_fused, repeat_kv, apply_causal_mask, apply_causal_mask_with_offset};
 use super::projections::{BitLinearQKVProjection, BitLinearOutputProjection, BitLinearSwiGLUFeedForward, BitLinearRMSNorm};
 use super::cache::KVCache;
 use super::cache::KuantKVCache;
@@ -39,7 +39,7 @@ impl<B: Backend> BitLinearTransformerLayer<B> {
     fn attention_forward(&self, x: Tensor<B, 3>, offset: usize) -> Tensor<B, 3> {
         let [_batch, seq_len, _d] = x.dims();
         let (q, k, v) = self.qkv.forward(x);
-        let (q, k) = apply_rope_fused(q, k, offset);
+        let (q, k) = apply_rope(q, k, offset);
         let k = repeat_kv(k, self.qkv.num_heads, self.qkv.num_kv_groups);
         let v = repeat_kv(v, self.qkv.num_heads, self.qkv.num_kv_groups);
 

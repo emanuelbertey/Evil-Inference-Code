@@ -20,9 +20,9 @@ pub(crate) fn softmax_vec(scores: &[f32]) -> Vec<f32> {
     }
 }
 
-// ─── Fused RoPE (tensor ops, preserves autodiff) ──────────────────────────
+// ─── RoPE (tensor ops, preserves autodiff) ────────────────────────────────
 
-pub fn apply_rope_fused<B: Backend>(
+pub fn apply_rope<B: Backend>(
     q: Tensor<B, 4>,
     k: Tensor<B, 4>,
     offset: usize,
@@ -56,6 +56,62 @@ pub fn apply_rope_fused<B: Backend>(
     let k_out_second = k_first * sin + k_second * cos;
     let k_out = Tensor::cat(vec![k_out_first, k_out_second], 3);
 
+    (q_out, k_out)
+}
+
+// ─── RoPE Fused (raw slice ops, fast inference, no autodiff) ───────────────
+
+pub fn apply_rope_fused<B: Backend>(
+    q: Tensor<B, 4>,
+    k: Tensor<B, 4>,
+    offset: usize,
+) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    let [batch, seq_len, nheads, head_dim] = q.dims();
+    let nkv = k.dims()[2];
+    let hh = head_dim / 2;
+    let device = q.device();
+
+    let q_data = q.into_data();
+    let k_data = k.into_data();
+    let mut q_slice = q_data.as_slice::<f32>().unwrap().to_vec();
+    let mut k_slice = k_data.as_slice::<f32>().unwrap().to_vec();
+
+    let theta: Vec<f32> = (0..hh)
+        .map(|i| 1.0 / 10000.0f32.powf(2.0 * i as f32 / head_dim as f32))
+        .collect();
+
+    for b in 0..batch {
+        for s in 0..seq_len {
+            let pos = (offset + s) as f32;
+            for h in 0..nheads {
+                let base_q = ((b * seq_len) + s) * nheads * head_dim + h * head_dim;
+                for i in 0..hh {
+                    let cos = (pos * theta[i]).cos();
+                    let sin = (pos * theta[i]).sin();
+                    let q1 = q_slice[base_q + i];
+                    let q2 = q_slice[base_q + i + hh];
+                    q_slice[base_q + i] = q1 * cos - q2 * sin;
+                    q_slice[base_q + i + hh] = q1 * sin + q2 * cos;
+                }
+            }
+            for h in 0..nkv {
+                let base_k = ((b * seq_len) + s) * nkv * head_dim + h * head_dim;
+                for i in 0..hh {
+                    let cos = (pos * theta[i]).cos();
+                    let sin = (pos * theta[i]).sin();
+                    let k1 = k_slice[base_k + i];
+                    let k2 = k_slice[base_k + i + hh];
+                    k_slice[base_k + i] = k1 * cos - k2 * sin;
+                    k_slice[base_k + i + hh] = k1 * sin + k2 * cos;
+                }
+            }
+        }
+    }
+
+    let q_out = Tensor::<B, 4>::from_data(
+        TensorData::new(q_slice, [batch, seq_len, nheads, head_dim]), &device);
+    let k_out = Tensor::<B, 4>::from_data(
+        TensorData::new(k_slice, [batch, seq_len, nkv, head_dim]), &device);
     (q_out, k_out)
 }
 
