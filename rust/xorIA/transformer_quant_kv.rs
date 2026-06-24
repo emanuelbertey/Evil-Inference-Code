@@ -42,7 +42,7 @@ use xlstm::blocks::trasformer::layer::{
 };
 use xlstm::blocks::trasformer::attention::KVCache;
 use xlstm::blocks::trasformer_bit::cache::{KuantKVCache, MAX_CACHE_LEN};
-use xlstm::blocks::trasformer_bit::ops::{apply_rope_fused, apply_rope_partial, apply_rope_fused_partial, repeat_kv, apply_causal_mask};
+use xlstm::blocks::trasformer_bit::ops::{apply_rope_fused, apply_rope_partial, apply_rope_fused_partial, repeat_kv, apply_causal_mask, apply_causal_mask_with_offset};
 use xlstm::blocks::trasformer_bit::model::{Tokenizer, FileFragmentIterator, sample_from_logits, create_batch};
 
 type MyBackend = Autodiff<Flex<f32>>;
@@ -138,6 +138,73 @@ impl<B: Backend> TransformerLM<B> {
 
         let h = self.transformer.final_norm.forward(h);
         self.head.forward(h)
+    }
+
+    /// Forward with KV cache + partial RoPE (regular cache, not quant).
+    pub fn forward_with_cache_partial(
+        &self,
+        input: Tensor<B, 2, Int>,
+        offset: usize,
+        caches: Vec<Option<KVCache<B>>>,
+        rotary_pct: f64,
+    ) -> (Tensor<B, 3>, Vec<KVCache<B>>) {
+        let x = self.embedding.forward(input);
+        let mut h = x;
+        let mut new_caches = Vec::with_capacity(self.num_layers);
+
+        for (layer, cache) in self.transformer.layers.iter().zip(caches.into_iter()) {
+            let residual = h.clone();
+            let h_norm = layer.attn_norm.forward(h);
+
+            let (q, k_new, v_new) = layer.attention.qkv.forward(h_norm);
+            let (q, k_new) = apply_rope_partial(q, k_new, offset, rotary_pct);
+
+            let (k_full, v_full) = if let Some(prev) = cache {
+                let k_cat = Tensor::cat(vec![prev.cached_k, k_new.clone()], 1);
+                let v_cat = Tensor::cat(vec![prev.cached_v, v_new.clone()], 1);
+                (k_cat, v_cat)
+            } else {
+                (k_new.clone(), v_new.clone())
+            };
+
+            let new_cache = KVCache { cached_k: k_full.clone(), cached_v: v_full.clone() };
+
+            let k_expanded = repeat_kv(k_full, layer.attention.num_heads, layer.attention.num_kv_groups);
+            let v_expanded = repeat_kv(v_full, layer.attention.num_heads, layer.attention.num_kv_groups);
+
+            let q = q.swap_dims(1, 2);
+            let k = k_expanded.swap_dims(1, 2);
+            let v = v_expanded.swap_dims(1, 2);
+
+            let scale = (layer.attention.head_dim as f64).sqrt();
+            let mut scores = q.matmul(k.transpose()) / scale;
+
+            if let Some(cap) = layer.attention.attn_logit_cap {
+                scores = scores.div_scalar(cap).tanh().mul_scalar(cap);
+            }
+
+            let [_, _, q_len, kv_len] = scores.dims();
+            if layer.attention.causal && q_len > 1 {
+                scores = apply_causal_mask_with_offset(scores, q_len, kv_len);
+            }
+
+            let attn_weights = softmax(scores, 3);
+            let attn_weights = layer.attention.dropout.forward(attn_weights);
+            let attn_output = attn_weights.matmul(v);
+            let attn_output = attn_output.swap_dims(1, 2);
+            let h_attn = layer.attention.o_proj.forward(attn_output);
+            h = residual + h_attn;
+
+            let residual = h.clone();
+            let h_norm = layer.ffn_norm.forward(h);
+            let h_ffn = layer.ffn.forward(h_norm);
+            h = residual + h_ffn;
+
+            new_caches.push(new_cache);
+        }
+
+        let h = self.transformer.final_norm.forward(h);
+        (self.head.forward(h), new_caches)
     }
 
     /// Forward pass with TurboQuant KV cache.
@@ -297,16 +364,22 @@ fn generate_text_cached<B: Backend>(
     repetition_penalty: f32,
     mut caches: Vec<Option<KVCache<B>>>,
     mut current_offset: usize,
+    rotary_pct: f64,
 ) -> (String, usize, f32, Vec<KVCache<B>>, usize) {
     let ids = tokenizer.encode(seed_text);
     if ids.is_empty() { return (seed_text.to_string(), 0, 0.0, Vec::new(), current_offset); }
 
     let start_gen = Instant::now();
+    let use_partial = rotary_pct < 0.999;
     let seed_len = ids.len();
     let input = Tensor::<B, 2, Int>::from_data(
         TensorData::new(ids.iter().map(|&id| id as i64).collect(), [1, seed_len]), device);
 
-    let (logits, updated_caches) = model.forward_with_cache(input, current_offset, caches);
+    let (logits, updated_caches) = if use_partial {
+        model.forward_with_cache_partial(input, current_offset, caches, rotary_pct)
+    } else {
+        model.forward_with_cache(input, current_offset, caches)
+    };
     let mut caches = updated_caches;
     let [_, s_len, v_dim] = logits.dims();
     let last_logits = logits.slice([0..1, (s_len - 1)..s_len, 0..v_dim]).reshape([1, v_dim]);
@@ -347,7 +420,11 @@ fn generate_text_cached<B: Backend>(
         let input = Tensor::<B, 2, Int>::from_data(
             TensorData::new(vec![next_id as i64], [1, 1]), device);
         let cache_input: Vec<Option<KVCache<B>>> = caches.into_iter().map(|c| Some(c)).collect();
-        let (logits, new_caches) = model.forward_with_cache(input, current_offset, cache_input);
+        let (logits, new_caches) = if use_partial {
+            model.forward_with_cache_partial(input, current_offset, cache_input, rotary_pct)
+        } else {
+            model.forward_with_cache(input, current_offset, cache_input)
+        };
         caches = new_caches;
         current_offset += 1;
 
@@ -423,6 +500,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     let mut use_x0: bool = true;
     let mut residual_dropout: f64 = 0.0;
     let mut use_burn_lr: bool = false;
+    let mut use_partial_rope_infer: bool = false;
 
     let mut modo_inferencia = false;
     let mut modo_kuant = false;
@@ -442,6 +520,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("  (10) x0:     {}", if use_x0 { "Si" } else { "No" });
             println!("  (11) ResDrop: {}", residual_dropout);
             println!("  (12) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
+            println!("  (13) Inf RoPE%: {}", if use_partial_rope_infer { format!("{}%", rotary_pct * 100.0) } else { "100% (full)".to_string() });
             println!("----------------------------");
             print!("¿Entrenar (e), Inferir (i), Inferir TurboQuant (t) o Ajustar (s)? [e/i/t/s]: ");
             io::stdout().flush()?;
@@ -467,6 +546,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 print!("x0 injection (s/n) [{}]: ", if use_x0 { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_x0 = true, "n" | "no" | "" => use_x0 = false, _ => {} }
                 print!("Residual Dropout [{}]: ", residual_dropout); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { residual_dropout = v.clamp(0.0, 1.0); }
                 print!("LR scheduler (m=Manual, b=Burn) [{}]: ", if use_burn_lr { "b" } else { "m" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "b" | "burn" => use_burn_lr = true, "m" | "manual" | "" => use_burn_lr = false, _ => {} }
+                print!("Partial RoPE en inferencia (s/n) [{}]: ", if use_partial_rope_infer { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_partial_rope_infer = true, "n" | "no" | "" => use_partial_rope_infer = false, _ => {} }
             }
         }
     } else {
@@ -501,6 +581,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 print!("x0 injection (s/n) [{}]: ", if use_x0 { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_x0 = true, "n" | "no" | "" => use_x0 = false, _ => {} }
                 print!("Residual Dropout [{}]: ", residual_dropout); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { residual_dropout = v.clamp(0.0, 1.0); }
                 print!("LR scheduler (m=Manual, b=Burn) [{}]: ", if use_burn_lr { "b" } else { "m" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "b" | "burn" => use_burn_lr = true, "m" | "manual" | "" => use_burn_lr = false, _ => {} }
+                print!("Partial RoPE en inferencia (s/n) [{}]: ", if use_partial_rope_infer { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_partial_rope_infer = true, "n" | "no" | "" => use_partial_rope_infer = false, _ => {} }
             }
         }
     }
@@ -519,6 +600,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     println!("  x0 injection:  {}", if use_x0 { "Si" } else { "No" });
     println!("  ResDrop:       {}", residual_dropout);
     println!("  LR scheduler:  {}", if use_burn_lr { "Burn (Composed)" } else { "Manual (warmup+cosine)" });
+    println!("  Inf RoPE:      {}", if use_partial_rope_infer { format!("Partial ({:.0}%)", rotary_pct * 100.0) } else { "Full (100%)".to_string() });
     println!("  KV Cache:      {} \n", if modo_kuant { "TurboQuant" } else { "Regular" });
 
     let transformer_config = TransformerConfig {
@@ -691,10 +773,11 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 if input.is_empty() { continue; }
 
                 println!("\n--- TEXTO GENERADO (KV Cache Regular) ---");
+                let inf_rotary = if use_partial_rope_infer { rotary_pct } else { 1.0 };
                 let (text, tokens_count, elapsed, updated_caches, updated_offset) = generate_text_cached(
                     &model_v, &tokenizer, input, current_len, &device,
                     temperature, top_k, top_p, repetition_penalty,
-                    session_caches, session_offset,
+                    session_caches, session_offset, inf_rotary,
                 );
                 session_caches = updated_caches.into_iter().map(Some).collect();
                 session_offset = updated_offset;

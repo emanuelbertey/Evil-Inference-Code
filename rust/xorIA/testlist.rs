@@ -18,6 +18,8 @@ mod test_rope;
 mod test_transformer_vs_bit;
 #[path = "bin/stress_transformer_vs_bit.rs"]
 mod stress_transformer_vs_bit;
+#[path = "bin/test_rmsnorm_swiglu.rs"]
+mod test_rmsnorm_swiglu;
 
 pub fn testlist_main() {
     loop {
@@ -34,11 +36,12 @@ pub fn testlist_main() {
         println!("  7. test_rope           RoPE Mathematical Test");
         println!("  8. test_transformer_vs_bit      Transformer FP32 vs BitLinear");
         println!("  9. stress_transformer_vs_bit    Stress Training (4 layers)");
+        println!("  10. test_rmsnorm_swiglu         Custom vs burn::nn RmsNorm+SwiGLU");
         println!();
         println!("  b. Back to main menu");
         println!("========================================================");
         println!();
-        print!("  Selecciona un test [1-9/b]: ");
+        print!("  Selecciona un test [1-10/b]: ");
         io::stdout().flush().unwrap();
 
         let mut choice = String::new();
@@ -99,6 +102,10 @@ pub fn testlist_main() {
                 if let Err(e) = stress_transformer_vs_bit::stress_transformer_vs_bit_main() {
                     eprintln!("  Error: {}", e);
                 }
+            }
+            "10" => {
+                println!("\n  -> test_rmsnorm_swiglu (RMSNorm+SwiGLU Comparison)...\n");
+                test_rmsnorm_swiglu::test_rmsnorm_swiglu_main();
             }
             "b" | "back" | "salir" | "" => {
                 println!("  Volviendo al menu principal.");
