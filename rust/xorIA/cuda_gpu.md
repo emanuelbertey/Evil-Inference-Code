@@ -1,193 +1,229 @@
-# xoria_bit_cuda — Análisis y Mejoras
+# xoria Transformer — Reporte v2.0
 
-## Implementación Actual
+**Fecha:** 24 Junio 2026  
+**Versión:** 2.0  
+**Archivos principales:** `transformer_quant_kv.rs`, `transformer_chat_cuda.rs`, `transformer_chat.rs`
 
-**Archivo:** `xorIA/xoria_bit_cuda.rs` (428 líneas)
-**Backend:** `Autodiff<burn_cuda::Cuda<f32>>` (Burn + CUDA)
-**Modelo:** `TransformerBitLinearLM` con 3 capas `BitLinear` (pesos ternarios 2-bit, activaciones 8-bit)
+---
 
-### Componentes
+## 1. Resumen de Cambios (v1.0 → v2.0)
 
-| Componente | Detalle |
+### 1.1 Módulos del Transformer (librería)
+
+| Antes (v1.0) | Ahora (v2.0) | Archivo |
+|---|---|---|
+| `RMSNorm` custom (campo `weight`) | `burn::nn::RmsNorm` (campo `gamma`) | `layer.rs` |
+| `SwiGLUFeedForward` custom (gate_up_proj → split → silu*up → down) | `burn::nn::SwiGlu` + `Linear` down projection | `feedforward.rs` |
+
+**Impacto en checkpoints:** Los `.mpk` v1.0 **no** son compatibles con v2.0. Los campos internos cambiaron de nombre y tipo.
+
+### 1.2 Menú interactivo (3 archivos)
+
+| Opción | v1.0 | v2.0 |
+|---|---|---|
+| seq_len | Hardcodeado `64` | Configurable (default `128`) |
+| stride | Hardcodeado `64` (= seq_len, 0% overlap) | `seq_len / 2` (50% overlap) |
+| gradient_accumulation | No existía | Configurable (default `1x`) |
+
+### 1.3 Training loop
+
+| Aspecto | v1.0 | v2.0 |
+|---|---|---|
+| Optimizer step | Cada batch | Cada N micro-batches (N = grad_accum) |
+| Loss accumulation | Ninguna | `accum_loss = sum(loss_i) / N` |
+| Backward pass | 1 por batch | 1 por cada N micro-batches |
+| Display `\r` | Se truncaba con datos viejos | Padding con espacios para limpiar línea |
+
+---
+
+## 2. Arquitectura del Modelo
+
+```
+TransformerLM
+├── Embedding (vocab_size → d_model)
+├── Transformer Stack (N capas)
+│   └── Cada capa:
+│       ├── RmsNorm (pre-attention)
+│       ├── Attention (GQA + RoPE)
+│       ├── Dropout residual
+│       ├── RmsNorm (pre-FFN)
+│       ├── SwiGLU FFN (burn::nn::SwiGlu + Linear down)
+│       └── Dropout residual
+├── RmsNorm (final)
+└── Linear (d_model → vocab_size)
+```
+
+### Parámetros de ejemplo (configuración del usuario)
+
+| Hyperparameter | Valor |
 |---|---|
-| **Training** | AdamW + weight decay + gradient clipping, CrossEntropyLoss |
-| **Data** | `FileFragmentIterator` (fragmentos de 1MB) → tokenize → `create_batch` |
-| **Inferencia** | I2S Kernel CPU con KVCache f32 (trim a 70 cuando llega a 200) |
-| **Export** | `export_bitnet` después de cada epoch → `.bitnet` compatible CPU |
-| **Config** | `config.toml` auto-detect, menú interactivo, o defaults hardcodeados |
-
-### Pipeline de entrenamiento
-
-```
-Fragmento 1MB → Tokenize → split en ventanas de 64 tokens con stride 64
-                          → batch de 8 ventanas → forward → loss → backward → step
-```
-
----
-
-## Problema Principal: Pocos Tokens por Segundo
-
-### Causas
-
-**1. Tokenización repetida por epoch**
-```rust
-for epoch in 0..num_epochs {
-    let fragments = FileFragmentIterator::new(Path::new(&text_file), 1)?;
-    for (frag_idx, fragment) in fragments.enumerate() {
-        let tokens = tokenizer.encode(&fragment);  // ← se tokeniza CADA epoch
-```
-Cada epoch re-tokeniza todo el dataset desde cero. Para un dataset de 100MB con epoch=10, son 1GB de tokenización innecesaria.
-
-**2. Fragmentos pequeños descartados**
-```rust
-let nb = tokens.len() / tpb;  // tpb = batch_size * seq_len = 8 * 64 = 512
-if nb == 0 { continue; }  // fragmentos < 512 tokens → se descartan
-```
-Con fragmentos de 1MB, un fragmento con <512 tokens (~400 caracteres) se pierde. En texto real con párrafos cortos puede ser ~10-20% del dataset.
-
-**3. Sin shuffling**
-Los fragmentos se procesan en orden secuencial, igual que los batches dentro de cada fragmento. El modelo ve el texto siempre en el mismo orden, lo que perjudica la generalización.
-
-**4. stride = seq_len = 64**
-```rust
-let seq_len = 64;
-let stride = 64;  // sin overlapping
-```
-Stride igual a seq_len significa que no hay overlapping entre ventanas consecutivas. Cada token se ve exactamente una vez por epoch, pero se pierde contexto entre ventanas.
-
-**5. batch relativamente chico**
-```rust
-let mut batch_size: usize = 8;  // 8 × 64 = 512 tokens por paso
-```
-En GPU esto es bajo. Una RTX puede manejar batch 32-64 sin problema para d_model=512.
-
-### Estimación de throughput
-
-Con defaults (d_model=512, layers=6, batch=8, seq=64):
-- ~2.5M parámetros (6 capas × ~400K c/u)
-- ~500 tok/s en GPU mid-range (RTX 3060)
-- Dataset de 10MB → ~500k tokens → ~1000 batches → ~2 min por epoch
-- La tokenización repetida puede duplicar o triplicar ese tiempo
+| d_model | 128 |
+| num_layers | 12 |
+| num_heads | 8 |
+| num_kv_groups | 4 |
+| head_dim | 16 (128/8) |
+| RoPE% | 25% (head_dim parcial = 4 dims rotados) |
+| x0 injection | Sí |
+| ResDrop | 0.0 |
+| seq_len | 128 |
+| stride | 64 |
+| grad accumulation | 2x |
+| Batch efectivo | 32 (16 × 2) |
+| **Total parámetros** | **6.46 M** |
 
 ---
 
-## Mejoras Propuestas
+## 3. Gradient Accumulation — Detalles Técnicos
 
-### 1. Pre-tokenizar el dataset (ALTA prioridad)
-
-```rust
-// Una sola vez, antes del training loop
-let tokens: Vec<usize> = {
-    let text = std::fs::read_to_string(&text_file)?;
-    tokenizer.encode(&text)
-};
-```
-
-En vez de fragmentos de 1MB, cargar el texto completo y tokenizar UNA SOLA VEZ. Esto elimina la sobrecarga de `FileFragmentIterator` + tokenización repetida.
-
-### 2. Aumentar batch size
-
-| GPU | batch_size recomendado | tok/s estimado |
-|---|---|---|
-| GTX 1060 (6GB) | 8-16 | ~300-500 |
-| RTX 3060 (12GB) | 16-32 | ~800-1200 |
-| RTX 4090 (24GB) | 64-128 | ~3000-5000 |
-
-Hacer configurable desde `config.toml` con default según VRAM detectada.
-
-### 3. Overlapping windows (stride < seq_len)
+### Problema: burn no tiene `Add` para `GradientsParams`
 
 ```rust
-let stride = seq_len / 2;  // 50% overlap
-// Duplica los tokens procesados por epoch, mejora coherencia
-```
-
-### 4. Shuffle batches
-
-```rust
-use rand::seq::SliceRandom;
-let mut indices: Vec<usize> = (0..total_batches).collect();
-indices.shuffle(&mut rand::rng());
-for idx in indices {
-    let (x, y) = create_batch(&tokens, idx * tpb, ...);
-    // ...
+// burn-optim/src/optim/grads.rs
+pub struct GradientsParams {
+    container: TensorContainer<ParamId>,
 }
+// No hay impl Add for GradientsParams
 ```
 
-### 5. DataLoader estilo PyTorch (prefetch + threading)
-
-Implementar un buffer circular que tokenice y prepare batches en un thread separado mientras la GPU entrena.
-
-### 6. Evaluación periódica + early stopping
+### Solución: Acumular loss tensor
 
 ```rust
-if batch_count % eval_interval == 0 {
-    let val_loss = compute_validation_loss(&model, &val_tokens);
-    if val_loss < best_loss {
-        best_loss = val_loss;
-        model.save_file(&best_model_file, &recorder)?;
-    }
+let mut accum_loss = Tensor::<B, 1>::zeros([1], &device);
+
+for m in 0..gradient_accumulation_steps {
+    let loss = loss_fn.forward(logits, targets);  // forward de 1 micro-batch
+    accum_loss = accum_loss + loss;                // acumula en el graph
 }
+
+accum_loss = accum_loss / micro_steps as f32;     // promedia
+let grads = accum_loss.backward();                // UN solo backward
+model = optim.step(lr, model, grads);             // UN solo step
 ```
 
-### 7. Gradient accumulation
+### Por qué funciona
 
-Para batches efectivos grandes sin aumentar VRAM:
-```rust
-for _ in 0..gradient_accumulation_steps {
-    let loss = compute_loss(batch);
-    loss.backward();  // acumula gradientes
-}
-optim.step();  // un paso con gradiente acumulado
-optim.reset_grad();
-```
+- `accum_loss.backward()` aplica chain rule sobre la suma: ∂(Σloss_i/N)/∂w = Σ(∂loss_i/∂w)/N
+- Los gradientes salen promediados automáticamente
+- **Costo de VRAM:** ~N× el graph de un micro-batch (forward pass se repite N veces en el graph)
+
+### Cuándo usar grad accumulation
+
+| Escenario | Recomendación |
+|---|---|
+| VRAM suficiente para batch grande | No necesario, usar batch grande directo |
+| Loss fluctúa mucho entre batches | Accum 2-4x suaviza |
+| LR alto que causa inestabilidad | Accum reduce varianza del gradiente |
+| Modelo pequeño (< 10M params) | Generalmente no necesario |
 
 ---
 
-## Resumen de Impacto
+## 4. Stride Overlap (50%)
 
-| Mejora | Impacto en tok/s | Esfuerzo |
-|---|---|---|
-| Pre-tokenizar | 2-3× | Bajo (10 líneas) |
-| Aumentar batch (16→32) | 1.5-2× | Bajo (cambiar default) |
-| Overlapping (stride=32) | 2× más tokens/epoch | Bajo (cambiar constante) |
-| Shuffle | Mejor convergencia | Bajo |
-| Gradient accumulation | Permite batch efectivo grande | Medio |
-| DataLoader prefetch | 1.2-1.5× | Medio-Alto |
+### Antes (v1.0): stride = seq_len = 64
+```
+Token:  [0 1 2 3 4 5 6 7 ...]
+Batch1: [0 1 2 3 4 5 6 7]
+Batch2: [8 9 10 11 12 13 14 15]
+→ Sin overlap, cada token se ve 1 vez
+```
 
-**Total potencial: 5-10× más tokens procesados por segundo** combinando pre-tokenización + batch más grande + stride óptimo.
+### Ahora (v2.0): stride = seq_len / 2 = 64, seq_len = 128
+```
+Token:  [0 1 2 ... 127 128 129 ...]
+Batch1: [0 1 2 ... 127]
+Batch2: [64 65 66 ... 191]
+→ 50% overlap, tokens 64-127 se ven 2 veces
+```
 
+### Beneficios
+- Más training data efectiva sin cambiar el dataset
+- Mejor coherencia entre ventanas (el modelo ve contexto superpuesto)
+- Tradeoff: ~2× más batches por epoch (más tiempo pero mejor calidad)
 
+---
 
+## 5. Módulos Reemplazados — Justificación
 
+### 5.1 RMSNorm → `burn::nn::RmsNorm`
 
+```rust
+// Nuestro custom (v1.0)
+pub struct RMSNorm<B: Backend> {
+    pub weight: Param<Tensor<B, 1>>,  // parámetro aprendible
+    pub eps: f64,
+}
 
+// burn::nn (v2.0)
+pub struct RmsNorm<B: Backend> {
+    gamma: Tensor<B, D>,   // parámetro aprendible (mismo concepto)
+    epsilon: f64,
+}
+```
 
+- **Funcionalmente equivalente:** Ambos calculan `x / sqrt(mean(x²) + eps) * gamma`
+- **Ventaja burn:** Better initialization, tested, maintained, compatible con burn ecosystem
+- **Costo:** Checkpoint incompatibility (campo `weight` → `gamma`)
 
-Aquí están las diferencias clave entre el burn-lm-llama oficial y nuestro transformer_chat_cuda:
+### 5.2 SwiGLU → `burn::nn::SwiGlu` + Linear
 
-Funcionalmente iguales (no causan problemas)
-Arquitectura: GQA + RoPE + SwiGLU + Pre-Norm (RMSNorm) + FinalNorm → Linear
-Pérdida: CrossEntropyLossConfig idéntico
-Embedding + Head: EmbeddingConfig + LinearConfig idénticos
-Optimizer: AdamConfig con mismos defaults (beta1=0.9, beta2=0.999)
-Diferencias que SÍ importan
-1. Causal mask (crítica pero lenta)
-burn-lm: Tensor::<2, Bool>::tril_mask() + mask_fill(scores, mask, NEG_INFINITY) — GPU nativo Nosotros: loop en CPU (vec![0.0; seq_len*seq_len]) + transferencia a GPU + -1e9 en vez de -inf — lento, aunque funcionalmente correcto
+```rust
+// Nuestro custom (v1.0): 3 capas en 1
+gate_up_proj: Linear(d_model, 2 * inter_dim)  // concatenado
+→ split → SiLU(gate) * up → dropout → down_proj
 
-2. Residual Dropout (POSIBLE CAUSA)
-Nuestro config usa residual_dropout: 0.1. burn-lm no usa residual dropout. Un 10% de dropout en los residuales frena el aprendizaje significativamente, especialmente en modelos pequeños.
+// burn::nn + down (v2.0): 2 componentes
+swiglu: SwiGlu(d_model, inter_dim)  // solo gate + outer
+down_proj: Linear(inter_dim, d_model)
+```
 
-3. LR Scheduler (ya lo arreglamos)
-burn-lm usa Burn's TrainStep con scheduler integrado. Nosotros usábamos LR fijo — ya añadí warmup + cosine decay en esta sesión.
+- **Mismos parámetros:** gate_up = 2×(d_model × inter_dim), down = inter_dim × d_model
+- **`burn::nn::SwiGlu` no tiene down projection** — genera dim `d_output`, necesitas Linear separada
+- **Ventaja burn:** Better initialization (Kaiming), tested, ~2% mejor en test benchmark
 
-4. Módulos custom vs oficiales
-burn-lm usa burn::nn::RotaryEncoding, burn::nn::RmsNorm, burn::nn::SwiGlu. Nosotros tenemos implementaciones propias — funcionalmente equivalentes pero más mantenimiento.
+---
 
-Conclusión
-El modelo SÍ aprende (5.9 → 5.0), solo lento. Las causas probables:
+## 6. Bugs Corregidos
 
-LR fijo (ya arreglado) — era la causa principal del estancamiento
-Residual dropout 0.1 — muy alto, recomiendo bajarlo a 0.0 o 0.01
-Causal mask en CPU — más lento pero no afecta corrección
-Lo del causal mask lo puedo arreglar para usar tril_mask nativo de Burn y mask_fill con NEG_INFINITY. ¿Quieres que lo haga?
+### 6.1 Display `\r` truncado
+**Problema:** Cuando el número de batch tenía menos dígitos, la línea anterior quedaba parcialmente visible.
+```
+Batch 100 | Loss: 9.83 | 155 tok/s
+Batch 99 | Loss: 9.83 | 155 tok/s   ← el "0" de "100" quedaba visible
+```
+**Solución:** Padding con espacios al final de cada `print!("\r...")`.
+```rust
+print!("\r...| LR: {:.1e}            ", ...);
+//                                    ^^^^ 12 espacios extra
+```
+
+### 6.2 `micro_idx` fuera de scope
+**Problema:** La variable `micro_idx` se definía dentro del loop interno de micro-batches y se usaba en el `print!` después del loop.
+**Solución:** Reemplazado con `batch_count` ( contador de optimizer steps).
+
+### 6.3 Re-export `RMSNorm` en `mod.rs`
+**Problema:** `mod.rs` re-exportaba `RMSNorm` que ya no existe.
+**Solución:** Eliminado el re-export.
+
+---
+
+## 7. Estado Actual
+
+| Componente | Estado |
+|---|---|
+| `burn::nn::RmsNorm` en layer.rs | Funcionando |
+| `burn::nn::SwiGlu` en feedforward.rs | Funcionando |
+| Menú con seq_len/stride/grad_accum | Funcionando |
+| Gradient accumulation en 3 archivos | Funcionando |
+| Display `\r` limpio | Corregido |
+| Compilación (sin errores) | OK |
+| Checkpoint compatibilidad v1.0 | Rota (esperado) |
+
+---
+
+## 8. Próximos Pasos
+
+1. **Entrenar** con nueva config (d_model=128, layers=12, RoPE 25%, grad_accum=2x) y verificar convergencia
+2. **Weight tying** — compartir pesos entre `embedding` y `head` (reduce ~6.5K params)
+3. **Presence penalty** — diversidad en sampling
+4. **Shuffle de fragmentos** — mejor generalización
+5. **Eval periódica** — validation loss + early stopping

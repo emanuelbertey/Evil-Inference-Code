@@ -895,7 +895,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
 
                 let elapsed = start_epoch.elapsed().as_secs_f32();
                 let tps = (batch_count * batch_size * seq_len) as f32 / elapsed;
-                print!("\rEpoch {} | Frag {} | Batch {} | Loss: {:.4} | {:.1} tok/s | LR: {:.1e}",
+                print!("\rEpoch {} | Frag {} | Batch {} | Loss: {:.4} | {:.1} tok/s | LR: {:.1e}            ",
                     epoch + 1, frag_idx, batch_count, total_loss / (batch_count as f32 * gradient_accumulation_steps as f32), tps, current_lr);
                 io::stdout().flush().unwrap();
             }

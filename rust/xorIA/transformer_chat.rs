@@ -787,7 +787,7 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
 
                 let elapsed = start_epoch.elapsed().as_secs_f32();
                 let tps = (batch_count * batch_size * seq_len) as f32 / elapsed;
-                print!("\rEpoch {} | Frag {} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s",
+                print!("\rEpoch {} | Frag {} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s            ",
                     epoch + 1, frag_idx, batch_count, (num_batches + gradient_accumulation_steps - 1) / gradient_accumulation_steps,
                     total_loss / (batch_count as f32 * gradient_accumulation_steps as f32), tps);
                 io::stdout().flush().unwrap();

@@ -962,7 +962,7 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
             if step_count_epoch % 10 == 0 {
                 let elapsed = start_epoch.elapsed().as_secs_f32();
                 let tps = (batch_count * batch_size * seq_len) as f32 / elapsed;
-                print!("\rEpoch {}/{} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s",
+                print!("\rEpoch {}/{} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s            ",
                     epoch + 1, num_epochs, step_count_epoch, num_batches / gradient_accumulation_steps,
                     total_loss / (batch_count * gradient_accumulation_steps) as f32, tps);
                 io::stdout().flush().unwrap();
