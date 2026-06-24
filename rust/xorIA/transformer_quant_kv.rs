@@ -18,7 +18,7 @@
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::decay::WeightDecayConfig;
 use burn::{
-    module::{Module, AutodiffModule},
+    module::{Module, AutodiffModule, Param},
     optim::{AdamConfig, Optimizer},
     record::{CompactRecorder, Recorder},
     tensor::{activation::softmax, Tensor, backend::Backend, TensorData, Int},
@@ -38,7 +38,7 @@ use xlstm::blocks::trasformer::layer::{
 };
 use xlstm::blocks::trasformer::attention::KVCache;
 use xlstm::blocks::trasformer_bit::cache::{KuantKVCache, MAX_CACHE_LEN};
-use xlstm::blocks::trasformer_bit::ops::apply_rope_fused;
+use xlstm::blocks::trasformer_bit::ops::{apply_rope_fused, apply_rope_partial, apply_rope_fused_partial, repeat_kv, apply_causal_mask};
 use xlstm::blocks::trasformer_bit::model::{Tokenizer, FileFragmentIterator, sample_from_logits, create_batch};
 
 type MyBackend = Autodiff<Flex<f32>>;
@@ -50,6 +50,9 @@ pub struct TransformerLM<B: Backend> {
     pub embedding: Embedding<B>,
     pub transformer: Transformer<B>,
     pub head: Linear<B>,
+    /// x0 injection: learned scalar per layer, initialized to 0.
+    /// Optional — old checkpoints without it default to None (no injection).
+    pub x0_lambdas: Option<Param<Tensor<B, 2>>>,  // Some([1, num_layers])
     pub vocab_size: usize,
     pub d_model: usize,
     pub num_layers: usize,
@@ -73,46 +76,109 @@ impl<B: Backend> TransformerLM<B> {
         (self.head.forward(x), new_caches)
     }
 
+    /// Forward pass with partial RoPE for training stability.
+    /// Rotates only `rotary_pct` of head dimensions (0.0–1.0).
+    /// Preserves autodiff for gradient flow.
+    pub fn forward_train_partial_rope(
+        &self,
+        input: Tensor<B, 2, Int>,
+        rotary_pct: f64,
+    ) -> Tensor<B, 3> {
+        let x = self.embedding.forward(input);
+        let [batch, seq_len, _d] = x.dims();
+        let device = x.device();
+        let x0 = x.clone();  // for x0 injection
+
+        let mut h = x;
+        for (i, layer) in self.transformer.layers.iter().enumerate() {
+            // Pre-Norm → Attention
+            let residual = h.clone();
+            let h_norm = layer.attn_norm.forward(h);
+
+            let (q, k, v) = layer.attention.qkv.forward(h_norm);
+            let (q, k) = apply_rope_partial(q, k, 0, rotary_pct);
+
+            let k = repeat_kv(k, layer.attention.num_heads, layer.attention.num_kv_groups);
+            let v = repeat_kv(v, layer.attention.num_heads, layer.attention.num_kv_groups);
+
+            let q = q.swap_dims(1, 2);
+            let k = k.swap_dims(1, 2);
+            let v = v.swap_dims(1, 2);
+
+            let scale = (layer.attention.head_dim as f64).sqrt();
+            let mut scores = q.matmul(k.transpose()) / scale;
+            if seq_len > 1 {
+                scores = apply_causal_mask(scores, seq_len);
+            }
+            let attn = softmax(scores, 3);
+            let attn = layer.attention.dropout.forward(attn);
+            let h_attn = attn.matmul(v);
+            let h_attn = h_attn.swap_dims(1, 2);
+            let h_attn = layer.attention.o_proj.forward(h_attn);
+            let h_attn = layer.residual_dropout.forward(h_attn);
+            h = residual + h_attn;
+
+            // Pre-Norm → FFN
+            let residual = h.clone();
+            let h_norm = layer.ffn_norm.forward(h);
+            let h_ffn = layer.ffn.forward(h_norm);
+            let h_ffn = layer.residual_dropout.forward(h_ffn);
+            h = residual + h_ffn;
+
+            // x0 injection: h += lambda_i * x0 (skip if None = old checkpoint)
+            if let Some(ref lambdas) = self.x0_lambdas {
+                let lam = lambdas.val().slice([0..1, i..(i+1)]).unsqueeze_dim::<3>(2);
+                h = h + lam * x0.clone();
+            }
+        }
+
+        let h = self.transformer.final_norm.forward(h);
+        self.head.forward(h)
+    }
+
     /// Forward pass with TurboQuant KV cache.
-    /// Only supports batch=1.
+    /// Only supports batch=1. Uses partial RoPE when `rotary_pct < 1.0`.
     pub fn forward_with_kuant_cache(
         &self,
         input: Tensor<B, 2, Int>,
         offset: usize,
-        mut caches: Vec<KuantKVCache>,
+        caches: Vec<KuantKVCache>,
+        rotary_pct: f64,
     ) -> (Tensor<B, 3>, Vec<KuantKVCache>) {
         let device = input.device();
-        let x = self.embedding.forward(input);
-        let [batch, _seq, _d] = x.dims();
+        let mut h = self.embedding.forward(input);
+        let [batch, _seq, _d] = h.dims();
         assert_eq!(batch, 1, "KuantKVCache requires batch=1");
 
         let mut new_caches = Vec::with_capacity(self.num_layers);
-        for (layer, cache) in self.transformer.layers.iter().zip(caches.into_iter()) {
+        for (layer, mut cache) in self.transformer.layers.iter().zip(caches.into_iter()) {
             // Pre-Norm → Attention
-            let residual = x.clone();
-            let h = layer.attn_norm.forward(x);
+            let residual = h.clone();
+            let h_norm = layer.attn_norm.forward(h);
 
-            let (q, k, v) = layer.attention.qkv.forward(h);
-            let (q, k_rot) = apply_rope_fused(q, k, offset);
+            let (q, k, v) = layer.attention.qkv.forward(h_norm);
+            let (q, k_rot) = if rotary_pct < 0.999 {
+                apply_rope_fused_partial(q, k, offset, rotary_pct)
+            } else {
+                apply_rope_fused(q, k, offset)
+            };
 
             let old_len = cache.current_len;
             cache.append(k_rot, v);
             let attn_output = cache.attend(q, old_len, layer.attention.num_heads, &device);
-            let h = layer.attention.o_proj.forward(attn_output);
-            let h = layer.residual_dropout.forward(h);
-            let x = residual + h;
+            let h_attn = layer.attention.o_proj.forward(attn_output);
+            h = residual + h_attn;
 
             // Pre-Norm → FFN
-            let residual = x.clone();
-            let h = layer.ffn_norm.forward(x);
-            let h = layer.ffn.forward(h);
-            let h = layer.residual_dropout.forward(h);
-            x = residual + h;
+            let residual = h.clone();
+            let h_norm = layer.ffn_norm.forward(h);
+            let h_ffn = layer.ffn.forward(h_norm);
+            h = residual + h_ffn;
 
             new_caches.push(cache);
         }
-        let x = self.transformer.final_norm.forward(x);
-        (self.head.forward(x), new_caches)
+        let h = self.transformer.final_norm.forward(h);
+        (self.head.forward(h), new_caches)
     }
 }
 
@@ -127,6 +193,7 @@ fn generate_kuant_cached<B: Backend>(
     top_k: usize,
     top_p: f32,
     repetition_penalty: f32,
+    rotary_pct: f64,
     caches: Vec<KuantKVCache>,
     mut current_offset: usize,
 ) -> (String, usize, f32, Vec<KuantKVCache>, usize, usize) {
@@ -144,7 +211,7 @@ fn generate_kuant_cached<B: Backend>(
     );
 
     let (logits, mut caches) =
-        model.forward_with_kuant_cache(input, current_offset, caches);
+        model.forward_with_kuant_cache(input, current_offset, caches, rotary_pct);
 
     let [_, s_len, v_dim] = logits.dims();
     let last_logits = logits
@@ -179,7 +246,7 @@ fn generate_kuant_cached<B: Backend>(
         let input = Tensor::<B, 2, Int>::from_data(
             TensorData::new(vec![next_id as i64], [1, 1]), &device);
         let (next_logits, new_caches) =
-            model.forward_with_kuant_cache(input, current_offset, caches);
+            model.forward_with_kuant_cache(input, current_offset, caches, rotary_pct);
         let model_time = t0.elapsed().as_secs_f32();
         total_model_time += model_time;
 
@@ -348,6 +415,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     let mut lr: f64 = 3e-4;
     let mut num_epochs: usize = 50;
     let mut batch_size: usize = 16;
+    let mut rotary_pct: f64 = 1.0;
+    let mut use_x0: bool = true;
 
     let mut modo_inferencia = false;
     let mut modo_kuant = false;
@@ -363,6 +432,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("  (6) Batch:   {}", batch_size);
             println!("  (7) Temp:    {}", temperature);
             println!("  (8) R-Pen:   {}", repetition_penalty);
+            println!("  (9) RoPE%:   {}%", rotary_pct * 100.0);
+            println!("  (10) x0:     {}", if use_x0 { "Si" } else { "No" });
             println!("----------------------------");
             print!("¿Entrenar (e), Inferir (i), Inferir TurboQuant (t) o Ajustar (s)? [e/i/t/s]: ");
             io::stdout().flush()?;
@@ -384,6 +455,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 print!("Batch Size [{}]: ", batch_size); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { batch_size = v; }
                 print!("Temperatura [{}]: ", temperature); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { temperature = v; }
                 print!("Repetition Penalty [{}]: ", repetition_penalty); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { repetition_penalty = v; }
+                print!("RoPE % [{}]: ", rotary_pct * 100.0); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { rotary_pct = (v / 100.0).clamp(0.0, 1.0); }
+                print!("x0 injection (s/n) [{}]: ", if use_x0 { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_x0 = true, "n" | "no" | "" => use_x0 = false, _ => {} }
             }
         }
     } else {
@@ -395,6 +468,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("  (4) LR:      {}", lr);
             println!("  (5) Épocas:  {}", num_epochs);
             println!("  (6) Batch:   {}", batch_size);
+            println!("  (7) RoPE%:   {}%", rotary_pct * 100.0);
+            println!("  (8) x0:     {}", if use_x0 { "Si" } else { "No" });
             println!("------------------------------------");
             print!("¿Entrenar (e) o Ajustar parámetros (s)? [e/s]: ");
             io::stdout().flush()?;
@@ -410,6 +485,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 print!("Learning Rate [{}]: ", lr); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { lr = v; }
                 print!("Épocas [{}]: ", num_epochs); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { num_epochs = v; }
                 print!("Batch Size [{}]: ", batch_size); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { batch_size = v; }
+                print!("RoPE % [{}]: ", rotary_pct * 100.0); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { rotary_pct = (v / 100.0).clamp(0.0, 1.0); }
+                print!("x0 injection (s/n) [{}]: ", if use_x0 { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_x0 = true, "n" | "no" | "" => use_x0 = false, _ => {} }
             }
         }
     }
@@ -424,7 +501,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     println!("  num_kv_groups: {} (key/value)", num_kv_groups);
     println!("  head_dim:      {}", d_model / num_heads);
     println!("  FFN:           SwiGLU");
-    println!("  Positional:    RoPE");
+    println!("  Positional:    RoPE ({:.0}%)", rotary_pct * 100.0);
+    println!("  x0 injection:  {}", if use_x0 { "Si" } else { "No" });
     println!("  KV Cache:      {} \n", if modo_kuant { "TurboQuant" } else { "Regular" });
 
     let transformer_config = TransformerConfig {
@@ -454,6 +532,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
         embedding: EmbeddingConfig::new(vocab_size, d_model).init(&device),
         transformer: transformer_config.init(&device),
         head: LinearConfig::new(d_model, vocab_size).with_bias(false).init(&device),
+        x0_lambdas: Some(Param::from_tensor(Tensor::zeros([1, num_layers], &device))),
         vocab_size,
         d_model,
         num_layers,
@@ -466,6 +545,10 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
         println!("Cargando pesos del modelo desde {}...", model_file);
         let record = CompactRecorder::new().load(model_file.into(), &device)?;
         model = model.load_record(record);
+        if use_x0 && model.x0_lambdas.is_none() {
+            model.x0_lambdas = Some(Param::from_tensor(Tensor::zeros([1, num_layers], &device)));
+            println!("  -> x0_lambdas inicializado (checkpoint anterior sin este campo)");
+        }
     } else {
         println!("No se encontró modelo previo. Iniciando desde cero.");
     }
@@ -545,7 +628,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 let (_, tokens_count, elapsed, updated_caches, updated_offset, cache_bytes) =
                     generate_kuant_cached(
                         &model_v, &tokenizer, input, current_len,
-                        temperature, top_k, top_p, repetition_penalty,
+                        temperature, top_k, top_p, repetition_penalty, rotary_pct,
                         session_caches, session_offset,
                     );
                 session_caches = updated_caches;
@@ -639,7 +722,11 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 let start_idx = b * tokens_per_batch;
                 let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
 
-                let logits = model.forward(x);
+                let logits = if rotary_pct < 0.999 || use_x0 {
+                    model.forward_train_partial_rope(x, rotary_pct)
+                } else {
+                    model.forward(x)
+                };
                 let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
                 let targets_flat = y.reshape([batch_size * seq_len]);
 
