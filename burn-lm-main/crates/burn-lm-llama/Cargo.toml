@@ -1,0 +1,87 @@
+[package]
+name = "burn-lm-llama"
+authors = [
+    "guillaumelagrange <lagrange.guillaume.1@gmail.com>",
+    "nathanielsimard <nathaniel.simard.42@gmail.com>",
+]
+categories = []
+description = "Burn Large Models Engine - Inference."
+documentation = "https://docs.rs/burn-lm-inference"
+repository = "https://github.com/tracel-ai/burn-lm"
+rust-version.workspace = true
+
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+readme.workspace = true
+
+
+[features]
+# default = ["pretrained", "inference-server"]
+default = ["pretrained", "inference-server", "training"]
+inference-server = ["burn-lm-inference"]
+pretrained = ["burn/network", "dep:dirs"]
+training = ["burn/train"]
+
+llama3 = ["dep:tiktoken-rs", "dep:rustc-hash", "dep:base64"]
+tiny = ["dep:tokenizers"]
+
+# To import pytorch weights
+import = ["burn-store"]
+
+# Feature flags for testing
+test-non-default = []
+test-ndarray = ["burn/ndarray"]
+test-libtorch = ["burn/tch", "test-non-default"]
+test-cuda = [
+    "burn/cuda",
+    "burn/fusion",
+    "burn/autotune",
+    # "burn/autotune-checks",
+    "test-non-default",
+]
+test-wgpu = [
+    "burn/wgpu",
+    "burn/default",
+    # "burn/autotune-checks",
+    "test-non-default",
+]
+
+[dependencies]
+burn = { workspace = true, features = [
+    "std",
+    "ndarray",
+    "network",
+    "dataset",
+], default-features = false }
+burn-store = { workspace = true, default-features = false, features = [
+    "pytorch",
+], optional = true }
+itertools = { version = "0.12.1", default-features = false, features = [
+    "use_alloc",
+] }
+dirs = { workspace = true, optional = true }
+serde = { version = "1.0.192", default-features = false, features = [
+    "derive",
+    "alloc",
+] } # alloc is for no_std, derive is needed
+
+
+# Tiktoken tokenizer (llama 3)
+tiktoken-rs = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+rustc-hash = { workspace = true, optional = true }
+
+# SentencePiece tokenizer (tiny llama / llama 2)
+tokenizers = { workspace = true, features = ["onig"], optional = true }
+
+rand = { workspace = true, default-features = false, features = [
+    "std_rng",
+] } # std_rng is for no_std
+
+burn-lm-inference = { path = "../burn-lm-inference", optional = true, version = "0.0.1" }
+
+tracing.workspace = true
+
+[dev-dependencies]
+clap = { version = "4.5.4", features = ["derive"] }

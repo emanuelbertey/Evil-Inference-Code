@@ -1,0 +1,25 @@
+[package]
+name = "burn-lm-registry"
+authors = ["nathanielsimard <nathaniel.simard.42@gmail.com>"]
+categories = []
+description = "Burn Large Models Engine - Registry."
+documentation = "https://docs.rs/burn-lm-registry"
+repository = "https://github.com/tracel-ai/burn-lm"
+rust-version.workspace = true
+
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+readme.workspace = true
+
+[dependencies]
+burn-lm-inference = { path = "../burn-lm-inference", version = "0.0.1" }
+burn-lm-macros = { path = "../burn-lm-macros", version = "0.0.1" }
+
+# plugins
+burn-lm-llama = { path = "../burn-lm-llama", features = [
+    "inference-server",
+    "llama3",
+    "tiny",
+], version = "0.0.1" }
+burn-lm-parrot = { path = "../burn-lm-parrot", version = "0.0.1" }

@@ -156,3 +156,38 @@ optim.reset_grad();
 | DataLoader prefetch | 1.2-1.5× | Medio-Alto |
 
 **Total potencial: 5-10× más tokens procesados por segundo** combinando pre-tokenización + batch más grande + stride óptimo.
+
+
+
+
+
+
+
+
+Aquí están las diferencias clave entre el burn-lm-llama oficial y nuestro transformer_chat_cuda:
+
+Funcionalmente iguales (no causan problemas)
+Arquitectura: GQA + RoPE + SwiGLU + Pre-Norm (RMSNorm) + FinalNorm → Linear
+Pérdida: CrossEntropyLossConfig idéntico
+Embedding + Head: EmbeddingConfig + LinearConfig idénticos
+Optimizer: AdamConfig con mismos defaults (beta1=0.9, beta2=0.999)
+Diferencias que SÍ importan
+1. Causal mask (crítica pero lenta)
+burn-lm: Tensor::<2, Bool>::tril_mask() + mask_fill(scores, mask, NEG_INFINITY) — GPU nativo Nosotros: loop en CPU (vec![0.0; seq_len*seq_len]) + transferencia a GPU + -1e9 en vez de -inf — lento, aunque funcionalmente correcto
+
+2. Residual Dropout (POSIBLE CAUSA)
+Nuestro config usa residual_dropout: 0.1. burn-lm no usa residual dropout. Un 10% de dropout en los residuales frena el aprendizaje significativamente, especialmente en modelos pequeños.
+
+3. LR Scheduler (ya lo arreglamos)
+burn-lm usa Burn's TrainStep con scheduler integrado. Nosotros usábamos LR fijo — ya añadí warmup + cosine decay en esta sesión.
+
+4. Módulos custom vs oficiales
+burn-lm usa burn::nn::RotaryEncoding, burn::nn::RmsNorm, burn::nn::SwiGlu. Nosotros tenemos implementaciones propias — funcionalmente equivalentes pero más mantenimiento.
+
+Conclusión
+El modelo SÍ aprende (5.9 → 5.0), solo lento. Las causas probables:
+
+LR fijo (ya arreglado) — era la causa principal del estancamiento
+Residual dropout 0.1 — muy alto, recomiendo bajarlo a 0.0 o 0.01
+Causal mask en CPU — más lento pero no afecta corrección
+Lo del causal mask lo puedo arreglar para usar tril_mask nativo de Burn y mask_fill con NEG_INFINITY. ¿Quieres que lo haga?

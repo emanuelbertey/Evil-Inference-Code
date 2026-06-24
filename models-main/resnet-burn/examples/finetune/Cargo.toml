@@ -1,0 +1,18 @@
+[package]
+authors = ["guillaumelagrange <lagrange.guillaume.1@gmail.com>"]
+name = "finetune"
+license.workspace = true
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+resnet-burn = { path = "../..", features = ["pretrained", "train"] }
+burn        = { workspace = true, features = ["train", "vision", "network"] }
+burn-flex   = { workspace = true }
+
+csv    = { workspace = true }
+flate2 = { workspace = true }
+rand   = { workspace = true, features = ["std_rng"] }
+serde  = { workspace = true, features = ["std", "derive"] }
+tar    = { workspace = true }

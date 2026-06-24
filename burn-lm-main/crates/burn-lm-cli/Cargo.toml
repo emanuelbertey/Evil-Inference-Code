@@ -1,0 +1,51 @@
+[package]
+name = "burn-lm-cli"
+authors = ["nathanielsimard <nathaniel.simard.42@gmail.com>"]
+categories = []
+description = "Burn Large Models Engine - CLI."
+documentation = "https://docs.rs/burn-lm-cli"
+repository = "https://github.com/tracel-ai/burn-lm"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+readme.workspace = true
+
+[features]
+f16 = ["burn-lm-inference/f16"]
+bf16 = ["burn-lm-inference/f16"]
+cuda = ["burn-lm-inference/cuda"]
+rocm = ["burn-lm-inference/rocm"]
+wgpu = ["burn-lm-inference/wgpu"]
+vulkan = ["burn-lm-inference/vulkan"]
+metal = ["burn-lm-inference/metal"]
+
+libtorch-cuda = ["burn-lm-inference/libtorch"]
+libtorch-cpu = ["burn-lm-inference/libtorch-cpu"]
+
+ndarray = ["burn-lm-inference/ndarray"]
+ndarray-blas-openblas = ["burn-lm-inference/ndarray-blas-openblas"]
+ndarray-blas-accelerate = ["burn-lm-inference/ndarray-blas-accelerate"]
+ndarray-blas-netlib = ["burn-lm-inference/ndarray-blas-netlib"]
+
+[dependencies]
+burn-lm-inference = { path = "../burn-lm-inference", version = "0.0.1" }
+burn-lm-registry = { path = "../burn-lm-registry", version = "0.0.1" }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+cloop = { workspace = true }
+comfy-table = { workspace = true }
+rustyline = { workspace = true }
+strum = { workspace = true }
+yansi = { workspace = true }
+spinners = { workspace = true }
+which = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+tempfile = { workspace = true }
+
+[[bin]]
+name = "burn-lm-cli"
+path = "src/bin/burn-lm-cli.rs"

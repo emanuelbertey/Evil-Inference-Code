@@ -770,8 +770,14 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
     let stride = 64;
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
 
+    let total_steps = num_batches * num_epochs;
+    let warmup_steps = 500.min(total_steps / 10);
+    let mut step_count = 0;
+
     println!("Iniciando entrenamiento BPE (CUDA)...");
-    println!("  batch_size: {} | seq_len: {} | batches/epoch: {}\n", batch_size, seq_len, num_batches);
+    println!("  batch_size: {} | seq_len: {} | batches/epoch: {}", batch_size, seq_len, num_batches);
+    println!("  LR: {:.0e} | warmup {} steps + cosine decay to 10% over {} steps\n",
+        lr, warmup_steps, total_steps);
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0;
@@ -806,7 +812,16 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
 
             let grads = loss.backward();
             let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
-            model = optim.step(lr, model, grads_p);
+            step_count += 1;
+            let current_lr = if step_count < warmup_steps {
+                lr * step_count as f64 / warmup_steps as f64
+            } else if step_count < total_steps {
+                let t = (step_count - warmup_steps) as f64 / (total_steps - warmup_steps) as f64;
+                lr * (0.1 + 0.9 * (1.0 + (t * std::f64::consts::PI).cos()) / 2.0)
+            } else {
+                lr * 0.1
+            };
+            model = optim.step(current_lr, model, grads_p);
 
             if b % 10 == 0 {
                 let elapsed = start_epoch.elapsed().as_secs_f32();

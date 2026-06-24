@@ -1,0 +1,26 @@
+[package]
+authors = ["guillaumelagrange <lagrange.guillaume.1@gmail.com>"]
+name = "yolox-burn"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[features]
+default = []
+std = []
+pretrained = ["burn/network", "std", "dep:dirs", "dep:burn-store"]
+
+[dependencies]
+burn       = { workspace = true }
+burn-store = { workspace = true, features = ["std", "pytorch"], optional = true }
+itertools  = { workspace = true, features = ["use_alloc"] }
+dirs       = { workspace = true, optional = true }
+serde      = { workspace = true, features = ["derive", "alloc"] }
+
+[dev-dependencies]
+burn-flex = { workspace = true }
+image     = { workspace = true, features = ["png", "jpeg"] }
+
+[[example]]
+name = "inference"
+required-features = ["pretrained"]

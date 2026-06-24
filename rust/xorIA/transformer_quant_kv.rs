@@ -703,7 +703,13 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     let stride = 64;
 
     println!("Iniciando entrenamiento con streaming...");
-    println!("  batch_size: {} | seq_len: {} | stride: {}\n", batch_size, seq_len, stride);
+    println!("  batch_size: {} | seq_len: {} | stride: {}", batch_size, seq_len, stride);
+
+    let warmup_steps = 500;
+    let cosine_period = 10000;
+    let mut step_count = 0;
+    println!("  LR: {:.0e} | warmup {} steps + cosine decay to 10% over {} steps\n",
+        lr, warmup_steps, cosine_period);
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0;
@@ -743,7 +749,14 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
 
                 let grads = loss.backward();
                 let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
-                model = optim.step(lr, model, grads_p);
+                step_count += 1;
+                let current_lr = if step_count < warmup_steps {
+                    lr * step_count as f64 / warmup_steps as f64
+                } else {
+                    let t = ((step_count - warmup_steps) as f64 / cosine_period as f64).min(1.0);
+                    lr * (0.1 + 0.9 * (1.0 + (t * std::f64::consts::PI).cos()) / 2.0)
+                };
+                model = optim.step(current_lr, model, grads_p);
 
                 let elapsed = start_epoch.elapsed().as_secs_f32();
                 let tps = (batch_count * batch_size * seq_len) as f32 / elapsed;

@@ -1,0 +1,25 @@
+[package]
+authors = ["Arjun31415", "guillaumelagrange <lagrange.guillaume.1@gmail.com>"]
+name = "mobilenetv2-burn"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[features]
+default = []
+std = []
+pretrained = ["burn/network", "std", "dep:dirs", "dep:burn-store"]
+
+[dependencies]
+burn       = { workspace = true }
+burn-store = { workspace = true, features = ["std", "pytorch"], optional = true }
+dirs       = { workspace = true, optional = true }
+serde      = { workspace = true, features = ["derive", "alloc"] }
+
+[dev-dependencies]
+burn-flex = { workspace = true }
+image     = { workspace = true, features = ["png", "jpeg"] }
+
+[[example]]
+name = "inference"
+required-features = ["pretrained"]
