@@ -162,7 +162,7 @@ fn log_layer_grad_norms(layer_idx: usize, g_q: Option<f32>, g_o: Option<f32>, g_
 fn log_grad_stats_normal(model: &NormalTransformerLM<MyBackend>, grads: &<MyBackend as AutodiffBackend>::Gradients, step: usize, num_layers: usize) {
     let emb_norm = grad_norm(&model.embedding.weight, grads);
     let head_norm = grad_norm(&model.head.weight, grads);
-    let final_norm_norm = grad_norm(&model.transformer.final_norm.weight, grads);
+    let final_norm_norm = grad_norm(&model.transformer.final_norm.gamma, grads);
 
     println!("       Gradients at step {:>2}: emb={:.2e}  head={:.2e}  final_norm={:.2e}",
              step, emb_norm.unwrap_or(0.0), head_norm.unwrap_or(0.0), final_norm_norm.unwrap_or(0.0));
@@ -177,12 +177,12 @@ fn log_grad_stats_normal(model: &NormalTransformerLM<MyBackend>, grads: &<MyBack
         let layer = &model.transformer.layers[li];
         let g_q = grad_norm(&layer.attention.qkv.q_proj.weight, grads);
         let g_o = grad_norm(&layer.attention.o_proj.o_proj.weight, grads);
-        let g_attn_norm = grad_norm(&layer.attn_norm.weight, grads);
-        let g_ffn_norm = grad_norm(&layer.ffn_norm.weight, grads);
+        let g_attn_norm = grad_norm(&layer.attn_norm.gamma, grads);
+        let g_ffn_norm = grad_norm(&layer.ffn_norm.gamma, grads);
 
         let (g_gate, g_down) = match &layer.ffn {
             FeedForwardBlock::SwiGLU(ffn) => (
-                grad_norm(&ffn.gate_up_proj.weight, grads),
+                grad_norm(&ffn.swiglu.linear_inner.weight, grads),
                 grad_norm(&ffn.down_proj.weight, grads),
             ),
             FeedForwardBlock::Standard(ffn) => (

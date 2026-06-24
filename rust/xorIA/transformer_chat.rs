@@ -458,6 +458,8 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
     let mut lr: f64 = 3e-4;
     let mut num_epochs: usize = 50;
     let mut batch_size: usize = 16;
+    let mut seq_len: usize = 128;
+    let mut gradient_accumulation_steps: usize = 1;
 
     let mut modo_inferencia = false;
     if model_exists {
@@ -471,6 +473,8 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
             println!("  (6) Batch:   {}", batch_size);
             println!("  (7) Temp:    {}", temperature);
             println!("  (8) R-Pen:   {}", repetition_penalty);
+            println!("  (9) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (10) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("----------------------------");
             print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
             io::stdout().flush()?;
@@ -534,6 +538,8 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
                 if let Ok(v) = input.trim().parse() { repetition_penalty = v; }
+                print!("Seq len [{}]: ", seq_len); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { seq_len = v; } }
+                print!("Gradient accumulation steps [{}]: ", gradient_accumulation_steps); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { gradient_accumulation_steps = v; } }
             }
         }
     } else {
@@ -545,6 +551,8 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
             println!("  (4) LR:      {}", lr);
             println!("  (5) Épocas:  {}", num_epochs);
             println!("  (6) Batch:   {}", batch_size);
+            println!("  (7) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (8) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("------------------------------------");
             print!("¿Entrenar (e) o Ajustar parámetros (s)? [e/s]: ");
             io::stdout().flush()?;
@@ -560,6 +568,8 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
                 print!("Learning Rate [{}]: ", lr); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { lr = v; }
                 print!("Épocas [{}]: ", num_epochs); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { num_epochs = v; }
                 print!("Batch Size [{}]: ", batch_size); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { batch_size = v; }
+                print!("Seq len [{}]: ", seq_len); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { seq_len = v; } }
+                print!("Gradient accumulation steps [{}]: ", gradient_accumulation_steps); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { gradient_accumulation_steps = v; } }
             }
         }
     }
@@ -719,13 +729,12 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let seq_len = 64;
-    let stride = 64;
+    let stride = seq_len / 2;
 
     let text_path = Path::new(&text_file);
 
     println!("Iniciando entrenamiento con streaming...");
-    println!("  batch_size: {} | seq_len: {} | stride: {}\n", batch_size, seq_len, stride);
+    println!("  batch_size: {} | seq_len: {} | stride: {} | grad_accum: {}x\n", batch_size, seq_len, stride, gradient_accumulation_steps);
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0;
@@ -740,40 +749,52 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
             let num_batches = tokens.len() / tokens_per_batch;
             if num_batches == 0 { continue; }
 
-            for b in 0..num_batches {
-                let start_idx = b * tokens_per_batch;
+            for b in (0..num_batches).step_by(gradient_accumulation_steps) {
+                let mut accum_loss = Tensor::<MyBackend, 1>::zeros([1], &device);
+                let mut micro_steps = 0usize;
 
-                let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
+                for m in 0..gradient_accumulation_steps {
+                    let micro_idx = b + m;
+                    if micro_idx >= num_batches { break; }
+                    let start_idx = micro_idx * tokens_per_batch;
 
-                let logits = model.forward(x);
-                let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
-                let targets_flat = y.reshape([batch_size * seq_len]);
+                    let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
 
-                let loss = loss_fn.forward(logits_flat, targets_flat);
-                let current_loss = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+                    let logits = model.forward(x);
+                    let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
+                    let targets_flat = y.reshape([batch_size * seq_len]);
 
-                if current_loss.is_nan() {
-                    println!("\n[!] Loss NaN en Fragmento {} Batch {}. Abortando.", frag_idx, b);
-                    return Ok(());
+                    let loss = loss_fn.forward(logits_flat, targets_flat);
+                    let current_loss = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+
+                    if current_loss.is_nan() {
+                        println!("\n[!] Loss NaN en Fragmento {} micro-batch {} (macro {}). Abortando.", frag_idx, m, micro_idx);
+                        return Ok(());
+                    }
+
+                    total_loss += current_loss;
+                    accum_loss = accum_loss + loss;
+                    micro_steps += 1;
                 }
 
-                total_loss += current_loss;
-                batch_count += 1;
+                if micro_steps == 0 { continue; }
 
-                let grads = loss.backward();
+                accum_loss = accum_loss / micro_steps as f32;
+                let grads = accum_loss.backward();
                 let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
                 model = optim.step(lr, model, grads_p);
+                batch_count += 1;
 
                 let elapsed = start_epoch.elapsed().as_secs_f32();
                 let tps = (batch_count * batch_size * seq_len) as f32 / elapsed;
                 print!("\rEpoch {} | Frag {} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s",
-                    epoch + 1, frag_idx, b + 1, num_batches,
-                    total_loss / batch_count as f32, tps);
+                    epoch + 1, frag_idx, batch_count, (num_batches + gradient_accumulation_steps - 1) / gradient_accumulation_steps,
+                    total_loss / (batch_count as f32 * gradient_accumulation_steps as f32), tps);
                 io::stdout().flush().unwrap();
             }
         }
 
-        let avg_loss = total_loss / batch_count.max(1) as f32;
+        let avg_loss = total_loss / batch_count.max(1) as f32 / gradient_accumulation_steps.max(1) as f32;
         println!("\nEpoch {} completa en {:.2}s. Loss: {:.4}",
             epoch + 1, start_epoch.elapsed().as_secs_f32(), avg_loss);
 

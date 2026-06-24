@@ -560,11 +560,13 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
     let mut lr: f64 = 4e-5;
     let mut num_epochs: usize = 50;
     let mut batch_size: usize = 24;
+    let mut seq_len: usize = 128;
     let mut rotary_pct: f64 = 1.0;
     let mut use_x0: bool = true;
     let mut residual_dropout: f64 = 0.0;
     let mut use_burn_lr: bool = false;
     let mut use_partial_rope_infer: bool = false;
+    let mut gradient_accumulation_steps: usize = 1;
 
     let mut modo_inferencia = false;
     if model_exists {
@@ -583,6 +585,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
             println!("  (11) ResDrop: {}", residual_dropout);
             println!("  (12) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
             println!("  (13) Inf RoPE%: {}", if use_partial_rope_infer { format!("{}%", rotary_pct * 100.0) } else { "100% (full)".to_string() });
+            println!("  (14) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (15) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("----------------------------");
             print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
             io::stdout().flush()?;
@@ -651,6 +655,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
                 print!("Residual Dropout [{}]: ", residual_dropout); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { residual_dropout = v.clamp(0.0, 1.0); }
                 print!("LR scheduler (m=Manual, b=Burn) [{}]: ", if use_burn_lr { "b" } else { "m" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "b" | "burn" => use_burn_lr = true, "m" | "manual" | "" => use_burn_lr = false, _ => {} }
                 print!("Partial RoPE en inferencia (s/n) [{}]: ", if use_partial_rope_infer { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_partial_rope_infer = true, "n" | "no" | "" => use_partial_rope_infer = false, _ => {} }
+                print!("Seq len [{}]: ", seq_len); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { seq_len = v; } }
+                print!("Gradient accumulation steps [{}]: ", gradient_accumulation_steps); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { gradient_accumulation_steps = v; } }
             }
         }
     } else {
@@ -666,6 +672,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
             println!("  (8) x0:     {}", if use_x0 { "Si" } else { "No" });
             println!("  (9) ResDrop: {}", residual_dropout);
             println!("  (10) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
+            println!("  (11) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (12) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("--------------------------------------------");
             print!("¿Entrenar (e) o Ajustar parámetros (s)? [e/s]: ");
             io::stdout().flush()?;
@@ -686,6 +694,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
                 print!("Residual Dropout [{}]: ", residual_dropout); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { residual_dropout = v.clamp(0.0, 1.0); }
                 print!("LR scheduler (m=Manual, b=Burn) [{}]: ", if use_burn_lr { "b" } else { "m" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "b" | "burn" => use_burn_lr = true, "m" | "manual" | "" => use_burn_lr = false, _ => {} }
                 print!("Partial RoPE en inferencia (s/n) [{}]: ", if use_partial_rope_infer { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_partial_rope_infer = true, "n" | "no" | "" => use_partial_rope_infer = false, _ => {} }
+                print!("Seq len [{}]: ", seq_len); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { seq_len = v; } }
+                print!("Gradient accumulation steps [{}]: ", gradient_accumulation_steps); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { gradient_accumulation_steps = v; } }
             }
         }
     }
@@ -867,8 +877,7 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let seq_len = 64;
-    let stride = 64;
+    let stride = seq_len / 2;
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
 
     let total_steps = num_batches * num_epochs;
@@ -886,44 +895,57 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
     };
 
     println!("Iniciando entrenamiento BPE (CUDA)...");
-    println!("  batch_size: {} | seq_len: {} | batches/epoch: {}", batch_size, seq_len, num_batches);
+    println!("  batch_size: {} | seq_len: {} | stride: {} | batches/epoch: {}", batch_size, seq_len, stride, num_batches);
+    println!("  Grad accum: {}x → eff batch: {}", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
     println!("  LR: {:.0e} | warmup {} steps + cosine decay to 10% over {} steps | scheduler: {}\n",
         lr, warmup_steps, total_steps, if use_burn_lr { "Burn" } else { "Manual" });
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0;
         let mut batch_count = 0;
+        let mut step_count_epoch = 0;
         let start_epoch = Instant::now();
 
-        for b in 0..num_batches {
-            let start_idx = b * batch_size * stride;
-            if start_idx + batch_size * stride + seq_len >= tokens.len() { break; }
+        for b in (0..num_batches).step_by(gradient_accumulation_steps) {
+            let mut accum_loss = Tensor::<MyBackend, 1>::zeros([1], &device);
+            let mut micro_steps = 0usize;
 
-            let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
+            for m in 0..gradient_accumulation_steps {
+                let micro_idx = b + m;
+                if micro_idx >= num_batches { break; }
+                let start_idx = micro_idx * batch_size * stride;
+                if start_idx + batch_size * stride + seq_len >= tokens.len() { break; }
 
-            // Training uses custom forward when partial RoPE or x0 enabled
-            let logits = if rotary_pct < 0.999 || use_x0 {
-                model.forward_train_partial_rope(x, rotary_pct)
-            } else {
-                model.forward(x)
-            };
-            let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
-            let targets_flat = y.reshape([batch_size * seq_len]);
+                let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
 
-            let loss = loss_fn.forward(logits_flat, targets_flat);
-            let current_loss = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+                let logits = if rotary_pct < 0.999 || use_x0 {
+                    model.forward_train_partial_rope(x, rotary_pct)
+                } else {
+                    model.forward(x)
+                };
+                let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
+                let targets_flat = y.reshape([batch_size * seq_len]);
 
-            if current_loss.is_nan() {
-                println!("\n[!] Loss NaN en Batch {}. Abortando.", b);
-                return Ok(());
+                let loss = loss_fn.forward(logits_flat, targets_flat);
+                let current_loss = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+
+                if current_loss.is_nan() {
+                    println!("\n[!] Loss NaN en micro-batch {} (macro {}). Abortando.", m, micro_idx);
+                    return Ok(());
+                }
+
+                total_loss += current_loss;
+                accum_loss = accum_loss + loss;
+                micro_steps += 1;
             }
 
-            total_loss += current_loss;
-            batch_count += 1;
+            if micro_steps == 0 { continue; }
 
-            let grads = loss.backward();
+            accum_loss = accum_loss / micro_steps as f32;
+            let grads = accum_loss.backward();
             let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
             step_count += 1;
+            step_count_epoch += 1;
             let current_lr = if let Some(ref mut sched) = burn_scheduler {
                 sched.step()
             } else if step_count < warmup_steps {
@@ -935,18 +957,19 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
                 lr * 0.1
             };
             model = optim.step(current_lr, model, grads_p);
+            batch_count += 1;
 
-            if b % 10 == 0 {
+            if step_count_epoch % 10 == 0 {
                 let elapsed = start_epoch.elapsed().as_secs_f32();
-                let tps = ((b + 1) * batch_size * seq_len) as f32 / elapsed;
+                let tps = (batch_count * batch_size * seq_len) as f32 / elapsed;
                 print!("\rEpoch {}/{} | Batch {}/{} | Loss: {:.4} | {:.1} tok/s",
-                    epoch + 1, num_epochs, b, num_batches,
-                    total_loss / batch_count as f32, tps);
+                    epoch + 1, num_epochs, step_count_epoch, num_batches / gradient_accumulation_steps,
+                    total_loss / (batch_count * gradient_accumulation_steps) as f32, tps);
                 io::stdout().flush().unwrap();
             }
         }
 
-        let avg_loss = total_loss / batch_count.max(1) as f32;
+        let avg_loss = total_loss / batch_count.max(1) as f32 / gradient_accumulation_steps.max(1) as f32;
         println!("\nEpoch {} completa en {:.2}s. Loss: {:.4}",
             epoch + 1, start_epoch.elapsed().as_secs_f32(), avg_loss);
 

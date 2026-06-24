@@ -15,39 +15,11 @@
 
 use burn::prelude::*;
 use burn::config::Config;
-use burn::module::{Module, Param};
-use burn::nn::Dropout;
+use burn::module::Module;
+use burn::nn::{Dropout, RmsNorm, RmsNormConfig};
 
 use super::attention::{Attention, AttentionConfig, KVCache};
 use super::feedforward::{FeedForwardBlock, FeedForwardConfig};
-
-// ─── RMSNorm (local copy for the transformer module) ────────────────────────
-
-#[derive(Module, Debug)]
-pub struct RMSNorm<B: Backend> {
-    pub weight: Param<Tensor<B, 1>>,
-    pub eps: f64,
-}
-
-impl<B: Backend> RMSNorm<B> {
-    pub fn new(dim: usize, eps: f64, device: &B::Device) -> Self {
-        Self {
-            weight: Param::from_tensor(Tensor::ones([dim], device)),
-            eps,
-        }
-    }
-
-    /// Forward for 3D: (B, S, D) → (B, S, D)
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let denom = (x.clone()
-            .powf_scalar(2.0)
-            .mean_dim(2) + self.eps as f32).sqrt();
-        // Ensure proper broadcasting: weight -> (1, 1, D)
-        let normed = x / denom;
-        let w = self.weight.val().unsqueeze::<2>().unsqueeze::<3>();
-        normed * w
-    }
-}
 
 // ─── Transformer Layer Config ───────────────────────────────────────────────
 
@@ -107,11 +79,11 @@ pub struct TransformerLayerConfig {
 #[derive(Module, Debug)]
 pub struct TransformerLayer<B: Backend> {
     /// Pre-attention normalization
-    pub attn_norm: RMSNorm<B>,
+    pub attn_norm: RmsNorm<B>,
     /// Grouped Query Attention with RoPE
     pub attention: Attention<B>,
     /// Pre-FFN normalization
-    pub ffn_norm: RMSNorm<B>,
+    pub ffn_norm: RmsNorm<B>,
     /// Feed-forward network (Standard or SwiGLU)
     pub ffn: FeedForwardBlock<B>,
     /// Residual dropout
@@ -144,9 +116,9 @@ impl TransformerLayerConfig {
         };
 
         TransformerLayer {
-            attn_norm: RMSNorm::new(self.d_model, self.norm_eps, device),
+            attn_norm: RmsNormConfig::new(self.d_model).with_epsilon(self.norm_eps).init(device),
             attention: attn_config.init(device),
-            ffn_norm: RMSNorm::new(self.d_model, self.norm_eps, device),
+            ffn_norm: RmsNormConfig::new(self.d_model).with_epsilon(self.norm_eps).init(device),
             ffn: ffn_config.init(device),
             residual_dropout: burn::nn::DropoutConfig::new(self.residual_dropout).init(),
         }
@@ -217,7 +189,7 @@ pub struct Transformer<B: Backend> {
     /// Stack of identical transformer layers
     pub layers: Vec<TransformerLayer<B>>,
     /// Final normalization before output head
-    pub final_norm: RMSNorm<B>,
+    pub final_norm: RmsNorm<B>,
     pub num_layers: usize,
     pub d_model: usize,
 }
@@ -230,7 +202,7 @@ impl TransformerConfig {
 
         Transformer {
             layers,
-            final_norm: RMSNorm::new(self.layer.d_model, self.layer.norm_eps, device),
+            final_norm: RmsNormConfig::new(self.layer.d_model).with_epsilon(self.layer.norm_eps).init(device),
             num_layers: self.num_layers,
             d_model: self.layer.d_model,
         }

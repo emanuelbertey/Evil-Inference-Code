@@ -14,7 +14,7 @@
 use burn::prelude::*;
 use burn::config::Config;
 use burn::module::Module;
-use burn::nn::{Linear, LinearConfig, Dropout};
+use burn::nn::{Linear, LinearConfig, Dropout, SwiGlu, SwiGluConfig};
 
 // ─── FFN Config ─────────────────────────────────────────────────────────────
 
@@ -71,8 +71,8 @@ pub struct FeedForward<B: Backend> {
 
 #[derive(Module, Debug)]
 pub struct SwiGLUFeedForward<B: Backend> {
-    /// Combined gate+up projection: d_model → 2 * intermediate_dim
-    pub gate_up_proj: Linear<B>,
+    /// burn::nn::SwiGlu: gate + outer (no down projection)
+    pub swiglu: SwiGlu<B>,
     /// Down projection: intermediate_dim → d_model
     pub down_proj: Linear<B>,
     pub dropout: Dropout,
@@ -93,7 +93,7 @@ impl FeedForwardConfig {
         let dropout = burn::nn::DropoutConfig::new(self.dropout).init();
 
         if self.use_swiglu {
-            let gate_up_proj = LinearConfig::new(self.d_model, 2 * inter_dim)
+            let swiglu = SwiGluConfig::new(self.d_model, inter_dim)
                 .with_bias(self.bias)
                 .init(device);
             let down_proj = LinearConfig::new(inter_dim, self.d_model)
@@ -101,7 +101,7 @@ impl FeedForwardConfig {
                 .init(device);
 
             FeedForwardBlock::SwiGLU(SwiGLUFeedForward {
-                gate_up_proj,
+                swiglu,
                 down_proj,
                 dropout,
                 intermediate_dim: inter_dim,
@@ -144,20 +144,9 @@ impl<B: Backend> FeedForward<B> {
 }
 
 impl<B: Backend> SwiGLUFeedForward<B> {
-    /// SwiGLU FFN: x → gate_up → split → SiLU(gate) * up → dropout → down
-    ///
-    /// The gate_up projection outputs 2 * intermediate_dim, which is split
-    /// into gate and up components. SiLU (Swish) is applied to the gate.
+    /// SwiGLU FFN: x → SwiGlu(gate + outer) → dropout → down
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let gate_up = self.gate_up_proj.forward(x);
-
-        // Split into gate and up projections
-        let chunks = gate_up.chunk(2, 2);
-        let gate = chunks[0].clone();
-        let up = chunks[1].clone();
-
-        // SwiGLU activation: SiLU(gate) * up
-        let h = burn::tensor::activation::silu(gate) * up;
+        let h = self.swiglu.forward(x);
         let h = self.dropout.forward(h);
         self.down_proj.forward(h)
     }

@@ -48,5 +48,4 @@ pub use feedforward::{FeedForwardBlock, FeedForwardConfig, FeedForward, SwiGLUFe
 pub use layer::{
     TransformerLayer, TransformerLayerConfig,
     Transformer, TransformerConfig,
-    RMSNorm,
 };
