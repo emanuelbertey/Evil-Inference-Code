@@ -16,6 +16,10 @@
 //   cargo run --bin transformer_quant_kv --release -- xorIA/input.txt
 
 use burn::grad_clipping::GradientClippingConfig;
+use burn::lr_scheduler::LrScheduler;
+use burn::lr_scheduler::composed::{ComposedLrScheduler, ComposedLrSchedulerConfig};
+use burn::lr_scheduler::linear::LinearLrSchedulerConfig;
+use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::optim::decay::WeightDecayConfig;
 use burn::{
     module::{Module, AutodiffModule, Param},
@@ -417,6 +421,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     let mut batch_size: usize = 16;
     let mut rotary_pct: f64 = 1.0;
     let mut use_x0: bool = true;
+    let mut residual_dropout: f64 = 0.0;
+    let mut use_burn_lr: bool = false;
 
     let mut modo_inferencia = false;
     let mut modo_kuant = false;
@@ -434,6 +440,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("  (8) R-Pen:   {}", repetition_penalty);
             println!("  (9) RoPE%:   {}%", rotary_pct * 100.0);
             println!("  (10) x0:     {}", if use_x0 { "Si" } else { "No" });
+            println!("  (11) ResDrop: {}", residual_dropout);
+            println!("  (12) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
             println!("----------------------------");
             print!("¿Entrenar (e), Inferir (i), Inferir TurboQuant (t) o Ajustar (s)? [e/i/t/s]: ");
             io::stdout().flush()?;
@@ -457,6 +465,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 print!("Repetition Penalty [{}]: ", repetition_penalty); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { repetition_penalty = v; }
                 print!("RoPE % [{}]: ", rotary_pct * 100.0); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { rotary_pct = (v / 100.0).clamp(0.0, 1.0); }
                 print!("x0 injection (s/n) [{}]: ", if use_x0 { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_x0 = true, "n" | "no" | "" => use_x0 = false, _ => {} }
+                print!("Residual Dropout [{}]: ", residual_dropout); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { residual_dropout = v.clamp(0.0, 1.0); }
+                print!("LR scheduler (m=Manual, b=Burn) [{}]: ", if use_burn_lr { "b" } else { "m" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "b" | "burn" => use_burn_lr = true, "m" | "manual" | "" => use_burn_lr = false, _ => {} }
             }
         }
     } else {
@@ -470,6 +480,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("  (6) Batch:   {}", batch_size);
             println!("  (7) RoPE%:   {}%", rotary_pct * 100.0);
             println!("  (8) x0:     {}", if use_x0 { "Si" } else { "No" });
+            println!("  (9) ResDrop: {}", residual_dropout);
+            println!("  (10) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
             println!("------------------------------------");
             print!("¿Entrenar (e) o Ajustar parámetros (s)? [e/s]: ");
             io::stdout().flush()?;
@@ -487,6 +499,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 print!("Batch Size [{}]: ", batch_size); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { batch_size = v; }
                 print!("RoPE % [{}]: ", rotary_pct * 100.0); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { rotary_pct = (v / 100.0).clamp(0.0, 1.0); }
                 print!("x0 injection (s/n) [{}]: ", if use_x0 { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_x0 = true, "n" | "no" | "" => use_x0 = false, _ => {} }
+                print!("Residual Dropout [{}]: ", residual_dropout); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { residual_dropout = v.clamp(0.0, 1.0); }
+                print!("LR scheduler (m=Manual, b=Burn) [{}]: ", if use_burn_lr { "b" } else { "m" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "b" | "burn" => use_burn_lr = true, "m" | "manual" | "" => use_burn_lr = false, _ => {} }
             }
         }
     }
@@ -503,6 +517,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     println!("  FFN:           SwiGLU");
     println!("  Positional:    RoPE ({:.0}%)", rotary_pct * 100.0);
     println!("  x0 injection:  {}", if use_x0 { "Si" } else { "No" });
+    println!("  ResDrop:       {}", residual_dropout);
+    println!("  LR scheduler:  {}", if use_burn_lr { "Burn (Composed)" } else { "Manual (warmup+cosine)" });
     println!("  KV Cache:      {} \n", if modo_kuant { "TurboQuant" } else { "Regular" });
 
     let transformer_config = TransformerConfig {
@@ -520,7 +536,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             causal: true,
             attn_dropout: 0.1,
             ffn_dropout: 0.1,
-            residual_dropout: 0.1,
+            residual_dropout,
             attn_logit_cap: None,
             bias: false,
             norm_eps: 1e-5,
@@ -708,8 +724,19 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     let warmup_steps = 500;
     let cosine_period = 10000;
     let mut step_count = 0;
-    println!("  LR: {:.0e} | warmup {} steps + cosine decay to 10% over {} steps\n",
-        lr, warmup_steps, cosine_period);
+
+    let mut burn_scheduler = if use_burn_lr {
+        Some(ComposedLrSchedulerConfig::new()
+            .linear(LinearLrSchedulerConfig::new(1e-8, 1.0, warmup_steps))
+            .cosine(CosineAnnealingLrSchedulerConfig::new(lr, cosine_period).with_min_lr(lr * 0.1))
+            .init()
+            .unwrap())
+    } else {
+        None
+    };
+
+    println!("  LR: {:.0e} | warmup {} steps + cosine decay to 10% over {} steps | scheduler: {}\n",
+        lr, warmup_steps, cosine_period, if use_burn_lr { "Burn" } else { "Manual" });
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0;
@@ -750,7 +777,9 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 let grads = loss.backward();
                 let grads_p = burn::optim::GradientsParams::from_grads(grads, &model);
                 step_count += 1;
-                let current_lr = if step_count < warmup_steps {
+                let current_lr = if let Some(ref mut sched) = burn_scheduler {
+                    sched.step()
+                } else if step_count < warmup_steps {
                     lr * step_count as f64 / warmup_steps as f64
                 } else {
                     let t = ((step_count - warmup_steps) as f64 / cosine_period as f64).min(1.0);

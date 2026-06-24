@@ -339,40 +339,14 @@ impl<B: Backend> Attention<B> {
         (output, new_cache)
     }
 
-    /// Apply lower-triangular causal mask to attention scores.
-    ///
-    /// Sets future positions to -infinity so softmax assigns them zero weight.
     fn apply_causal_mask(&self, scores: Tensor<B, 4>, seq_len: usize) -> Tensor<B, 4> {
         let device = scores.device();
-
-        // Build upper-triangular mask (1 = masked position)
-        let mut mask_data = vec![0.0f32; seq_len * seq_len];
-        for i in 0..seq_len {
-            for j in (i + 1)..seq_len {
-                mask_data[i * seq_len + j] = 1.0;
-            }
-        }
-        let mask = Tensor::<B, 2>::from_data(
-                burn::tensor::TensorData::new(mask_data, [seq_len, seq_len]),
-                &device,
-            )
-            .unsqueeze_dim::<3>(0)   // (1, S, S)
-            .unsqueeze_dim::<4>(0);  // (1, 1, S, S)
-
-        // Replace masked positions with large negative value
-        let neg_inf = mask.clone() * (-1e9);
-        let keep = (mask * (-1.0)) + 1.0; // Invert: 0→1, 1→0
-
-        scores * keep + neg_inf
+        let mask = Tensor::<B, 2, Bool>::tril_mask([seq_len, seq_len], 0, &device)
+            .unsqueeze_dim::<3>(0)
+            .unsqueeze_dim::<4>(0);
+        scores.mask_fill(mask, f32::NEG_INFINITY)
     }
 
-    /// Causal mask for cached attention where query length ≠ key/value length.
-    ///
-    /// During cached generation:
-    ///   - q_len = new tokens being processed (often 1 during generation, or full seq during prefill)
-    ///   - kv_len = total accumulated sequence length (cached + new)
-    ///
-    /// Each query position i can attend to key positions 0..=(kv_len - q_len + i).
     fn apply_causal_mask_with_offset(
         &self,
         scores: Tensor<B, 4>,
@@ -380,25 +354,10 @@ impl<B: Backend> Attention<B> {
         kv_len: usize,
     ) -> Tensor<B, 4> {
         let device = scores.device();
-        let offset = kv_len - q_len;
-
-        let mut mask_data = vec![0.0f32; q_len * kv_len];
-        for i in 0..q_len {
-            let max_attend = offset + i; // last position this query can attend to
-            for j in (max_attend + 1)..kv_len {
-                mask_data[i * kv_len + j] = 1.0;
-            }
-        }
-
-        let mask = Tensor::<B, 2>::from_data(
-            burn::tensor::TensorData::new(mask_data, [q_len, kv_len]),
-            &device,
-        )
-        .unsqueeze_dim::<3>(0)
-        .unsqueeze_dim::<4>(0);
-
-        let neg_inf = mask.clone() * (-1e9);
-        let keep = (mask * (-1.0)) + 1.0;
-        scores * keep + neg_inf
+        let offset = (kv_len - q_len) as i64;
+        let mask = Tensor::<B, 2, Bool>::tril_mask([q_len, kv_len], offset, &device)
+            .unsqueeze_dim::<3>(0)
+            .unsqueeze_dim::<4>(0);
+        scores.mask_fill(mask, f32::NEG_INFINITY)
     }
 }

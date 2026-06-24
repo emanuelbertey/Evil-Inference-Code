@@ -1,6 +1,6 @@
 // ─── Shared Operations ─────────────────────────────────────────────────────
 
-use burn::tensor::{Tensor, backend::Backend, TensorData};
+use burn::tensor::{Tensor, backend::Backend, TensorData, Bool};
 
 // ─── Softmax (raw f32 vec) ─────────────────────────────────────────────────
 
@@ -243,32 +243,17 @@ pub fn repeat_kv<B: Backend>(x: Tensor<B, 4>, num_heads: usize, num_kv_groups: u
 
 pub fn apply_causal_mask<B: Backend>(scores: Tensor<B, 4>, seq_len: usize) -> Tensor<B, 4> {
     let device = scores.device();
-    let mut mask_data = vec![0.0f32; seq_len * seq_len];
-    for i in 0..seq_len {
-        for j in (i + 1)..seq_len {
-            mask_data[i * seq_len + j] = 1.0;
-        }
-    }
-    let mask = Tensor::<B, 2>::from_data(TensorData::new(mask_data, [seq_len, seq_len]), &device)
-        .unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
-    let neg_inf = mask.clone() * (-1e9);
-    let keep = (mask * (-1.0)) + 1.0;
-    scores * keep + neg_inf
+    let mask = Tensor::<B, 2, Bool>::tril_mask([seq_len, seq_len], 0, &device)
+        .unsqueeze_dim::<3>(0)
+        .unsqueeze_dim::<4>(0);
+    scores.mask_fill(mask, f32::NEG_INFINITY)
 }
 
 pub fn apply_causal_mask_with_offset<B: Backend>(scores: Tensor<B, 4>, q_len: usize, kv_len: usize) -> Tensor<B, 4> {
     let device = scores.device();
-    let offset = kv_len - q_len;
-    let mut mask_data = vec![0.0f32; q_len * kv_len];
-    for i in 0..q_len {
-        let max_attend = offset + i;
-        for j in (max_attend + 1)..kv_len {
-            mask_data[i * kv_len + j] = 1.0;
-        }
-    }
-    let mask = Tensor::<B, 2>::from_data(TensorData::new(mask_data, [q_len, kv_len]), &device)
-        .unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
-    let neg_inf = mask.clone() * (-1e9);
-    let keep = (mask * (-1.0)) + 1.0;
-    scores * keep + neg_inf
+    let offset = (kv_len - q_len) as i64;
+    let mask = Tensor::<B, 2, Bool>::tril_mask([q_len, kv_len], offset, &device)
+        .unsqueeze_dim::<3>(0)
+        .unsqueeze_dim::<4>(0);
+    scores.mask_fill(mask, f32::NEG_INFINITY)
 }
