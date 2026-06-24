@@ -20,7 +20,7 @@
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::decay::WeightDecayConfig;
 use burn::{
-    module::{Module, AutodiffModule},
+    module::{Module, AutodiffModule, Param},
     optim::{AdamConfig, Optimizer},
     record::{CompactRecorder, Recorder},
     tensor::{activation::softmax, Tensor, backend::Backend, TensorData, Int},
@@ -29,6 +29,7 @@ use burn::{
 };
 use burn_autodiff::Autodiff;
 use burn_cuda::{Cuda, CudaDevice};
+use xlstm::blocks::trasformer_bit::ops::{apply_rope_partial, repeat_kv, apply_causal_mask};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -128,6 +129,7 @@ pub struct TransformerLM<B: Backend> {
     pub embedding: Embedding<B>,
     pub transformer: Transformer<B>,
     pub head: Linear<B>,
+    pub x0_lambdas: Option<Param<Tensor<B, 2>>>,  // [1, num_layers]
     pub vocab_size: usize,
     pub d_model: usize,
     pub num_layers: usize,
@@ -139,6 +141,59 @@ impl<B: Backend> TransformerLM<B> {
         let x = self.embedding.forward(input);
         let x = self.transformer.forward(x, 0);
         self.head.forward(x)
+    }
+
+    /// Forward with partial RoPE for training stability + x0 injection.
+    pub fn forward_train_partial_rope(
+        &self,
+        input: Tensor<B, 2, Int>,
+        rotary_pct: f64,
+    ) -> Tensor<B, 3> {
+        let x = self.embedding.forward(input);
+        let [batch, seq_len, _d] = x.dims();
+        let device = x.device();
+        let x0 = x.clone();
+
+        let mut h = x;
+        for (i, layer) in self.transformer.layers.iter().enumerate() {
+            let residual = h.clone();
+            let h_norm = layer.attn_norm.forward(h);
+
+            let (q, k, v) = layer.attention.qkv.forward(h_norm);
+            let (q, k) = apply_rope_partial(q, k, 0, rotary_pct);
+
+            let k = repeat_kv(k, layer.attention.num_heads, layer.attention.num_kv_groups);
+            let v = repeat_kv(v, layer.attention.num_heads, layer.attention.num_kv_groups);
+
+            let q = q.swap_dims(1, 2);
+            let k = k.swap_dims(1, 2);
+            let v = v.swap_dims(1, 2);
+
+            let scale = (layer.attention.head_dim as f64).sqrt();
+            let mut scores = q.matmul(k.transpose()) / scale;
+            if seq_len > 1 {
+                scores = apply_causal_mask(scores, seq_len);
+            }
+            let attn = softmax(scores, 3);
+            let attn = layer.attention.dropout.forward(attn);
+            let h_attn = attn.matmul(v);
+            let h_attn = h_attn.swap_dims(1, 2);
+            let h_attn = layer.attention.o_proj.forward(h_attn);
+            h = residual + h_attn;
+
+            let residual = h.clone();
+            let h_norm = layer.ffn_norm.forward(h);
+            let h_ffn = layer.ffn.forward(h_norm);
+            h = residual + h_ffn;
+
+            if let Some(ref lambdas) = self.x0_lambdas {
+                let lam = lambdas.val().slice([0..1, i..(i+1)]).unsqueeze_dim::<3>(2);
+                h = h + lam * x0.clone();
+            }
+        }
+
+        let h = self.transformer.final_norm.forward(h);
+        self.head.forward(h)
     }
 
     /// Forward with KV cache (for efficient autoregressive generation)
@@ -422,6 +477,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
     let mut lr: f64 = 4e-5;
     let mut num_epochs: usize = 50;
     let mut batch_size: usize = 24;
+    let mut rotary_pct: f64 = 1.0;
+    let mut use_x0: bool = true;
 
     let mut modo_inferencia = false;
     if model_exists {
@@ -435,6 +492,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
             println!("  (6) Batch:   {}", batch_size);
             println!("  (7) Temp:    {}", temperature);
             println!("  (8) R-Pen:   {}", repetition_penalty);
+            println!("  (9) RoPE%:   {}%", rotary_pct * 100.0);
+            println!("  (10) x0:    {}", if use_x0 { "Si" } else { "No" });
             println!("----------------------------");
             print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
             io::stdout().flush()?;
@@ -498,6 +557,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
                 if let Ok(v) = input.trim().parse() { repetition_penalty = v; }
+                print!("RoPE % [{}]: ", rotary_pct * 100.0); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { rotary_pct = (v / 100.0).clamp(0.0, 1.0); }
+                print!("x0 injection (s/n) [{}]: ", if use_x0 { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_x0 = true, "n" | "no" | "" => use_x0 = false, _ => {} }
             }
         }
     } else {
@@ -509,6 +570,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
             println!("  (4) LR:      {}", lr);
             println!("  (5) Épocas:  {}", num_epochs);
             println!("  (6) Batch:   {}", batch_size);
+            println!("  (7) RoPE%:   {}%", rotary_pct * 100.0);
+            println!("  (8) x0:     {}", if use_x0 { "Si" } else { "No" });
             println!("--------------------------------------------");
             print!("¿Entrenar (e) o Ajustar parámetros (s)? [e/s]: ");
             io::stdout().flush()?;
@@ -524,6 +587,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
                 print!("Learning Rate [{}]: ", lr); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { lr = v; }
                 print!("Épocas [{}]: ", num_epochs); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { num_epochs = v; }
                 print!("Batch Size [{}]: ", batch_size); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { batch_size = v; }
+                print!("RoPE % [{}]: ", rotary_pct * 100.0); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<f64>() { rotary_pct = (v / 100.0).clamp(0.0, 1.0); }
+                print!("x0 injection (s/n) [{}]: ", if use_x0 { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_x0 = true, "n" | "no" | "" => use_x0 = false, _ => {} }
             }
         }
     }
@@ -541,7 +606,8 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
     println!("  heads/group:   {}", num_heads / num_kv_groups);
     println!("  head_dim:      {}", d_model / num_heads);
     println!("  FFN:           SwiGLU");
-    println!("  Positional:    RoPE");
+    println!("  Positional:    RoPE ({:.0}%)", rotary_pct * 100.0);
+    println!("  x0 injection:  {}", if use_x0 { "Si" } else { "No" });
     println!("  Backend:       CUDA");
     println!("  KV Cache:      Enabled");
     println!("  Sampling:      Top-K={}, Top-P={}, Temp={}, RepPen={}\n",
@@ -581,6 +647,7 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
         embedding: EmbeddingConfig::new(vocab_size, d_model).init(&device),
         transformer: transformer_config.init(&device),
         head: LinearConfig::new(d_model, vocab_size).with_bias(false).init(&device),
+        x0_lambdas: Some(Param::from_tensor(Tensor::zeros([1, num_layers], &device))),
         vocab_size,
         d_model,
         num_layers,
@@ -593,6 +660,10 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
         println!("Cargando pesos del modelo CUDA...");
         let record = CompactRecorder::new().load(model_file.into(), &device)?;
         model = model.load_record(record);
+        if use_x0 && model.x0_lambdas.is_none() {
+            model.x0_lambdas = Some(Param::from_tensor(Tensor::zeros([1, num_layers], &device)));
+            println!("  -> x0_lambdas inicializado (checkpoint anterior sin este campo)");
+        }
     } else {
         println!("No se encontró modelo previo. Iniciando desde cero.");
     }
@@ -713,8 +784,12 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
 
             let (x, y) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_len, stride, &device);
 
-            // Training uses standard forward (no cache needed)
-            let logits = model.forward(x);
+            // Training uses custom forward when partial RoPE or x0 enabled
+            let logits = if rotary_pct < 0.999 || use_x0 {
+                model.forward_train_partial_rope(x, rotary_pct)
+            } else {
+                model.forward(x)
+            };
             let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
             let targets_flat = y.reshape([batch_size * seq_len]);
 
