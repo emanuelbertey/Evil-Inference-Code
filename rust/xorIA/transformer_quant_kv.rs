@@ -468,27 +468,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     let tokenizer_file = format!("{}_tokenizer.json", model_path);
     let model_exists = Path::new(&model_file).exists();
 
-    let target_vocab_size = 16000;
-    let tokenizer = if Path::new(&tokenizer_file).exists() {
-        println!("Cargando tokenizer BPE desde {}...", tokenizer_file);
-        Tokenizer::load(&tokenizer_file)?
-    } else {
-        println!("Leyendo primeros 50MB para entrenar tokenizer...");
-        let mut frag_iter = FileFragmentIterator::new(Path::new(&text_file), 50)?;
-        let text = frag_iter.next().unwrap_or_default();
-        println!("Entrenando tokenizer BPE (vocab_size={})...", target_vocab_size);
-        let tok = Tokenizer::from_text(&text, target_vocab_size)?;
-        tok.save(&tokenizer_file)?;
-        tok
-    };
-
-    let vocab_size = tokenizer.vocab_size();
-    println!("Vocab size (BPE): {}", vocab_size);
-
-    let mut temperature = 0.8;
-    let mut top_k: usize = 40;
-    let mut top_p: f32 = 0.95;
-    let mut repetition_penalty: f32 = 1.1;
+    let mut use_custom_tokenizer: bool = false;
+    let mut custom_tokenizer_path: String = "tokenizer.json".to_string();
 
     let mut d_model: usize = 720;
     let mut num_layers: usize = 24;
@@ -503,6 +484,11 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     let mut use_burn_lr: bool = false;
     let mut use_partial_rope_infer: bool = false;
     let mut gradient_accumulation_steps: usize = 1;
+
+    let mut temperature: f32 = 0.8;
+    let mut top_k: usize = 40;
+    let mut top_p: f32 = 0.9;
+    let mut repetition_penalty: f32 = 1.1;
 
     let mut modo_inferencia = false;
     let mut modo_kuant = false;
@@ -525,6 +511,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("  (13) Inf RoPE%: {}", if use_partial_rope_infer { format!("{}%", rotary_pct * 100.0) } else { "100% (full)".to_string() });
             println!("  (14) seq_len: {} | stride: {}", seq_len, seq_len / 2);
             println!("  (15) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
+            println!("  (16) Tokenizer: {}", if use_custom_tokenizer { format!("Custom ({})", custom_tokenizer_path) } else { "BPE (entrenado)".to_string() });
             println!("----------------------------");
             print!("¿Entrenar (e), Inferir (i), Inferir TurboQuant (t) o Ajustar (s)? [e/i/t/s]: ");
             io::stdout().flush()?;
@@ -553,6 +540,8 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 print!("Partial RoPE en inferencia (s/n) [{}]: ", if use_partial_rope_infer { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_partial_rope_infer = true, "n" | "no" | "" => use_partial_rope_infer = false, _ => {} }
                 print!("Seq len [{}]: ", seq_len); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { seq_len = v; } }
                 print!("Gradient accumulation steps [{}]: ", gradient_accumulation_steps); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { gradient_accumulation_steps = v; } }
+                print!("Tokenizer custom (s/n) [{}]: ", if use_custom_tokenizer { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_custom_tokenizer = true, "n" | "no" | "" => use_custom_tokenizer = false, _ => {} }
+                if use_custom_tokenizer { print!("Ruta tokenizer.json [{}]: ", custom_tokenizer_path); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if !input.trim().is_empty() { custom_tokenizer_path = input.trim().to_string(); } }
             }
         }
     } else {
@@ -570,6 +559,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("  (10) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
             println!("  (11) seq_len: {} | stride: {}", seq_len, seq_len / 2);
             println!("  (12) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
+            println!("  (13) Tokenizer: {}", if use_custom_tokenizer { format!("Custom ({})", custom_tokenizer_path) } else { "BPE (entrenado)".to_string() });
             println!("------------------------------------");
             print!("¿Entrenar (e) o Ajustar parámetros (s)? [e/s]: ");
             io::stdout().flush()?;
@@ -592,9 +582,48 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 print!("Partial RoPE en inferencia (s/n) [{}]: ", if use_partial_rope_infer { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_partial_rope_infer = true, "n" | "no" | "" => use_partial_rope_infer = false, _ => {} }
                 print!("Seq len [{}]: ", seq_len); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { seq_len = v; } }
                 print!("Gradient accumulation steps [{}]: ", gradient_accumulation_steps); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse::<usize>() { if v > 0 { gradient_accumulation_steps = v; } }
+                print!("Tokenizer custom (s/n) [{}]: ", if use_custom_tokenizer { "s" } else { "n" }); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; match input.trim().to_lowercase().as_str() { "s" | "si" | "y" | "yes" => use_custom_tokenizer = true, "n" | "no" | "" => use_custom_tokenizer = false, _ => {} }
+                if use_custom_tokenizer { print!("Ruta tokenizer.json [{}]: ", custom_tokenizer_path); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if !input.trim().is_empty() { custom_tokenizer_path = input.trim().to_string(); } }
             }
         }
     }
+
+    let target_vocab_size = 16000;
+    let tokenizer = if use_custom_tokenizer {
+        println!("Cargando tokenizer custom desde {}...", custom_tokenizer_path);
+        let config_path = {
+            let p = std::path::Path::new(&custom_tokenizer_path);
+            let parent = p.parent().unwrap_or(std::path::Path::new("."));
+            parent.join("tokenizer_config.json")
+        };
+        if config_path.exists() {
+            if let Ok(cfg_str) = std::fs::read_to_string(&config_path) {
+                if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&cfg_str) {
+                    println!("  tokenizer_class: {}", cfg.get("tokenizer_class").and_then(|v| v.as_str()).unwrap_or("unknown"));
+                    println!("  eos_token: {:?}", cfg.get("eos_token"));
+                    println!("  model_max_length: {:?}", cfg.get("model_max_length"));
+                }
+            }
+        } else {
+            println!("  (tokenizer_config.json no encontrado en {:?})", config_path);
+        }
+        Tokenizer::load_pretrained(&custom_tokenizer_path)?
+    } else if Path::new(&tokenizer_file).exists() {
+        println!("Cargando tokenizer BPE desde {}...", tokenizer_file);
+        Tokenizer::load(&tokenizer_file)?
+    } else {
+        println!("Leyendo primeros 50MB para entrenar tokenizer...");
+        let mut frag_iter = FileFragmentIterator::new(Path::new(&text_file), 50)?;
+        let text = frag_iter.next().unwrap_or_default();
+        println!("Entrenando tokenizer BPE (vocab_size={})...", target_vocab_size);
+        let tok = Tokenizer::from_text(&text, target_vocab_size)?;
+        tok.save(&tokenizer_file)?;
+        tok
+    };
+
+    let vocab_size = tokenizer.vocab_size();
+    let tok_type = if use_custom_tokenizer { "Custom" } else { "BPE" };
+    println!("Vocab size ({}): {}", tok_type, vocab_size);
 
     let device = Default::default();
     let num_kv_groups = 4;
@@ -813,7 +842,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     println!("Iniciando entrenamiento con streaming...");
     println!("  batch_size: {} | seq_len: {} | stride: {} | grad_accum: {}x", batch_size, seq_len, stride, gradient_accumulation_steps);
 
-    let warmup_steps = 500;
+    let warmup_steps = 50;
     let cosine_period = 10000;
     let mut step_count = 0;
 
@@ -888,7 +917,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                     lr * step_count as f64 / warmup_steps as f64
                 } else {
                     let t = ((step_count - warmup_steps) as f64 / cosine_period as f64).min(1.0);
-                    lr * (0.1 + 0.9 * (1.0 + (t * std::f64::consts::PI).cos()) / 2.0)
+                    lr * (0.2 + 0.8 * (1.0 + (t * std::f64::consts::PI).cos()) / 2.0)
                 };
                 model = optim.step(current_lr, model, grads_p);
                 batch_count += 1;

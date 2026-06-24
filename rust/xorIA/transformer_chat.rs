@@ -100,6 +100,11 @@ impl Tokenizer {
         Ok(Self { tokenizer })
     }
 
+    pub fn load_pretrained(path: &str) -> Result<Self, Box<dyn Error>> {
+        let tokenizer = HFTokenizer::from_file(path).map_err(|e| format!("{}", e))?;
+        Ok(Self { tokenizer })
+    }
+
     pub fn encode(&self, text: &str) -> Vec<usize> {
         let encoding = self.tokenizer.encode(text, false).unwrap();
         encoding.get_ids().iter().map(|&id| id as usize).collect()
