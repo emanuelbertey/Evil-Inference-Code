@@ -140,13 +140,6 @@ def hf_api() -> "HfApi":
     from huggingface_hub import HfApi
     return HfApi(token=hf_token())
 
-def tokenizer_exists_on_hf(repo_id: str) -> bool:
-    try:
-        hf_api().file_exists(repo_id=repo_id, filename="tokenizer.json")
-        return True
-    except Exception:
-        return False
-
 def train_tokenizer_from_wiki(vocab_size: int, output_path: str = "tokenizer.json"):
     from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
     wiki_path = download_wiki_60mb()
@@ -220,23 +213,13 @@ def train():
         tokenizer = BPEWrapper(tok_path)
         print(f"Loaded tokenizer → {tok_path}")
     else:
-        # Check HF
-        if hf_logged_in and tokenizer_exists_on_hf(repo_id):
-            from huggingface_hub import hf_hub_download
-            tok_path = hf_hub_download(repo_id=repo_id, filename="tokenizer.json")
-            tokenizer = BPEWrapper(tok_path)
-            print(f"Downloaded tokenizer from {repo_id}")
-        else:
-            # Train from Wikipedia 60MB
-            train_tokenizer_from_wiki(cfg["vocab_size"], tok_path)
-            tokenizer = BPEWrapper(tok_path)
-            if hf_logged_in:
-                push_to_hf(repo_id, [tok_path, "tokenizer_config.json"],
-                           revision=tag, commit_message="Add tokenizer")
-                # Also save a minimal config
-                with open("tokenizer_config.json", "w") as f:
-                    json.dump({"tokenizer_class": "BPE",
-                               "eos_token": "eos_token"}, f)
+        train_tokenizer_from_wiki(cfg["vocab_size"], tok_path)
+        tokenizer = BPEWrapper(tok_path)
+        if hf_logged_in:
+            with open("tokenizer_config.json", "w") as f:
+                json.dump({"tokenizer_class": "BPE", "eos_token": "eos_token"}, f)
+            push_to_hf(repo_id, [tok_path, "tokenizer_config.json"],
+                       revision=tag, commit_message="Add tokenizer")
 
     # ── Model ──
     model = TransformerLM(
