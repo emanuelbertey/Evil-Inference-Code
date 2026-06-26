@@ -209,8 +209,8 @@ def train():
     cfg = CONFIG
     print("Config:", json.dumps(cfg, indent=2))
 
-    # ── HF login ──
-    hf_logged_in = hf_login()
+    # ── HF token ──
+    hf_logged_in = bool(hf_token())
     repo_id = cfg["hf_repo"]
     tag = cfg["hf_tag"]
 
