@@ -140,9 +140,9 @@ def hf_api() -> "HfApi":
     from huggingface_hub import HfApi
     return HfApi(token=hf_token())
 
-def tokenizer_exists_on_hf(repo_id: str) -> bool:
+def tokenizer_exists_on_hf(repo_id: str, revision: str = "gens0x") -> bool:
     try:
-        hf_api().file_exists(repo_id=repo_id, filename="tokenizer.json")
+        hf_api().file_exists(repo_id=repo_id, filename="tokenizer.json", revision=revision)
         return True
     except Exception:
         return False
@@ -221,7 +221,7 @@ def train():
         print(f"Loaded tokenizer → {tok_path}")
     else:
         # Check HF
-        if hf_logged_in and tokenizer_exists_on_hf(repo_id):
+        if hf_logged_in and tokenizer_exists_on_hf(repo_id, tag):
             from huggingface_hub import hf_hub_download
             tok_path = hf_hub_download(repo_id=repo_id, filename="tokenizer.json",
                                        revision=tag)
