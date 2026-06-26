@@ -94,6 +94,10 @@ def main():
         hf_tok = train_bpe_tokenizer(text, vocab_size=bpe_vocab)
         hf_tok.save(tok_path)
         print(f"Tokenizer saved to {tok_path}")
+        cfg_path = os.path.join(os.path.dirname(__file__), "tokenizer_config.json")
+        with open(cfg_path, "w") as f:
+            f.write('{"tokenizer_class": "BPE", "eos_token": "eos_token", "model_max_length": 2048}\n')
+        print(f"Config saved to {cfg_path}")
     tokenizer = BPEWrapper(hf_tok)
     print(f"Vocab size: {tokenizer.vocab_size}")
 

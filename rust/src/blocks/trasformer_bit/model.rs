@@ -66,7 +66,10 @@ impl Tokenizer {
         let tok = HFTokenizer::from_file(path).map_err(|e| -> Box<dyn Error> { format!("{}", e).into() })?;
         Ok(Self { tokenizer: tok })
     }
-    pub fn encode(&self, text: &str) -> Vec<usize> { self.tokenizer.encode(text, false).unwrap().get_ids().iter().map(|&id| id as usize).collect() }
+    pub fn encode(&self, text: &str) -> Vec<usize> {
+        let text = text.replace("\r\n", "\n");
+        self.tokenizer.encode(&*text, false).unwrap().get_ids().iter().map(|&id| id as usize).collect()
+    }
     pub fn decode(&self, indices: &[usize]) -> String { self.tokenizer.decode(&indices.iter().map(|&i| i as u32).collect::<Vec<_>>(), true).unwrap() }
     pub fn vocab_size(&self) -> usize { self.tokenizer.get_vocab_size(true) }
     pub fn id_to_token(&self, id: usize) -> Option<String> { self.tokenizer.id_to_token(id as u32) }
