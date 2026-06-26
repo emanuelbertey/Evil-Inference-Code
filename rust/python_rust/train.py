@@ -18,9 +18,9 @@ import io
 import torch
 import torch.nn.functional as F
 
-from model import TransformerLM
-from tokenizer import BPEWrapper
-from __init__ import CONFIG
+from .model import TransformerLM
+from .tokenizer import BPEWrapper
+from . import CONFIG
 
 
 # ─── Streaming file reader (como Rust FileFragmentIterator) ─────────────────
