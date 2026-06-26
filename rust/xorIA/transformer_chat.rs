@@ -478,7 +478,7 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
             println!("  (6) Batch:   {}", batch_size);
             println!("  (7) Temp:    {}", temperature);
             println!("  (8) R-Pen:   {}", repetition_penalty);
-            println!("  (9) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (9) seq_len: {} | stride: {}", seq_len, seq_len);
             println!("  (10) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("----------------------------");
             print!("¿Entrenar (e), Inferir (i) o Ajustar parámetros (s)? [e/i/s]: ");
@@ -556,7 +556,7 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
             println!("  (4) LR:      {}", lr);
             println!("  (5) Épocas:  {}", num_epochs);
             println!("  (6) Batch:   {}", batch_size);
-            println!("  (7) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (7) seq_len: {} | stride: {}", seq_len, seq_len);
             println!("  (8) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("------------------------------------");
             print!("¿Entrenar (e) o Ajustar parámetros (s)? [e/s]: ");
@@ -734,7 +734,7 @@ pub fn transformer_chat() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let stride = seq_len / 2;
+    let stride = seq_len;
 
     let text_path = Path::new(&text_file);
 

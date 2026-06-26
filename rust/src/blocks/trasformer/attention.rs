@@ -284,9 +284,6 @@ impl<B: Backend> Attention<B> {
 
         // 3. Concatenate with cached K, V if available
         let (k_full, v_full) = if let Some(prev) = cache {
-            // Concatenate along the sequence dimension (dim 1)
-            // prev.cached_k: (B, prev_len, num_kv_groups, head_dim)
-            // k_new:         (B, new_len,  num_kv_groups, head_dim)
             let k_cat = Tensor::cat(vec![prev.cached_k, k_new.clone()], 1);
             let v_cat = Tensor::cat(vec![prev.cached_v, v_new.clone()], 1);
             (k_cat, v_cat)

@@ -153,3 +153,4 @@ dmypy.json
 *.bitnet
 rust/input.txt
 /bitnet.c
+*.safetensors

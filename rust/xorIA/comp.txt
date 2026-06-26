@@ -177,3 +177,7 @@ cargo run --release --bin bitlinear_comparison
 cargo build --release --bin test_kv_cache
 
 cargo run --release --bin test_kv_cache
+
+python -m python.train
+
+$env:RUST_BACKTRACE=1; cargo run --release --bin transformer_quant_kv -- xorIA/input.txt

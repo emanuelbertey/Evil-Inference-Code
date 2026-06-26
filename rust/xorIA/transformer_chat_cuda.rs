@@ -577,7 +577,7 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
             println!("  (11) ResDrop: {}", residual_dropout);
             println!("  (12) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
             println!("  (13) Inf RoPE%: {}", if use_partial_rope_infer { format!("{}%", rotary_pct * 100.0) } else { "100% (full)".to_string() });
-            println!("  (14) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (14) seq_len: {} | stride: {}", seq_len, seq_len);
             println!("  (15) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("  (16) Tokenizer: {}", if use_custom_tokenizer { format!("Custom ({})", custom_tokenizer_path) } else { "BPE (entrenado)".to_string() });
             println!("----------------------------");
@@ -667,7 +667,7 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
             println!("  (8) x0:     {}", if use_x0 { "Si" } else { "No" });
             println!("  (9) ResDrop: {}", residual_dropout);
             println!("  (10) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
-            println!("  (11) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (11) seq_len: {} | stride: {}", seq_len, seq_len);
             println!("  (12) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("  (13) Tokenizer: {}", if use_custom_tokenizer { format!("Custom ({})", custom_tokenizer_path) } else { "BPE (entrenado)".to_string() });
             println!("--------------------------------------------");
@@ -911,7 +911,7 @@ pub fn transformer_chat_cuda() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let stride = seq_len / 2;
+    let stride = seq_len;
     let num_batches = (tokens.len().saturating_sub(seq_len) / stride).div_ceil(batch_size);
 
     let total_steps = num_batches * num_epochs;

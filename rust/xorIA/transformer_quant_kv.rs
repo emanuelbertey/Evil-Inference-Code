@@ -44,6 +44,7 @@ use xlstm::blocks::trasformer::attention::KVCache;
 use xlstm::blocks::trasformer_bit::cache::{KuantKVCache, MAX_CACHE_LEN};
 use xlstm::blocks::trasformer_bit::ops::{apply_rope_fused, apply_rope_partial, apply_rope_fused_partial, repeat_kv, apply_causal_mask, apply_causal_mask_with_offset};
 use xlstm::blocks::trasformer_bit::model::{Tokenizer, FileFragmentIterator, sample_from_logits, create_batch};
+use xlstm::blocks::load_pytorch::PyTorchLoader;
 
 type MyBackend = Autodiff<Flex<f32>>;
 
@@ -309,7 +310,7 @@ fn generate_kuant_cached<B: Backend>(
         if history.len() > 64 { history.remove(0); }
 
         let token_raw = tokenizer.id_to_token(next_id).unwrap_or_default();
-        let clean_str = token_raw.replace('\u{2581}', " ").replace('▁', " ").replace(' ', " ");
+        let clean_str = token_raw.replace('\u{010A}', "\n").replace('\u{0120}', " ").replace('\u{2581}', " ");
         print!("{}", clean_str);
         io::stdout().flush().unwrap();
 
@@ -413,7 +414,7 @@ fn generate_text_cached<B: Backend>(
         if history.len() > 64 { history.remove(0); }
 
         let token_raw = tokenizer.id_to_token(next_id).unwrap_or_default();
-        let clean_str = token_raw.replace('▁', " ").replace(' ', " ");
+        let clean_str = token_raw.replace('\u{010A}', "\n").replace('\u{0120}', " ").replace('\u{2581}', " ");
         print!("{}", clean_str);
         io::stdout().flush().unwrap();
 
@@ -465,8 +466,12 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
 
     let model_path = "transformer_chat";
     let model_file = format!("{}.mpk", model_path);
+    let pytorch_file = "model_test.safetensors".to_string();
+    let pytorch_mapping = "model_test_mapping.json".to_string();
     let tokenizer_file = format!("{}_tokenizer.json", model_path);
+    let py_tokenizer_file = "tokenizer.json".to_string();
     let model_exists = Path::new(&model_file).exists();
+    let pytorch_model_exists = Path::new(&pytorch_file).exists() && Path::new(&pytorch_mapping).exists();
 
     let mut use_custom_tokenizer: bool = false;
     let mut custom_tokenizer_path: String = "tokenizer.json".to_string();
@@ -492,6 +497,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
 
     let mut modo_inferencia = false;
     let mut modo_kuant = false;
+    let mut load_pytorch = false;
 
     if model_exists {
         loop {
@@ -509,11 +515,11 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("  (11) ResDrop: {}", residual_dropout);
             println!("  (12) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
             println!("  (13) Inf RoPE%: {}", if use_partial_rope_infer { format!("{}%", rotary_pct * 100.0) } else { "100% (full)".to_string() });
-            println!("  (14) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (14) seq_len: {} | stride: {}", seq_len, seq_len);
             println!("  (15) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("  (16) Tokenizer: {}", if use_custom_tokenizer { format!("Custom ({})", custom_tokenizer_path) } else { "BPE (entrenado)".to_string() });
             println!("----------------------------");
-            print!("¿Entrenar (e), Inferir (i), Inferir TurboQuant (t) o Ajustar (s)? [e/i/t/s]: ");
+            print!("¿Entrenar (e), Inferir (i), Inferir TurboQuant (t), Python (p) o Ajustar (s)? [e/i/t/p/s]: ");
             io::stdout().flush()?;
 
             let mut choice = String::new();
@@ -522,6 +528,18 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
 
             if choice == "i" { modo_inferencia = true; break; }
             if choice == "t" { modo_inferencia = true; modo_kuant = true; break; }
+            if choice == "p" {
+                if pytorch_model_exists {
+                    println!("Se cargará modelo Python después de crear el modelo...");
+                    load_pytorch = true;
+                    use_custom_tokenizer = true;
+                    custom_tokenizer_path = py_tokenizer_file.clone();
+                    modo_inferencia = true;
+                    break;
+                } else {
+                    println!("No se encontró modelo Python en {} o {}", pytorch_file, pytorch_mapping);
+                }
+            }
             if choice == "e" { break; }
             if choice == "s" {
                 println!("\nAjustar parámetros (Enter para mantener actual):");
@@ -557,16 +575,27 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("  (8) x0:     {}", if use_x0 { "Si" } else { "No" });
             println!("  (9) ResDrop: {}", residual_dropout);
             println!("  (10) LR Sched: {}", if use_burn_lr { "Burn" } else { "Manual" });
-            println!("  (11) seq_len: {} | stride: {}", seq_len, seq_len / 2);
+            println!("  (11) seq_len: {} | stride: {}", seq_len, seq_len);
             println!("  (12) Grad Accum: {}x (eff batch: {})", gradient_accumulation_steps, batch_size * gradient_accumulation_steps);
             println!("  (13) Tokenizer: {}", if use_custom_tokenizer { format!("Custom ({})", custom_tokenizer_path) } else { "BPE (entrenado)".to_string() });
             println!("------------------------------------");
-            print!("¿Entrenar (e) o Ajustar parámetros (s)? [e/s]: ");
+            print!("¿Entrenar (e), Python (p) o Ajustar (s)? [e/p/s]: ");
             io::stdout().flush()?;
             let mut choice = String::new();
             io::stdin().read_line(&mut choice)?;
             let choice = choice.trim().to_lowercase();
-            if choice == "e" { break; }
+            if choice == "p" {
+                if pytorch_model_exists {
+                    println!("Se cargará modelo Python después de crear el modelo...");
+                    load_pytorch = true;
+                    use_custom_tokenizer = true;
+                    custom_tokenizer_path = py_tokenizer_file.clone();
+                    modo_inferencia = true;
+                    break;
+                } else {
+                    println!("No se encontró modelo Python en {} o {}", pytorch_file, pytorch_mapping);
+                }
+            }
             else if choice == "s" {
                 println!("\nAjustar parámetros (Enter para mantener actual):");
                 print!("d_model [{}]: ", d_model); io::stdout().flush()?; let mut input = String::new(); io::stdin().read_line(&mut input)?; if let Ok(v) = input.trim().parse() { d_model = v; }
@@ -626,7 +655,45 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     println!("Vocab size ({}): {}", tok_type, vocab_size);
 
     let device = Default::default();
-    let num_kv_groups = 4;
+    let mut num_kv_groups = 4;
+
+    if load_pytorch {
+        if let Ok(mapping_data) = std::fs::read_to_string(&pytorch_mapping) {
+            if let Ok(mapping) = serde_json::from_str::<serde_json::Value>(&mapping_data) {
+                if let Some(params) = mapping.get("parameters").and_then(|p| p.as_object()) {
+                    let mut max_layer: usize = 0;
+                    for key in params.keys() {
+                        if let Some(rest) = key.strip_prefix("transformer.layers.") {
+                            if let Some(dot) = rest.find('.') {
+                                if let Ok(n) = rest[..dot].parse::<usize>() {
+                                    if n > max_layer { max_layer = n; }
+                                }
+                            }
+                        }
+                    }
+                    if max_layer > 0 { num_layers = max_layer + 1; }
+
+                    if let Some(emb) = params.get("embedding.weight") {
+                        if let Some(shape) = emb.get("shape").and_then(|s| s.as_array()) {
+                            if shape.len() == 2 {
+                                if let Some(d2) = shape[1].as_u64() { d_model = d2 as usize; }
+                            }
+                        }
+                    }
+
+                    let emb_key = format!("transformer.layers.0.attn_norm.weight");
+                    if let Some(norm) = params.get(&emb_key) {
+                        if let Some(shape) = norm.get("shape").and_then(|s| s.as_array()) {
+                            if let Some(d) = shape.first().and_then(|v| v.as_u64()) {
+                                if d_model == 720 { d_model = d as usize; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("  (auto-config desde mapping: d_model={}, layers={})", d_model, num_layers);
+    }
 
     println!("\n── Configuración del Transformer ──");
     println!("  d_model:       {}", d_model);
@@ -678,7 +745,29 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
     let num_params = model.num_params();
     println!("Total parameters: {} ({:.2} M)\n", num_params, num_params as f64 / 1e6);
 
-    if model_exists {
+    if load_pytorch {
+        println!("Cargando modelo Python desde {}...", pytorch_file);
+        let tensors = PyTorchLoader::load_safetensors(&pytorch_file, &pytorch_mapping)?;
+        PyTorchLoader::load_into_transformer(&mut model.transformer, &tensors, num_layers, &device)?;
+        if let Some(d) = tensors.get("embedding.weight") {
+            model.embedding = EmbeddingConfig::new(vocab_size, d_model).init(&device);
+            model.embedding.weight = burn::module::Param::from_tensor(Tensor::<MyBackend, 2>::from_data(d.clone(), &device));
+        }
+        if let Some(d) = tensors.get("head.weight") {
+            model.head = LinearConfig::new(d_model, vocab_size).with_bias(false).init(&device);
+            model.head.weight = burn::module::Param::from_tensor(Tensor::<MyBackend, 2>::from_data(d.clone(), &device).transpose());
+        }
+        if let Some(d) = tensors.get("x0_lambdas") {
+            model.x0_lambdas = Some(burn::module::Param::from_tensor(Tensor::<MyBackend, 2>::from_data(d.clone(), &device)));
+        }
+        println!("Modelo Python cargado!");
+        if let Some(layer0) = model.transformer.layers.first() {
+            let qkv = &layer0.attention.qkv;
+            println!("  debug: qkv head_dim={}, num_heads={}, num_kv_groups={}", qkv.head_dim, qkv.num_heads, qkv.num_kv_groups);
+            println!("  debug: q_proj.weight shape: {:?}", qkv.q_proj.weight.val().dims());
+            println!("  debug: k_proj.weight shape: {:?}", qkv.k_proj.weight.val().dims());
+        }
+    } else if model_exists {
         println!("Cargando pesos del modelo desde {}...", model_file);
         let record = CompactRecorder::new().load(model_file.into(), &device)?;
         model = model.load_record(record);
@@ -779,7 +868,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
             println!("\n╔════════════════════════════════════════════════════════════════╗");
             println!("║  MODO INTERACTIVO — KV Cache regular                          ║");
             println!("╚════════════════════════════════════════════════════════════════╝\n");
-            println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'salir'\n");
+            println!("Comandos: 'len <n>', 'temp <f>', 'topk <n>', 'topp <f>', 'rpen <f>', 'x' (export .mpk), 'salir'\n");
 
             let mut current_len = 50;
             let mut session_caches: Vec<Option<KVCache<Flex<f32>>>> = (0..num_layers).map(|_| None).collect();
@@ -809,6 +898,13 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                 if input.to_lowercase().starts_with("rpen ") {
                     if let Ok(v) = input[5..].trim().parse::<f32>() { repetition_penalty = v; continue; }
                 }
+                if input.eq_ignore_ascii_case("x") || input.eq_ignore_ascii_case("export") {
+                    println!("Exportando modelo como {}...", model_path);
+                    let recorder = CompactRecorder::new();
+                    model.clone().save_file(model_path, &recorder)?;
+                    println!("  -> Guardado en {}.mpk (formato Burn)\n", model_path);
+                    continue;
+                }
                 if input.is_empty() { continue; }
 
                 println!("\n--- TEXTO GENERADO (KV Cache Regular) ---");
@@ -837,7 +933,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
         .init();
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let stride = seq_len / 2;
+    let stride = seq_len;
 
     println!("Iniciando entrenamiento con streaming...");
     println!("  batch_size: {} | seq_len: {} | stride: {} | grad_accum: {}x", batch_size, seq_len, stride, gradient_accumulation_steps);
@@ -856,7 +952,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
         None
     };
 
-    println!("  LR: {:.0e} | warmup {} steps + cosine decay to 10% over {} steps | scheduler: {}\n",
+    println!("  LR: {:.0e} | warmup {} steps + cosine decay to 20% over {} steps | scheduler: {}\n",
         lr, warmup_steps, cosine_period, if use_burn_lr { "Burn" } else { "Manual" });
 
     for epoch in 0..num_epochs {
