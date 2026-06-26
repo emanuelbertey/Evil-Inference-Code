@@ -131,31 +131,23 @@ def download_wiki_60mb(path: str = "/tmp/wiki60mb.txt") -> str:
     return path
 
 
-# ─── HF helpers ─────────────────────────────────────────────────────────────
+# ─── HF helpers (token explícito, nada interactivo) ──────────────────────
 
-def hf_login():
-    from huggingface_hub import login
-    token = os.environ.get("MY_KEY", "")
-    if token:
-        login(token=token, add_to_git_credential=False)
-        print("Logged in to HuggingFace")
-        return True
-    print("No HF token (MY_KEY). Skipping HF push.")
-    return False
+def hf_token() -> str:
+    return os.environ.get("MY_KEY", "")
 
+def hf_api() -> "HfApi":
+    from huggingface_hub import HfApi
+    return HfApi(token=hf_token())
 
 def tokenizer_exists_on_hf(repo_id: str) -> bool:
-    from huggingface_hub import HfApi
-    api = HfApi()
     try:
-        api.file_exists(repo_id=repo_id, filename="tokenizer.json")
+        hf_api().file_exists(repo_id=repo_id, filename="tokenizer.json")
         return True
     except Exception:
         return False
 
-
 def train_tokenizer_from_wiki(vocab_size: int, output_path: str = "tokenizer.json"):
-    """Entrena BPE ByteLevel tokenizer desde primeros 60MB de Wikipedia."""
     from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
     wiki_path = download_wiki_60mb()
     print(f"Training BPE tokenizer (vocab={vocab_size}) from {wiki_path}...")
@@ -170,13 +162,12 @@ def train_tokenizer_from_wiki(vocab_size: int, output_path: str = "tokenizer.jso
     print(f"Tokenizer saved to {output_path}")
     return output_path
 
-
 def push_to_hf(repo_id: str, local_files: list, revision: str = "gens0x",
                commit_message: str = ""):
-    from huggingface_hub import HfApi, create_repo
-    api = HfApi()
+    api = hf_api()
     try:
-        create_repo(repo_id=repo_id, exist_ok=True, private=False)
+        from huggingface_hub import create_repo
+        create_repo(repo_id=repo_id, exist_ok=True, private=False, token=hf_token())
     except Exception:
         pass
     api.upload_files(
@@ -184,7 +175,6 @@ def push_to_hf(repo_id: str, local_files: list, revision: str = "gens0x",
         files=local_files,
         revision=revision,
         commit_message=commit_message or f"Update {time.strftime('%Y-%m-%d %H:%M UTC')}",
-        run_as_future=False,
     )
     print(f"Pushed {len(local_files)} files to {repo_id} @ {revision}")
 
