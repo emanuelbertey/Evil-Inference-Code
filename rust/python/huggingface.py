@@ -106,7 +106,8 @@ class HFManager:
             shutil.copy2(path, local_path)
             print(f"Downloaded {filename} from {self.repo_id}@{self.revision}")
             return True
-        except (EntryNotFoundError, RepositoryNotFoundError):
+        except Exception as e:
+            print(f"Failed to download {filename} from {self.repo_id}@{self.revision}: {e}")
             return False
 
     def upload_checkpoint(self, checkpoint_path: str, safetensors_path: str | None = None,
