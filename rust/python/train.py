@@ -155,6 +155,8 @@ def main():
 
     model.train()
     start_time = time.time()
+    last_report_time = start_time
+    last_report_step = 0
     epoch = 0
 
     while True:
@@ -202,9 +204,12 @@ def main():
                 avg_loss = micro_loss / max(micro_count, 1)
                 print(f"step {global_step} loss {avg_loss:.4f} lr {current_lr:.6f}")
             if global_step % 100 == 0:
-                elapsed = time.time() - start_time
-                tps = micro_count * seq_len / max(elapsed, 0.001)
+                now = time.time()
+                tok = (global_step - last_report_step) * batch_size * seq_len
+                tps = tok / max(now - last_report_time, 0.001)
                 print(f"step {global_step} | {tps:.0f} tok/s")
+                last_report_time = now
+                last_report_step = global_step
 
             if time.time() - pusher.last_push >= pusher.interval:
                 torch.save({"global_step": global_step, "model": model.state_dict()}, checkpoint_path)
