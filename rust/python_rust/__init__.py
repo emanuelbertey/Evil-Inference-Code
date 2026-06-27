@@ -16,7 +16,7 @@ CONFIG = {
     "num_heads": 8,
     "num_kv_groups": 4,
     "max_seq_len": 128,
-    "batch_size": 16,
+    "batch_size": 8,
     "stride": 128,
     "grad_accum": 2,
     "lr": 3e-4,

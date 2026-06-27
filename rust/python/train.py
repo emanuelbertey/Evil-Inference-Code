@@ -72,8 +72,8 @@ def main():
     num_heads = 8
     num_kv_groups = 4
     seq_len = 128
-    batch_size = 8
-    stride = seq_len
+    batch_size = 16
+    grad_accum = 2
     lr = 3e-4
     num_epochs = 20
     warmup_steps = 50
@@ -134,7 +134,7 @@ def main():
         from safetensors.torch import load_file
         state = load_file(safetensors_path)
         model.load_state_dict(state, strict=False)
-        del state  # Release memory-mapped file (Windows)
+        del state
         print(f"Loaded from safetensors: {safetensors_path}")
     else:
         print("No checkpoint found, starting from scratch.")
@@ -142,10 +142,10 @@ def main():
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {num_params:,} params ({num_params/1e6:.2f}M)")
 
-    total_batches = (len(tokens) - seq_len) // stride
+    total_batches = (len(tokens) - seq_len) // seq_len
     total_steps = total_batches * num_epochs
     print(f"Batches/epoch: {total_batches} | Total steps: {total_steps}")
-    print(f"LR: {lr} | Warmup: {warmup_steps} steps")
+    print(f"LR: {lr} | Warmup: {warmup_steps} steps | Grad accum: {grad_accum}")
     print(f"\nStarting training from epoch {start_epoch + 1}...\n")
 
     model.train()
@@ -173,22 +173,24 @@ def main():
             optimizer.zero_grad()
 
             for micro in range(batch_size):
-                start_idx = (batch_idx + micro) * stride
-                if start_idx + stride + 1 >= len(tokens):
+                start_idx = (batch_idx + micro) * seq_len
+                if start_idx + seq_len + 1 >= len(tokens):
                     break
 
-                x, y = create_batch(tokens, start_idx, 1, seq_len, stride)
+                x, y = create_batch(tokens, start_idx, 1, seq_len, seq_len)
                 x, y = x.to(device), y.to(device)
 
                 logits = model(x)
                 loss = F.cross_entropy(logits.view(-1, tokenizer.vocab_size), y.view(-1))
 
-                (loss / batch_size).backward()
+                (loss / grad_accum).backward()
                 micro_loss += loss.item()
                 micro_count += 1
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+                if (micro + 1) % grad_accum == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
 
             epoch_loss += micro_loss
             epoch_tokens += micro_count * seq_len
