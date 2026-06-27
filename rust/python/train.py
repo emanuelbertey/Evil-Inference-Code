@@ -206,9 +206,10 @@ def main():
                 tps = micro_count * seq_len / max(elapsed, 0.001)
                 print(f"step {global_step} | {tps:.0f} tok/s")
 
-            if pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step):
+            if time.time() - pusher.last_push >= pusher.interval:
                 torch.save({"global_step": global_step, "model": model.state_dict()}, checkpoint_path)
                 model.state_dict_to_safetensors(safetensors_path)
+                pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step)
 
         epoch += 1
         if epoch >= num_epochs:
