@@ -97,7 +97,9 @@ def main():
         if not tokenizer_loaded:
             print("No tokenizer found. Training from Wikipedia 50MB...")
             train_tokenizer_from_wiki(bpe_vocab, tok_path)
-            tokenizer = BPEWrapper(tok_path)
+            from tokenizers import Tokenizer
+            hf_tok = Tokenizer.from_file(tok_path)
+            tokenizer = BPEWrapper(hf_tok)
             hf.upload_tokenizer(tok_path, "tokenizer_config.json")
             print("Tokenizer trained and uploaded to HF")
 
