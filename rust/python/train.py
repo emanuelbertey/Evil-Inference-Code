@@ -57,6 +57,7 @@ def main():
     revision = "gens0x"
 
     hf = HFManager(repo_id=repo_id, revision=revision)
+    hf._get_token()  # prompt upfront, not mid-training
     pusher = PeriodicPusher(hf, interval_minutes=10)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -208,12 +209,10 @@ def main():
 
             if global_step % 10 == 0:
                 avg_loss = micro_loss / max(micro_count, 1)
-                print(f"step {global_step} loss {avg_loss:.4f} lr {current_lr:.6f}")
-            if global_step % 100 == 0:
                 now = time.time()
                 tok = (global_step - last_report_step) * batch_size * seq_len
                 tps = tok / max(now - last_report_time, 0.001)
-                print(f"step {global_step} | {tps:.0f} tok/s")
+                print(f"step {global_step} loss {avg_loss:.4f} lr {current_lr:.6f} {tps:.0f}t/s")
                 last_report_time = now
                 last_report_step = global_step
 
