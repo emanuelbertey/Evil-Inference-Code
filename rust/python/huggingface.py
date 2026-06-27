@@ -55,16 +55,20 @@ class HFManager:
         """Download tokenizer.json from HF. Returns local path."""
         api = self._get_api()
         self.ensure_repo()
-        path = hf_hub_download(
-            repo_id=self.repo_id,
-            filename="tokenizer.json",
-            revision=self.revision,
-            token=self._get_token(),
-        )
-        import shutil
-        shutil.copy2(path, local_path)
-        print(f"Downloaded tokenizer from {self.repo_id}@{self.revision} -> {local_path}")
-        return local_path
+        try:
+            path = hf_hub_download(
+                repo_id=self.repo_id,
+                filename="tokenizer.json",
+                revision=self.revision,
+                token=self._get_token(),
+            )
+            import shutil
+            shutil.copy2(path, local_path)
+            print(f"Downloaded tokenizer from {self.repo_id}@{self.revision} -> {local_path}")
+            return local_path
+        except Exception as e:
+            print(f"Failed to download tokenizer from {self.repo_id}@{self.revision}: {e}")
+            raise
 
     def upload_tokenizer(self, local_path: str, config_path: str | None = None):
         api = self._get_api()

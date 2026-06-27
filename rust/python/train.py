@@ -82,18 +82,24 @@ def main():
         hf_tok = Tokenizer.from_file(tok_path)
         tokenizer = BPEWrapper(hf_tok)
         print(f"Loaded local tokenizer -> {tok_path}")
-    elif hf.tokenizer_exists():
-        print(f"Downloading tokenizer from {repo_id}@{revision}...")
-        local_tok = hf.download_tokenizer(tok_path)
-        from tokenizers import Tokenizer
-        tokenizer = BPEWrapper(Tokenizer.from_file(local_tok))
-        print(f"Loaded tokenizer from HF")
     else:
-        print("No tokenizer found. Training from Wikipedia 50MB...")
-        train_tokenizer_from_wiki(bpe_vocab, tok_path)
-        tokenizer = BPEWrapper(tok_path)
-        hf.upload_tokenizer(tok_path, "tokenizer_config.json")
-        print("Tokenizer trained and uploaded to HF")
+        tokenizer_loaded = False
+        if hf.tokenizer_exists():
+            try:
+                print(f"Downloading tokenizer from {repo_id}@{revision}...")
+                local_tok = hf.download_tokenizer(tok_path)
+                from tokenizers import Tokenizer
+                tokenizer = BPEWrapper(Tokenizer.from_file(local_tok))
+                print(f"Loaded tokenizer from HF")
+                tokenizer_loaded = True
+            except Exception as e:
+                print(f"Failed to download tokenizer: {e}")
+        if not tokenizer_loaded:
+            print("No tokenizer found. Training from Wikipedia 50MB...")
+            train_tokenizer_from_wiki(bpe_vocab, tok_path)
+            tokenizer = BPEWrapper(tok_path)
+            hf.upload_tokenizer(tok_path, "tokenizer_config.json")
+            print("Tokenizer trained and uploaded to HF")
 
     print(f"Vocab size: {tokenizer.vocab_size}")
 
