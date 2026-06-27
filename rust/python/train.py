@@ -131,7 +131,8 @@ def main():
     if hf.download_checkpoint(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
         global_step = ckpt.get("global_step", 0)
         epoch = ckpt.get("epoch", 0)
         block_idx = ckpt.get("block_idx", 5)
@@ -139,7 +140,8 @@ def main():
     elif os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
         global_step = ckpt.get("global_step", 0)
         epoch = ckpt.get("epoch", 0)
         block_idx = ckpt.get("block_idx", 5)
