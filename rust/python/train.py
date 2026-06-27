@@ -1,8 +1,4 @@
-"""Quick test: train the Python transformer on input.txt with BPE tokenizer.
-
-Usage:
-    python train.py
-"""
+"""Train transformer with Wikipedia ES streaming, HF tokenizer & checkpoint push."""
 
 import os
 import sys
@@ -13,28 +9,8 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from python.model import TransformerLM
-
-
-def train_bpe_tokenizer(text, vocab_size=8000):
-    from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
-
-    tokenizer = Tokenizer(models.BPE())
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tokenizer.decoder = decoders.ByteLevel()
-
-    special = "eos_token"
-    trainer = trainers.BpeTrainer(
-        vocab_size=vocab_size,
-        special_tokens=[special],
-    )
-
-    temp_file = "temp_train_bpe.txt"
-    with open(temp_file, "w", encoding="utf-8") as f:
-        f.write(text)
-    tokenizer.train(files=[temp_file], trainer=trainer)
-    os.remove(temp_file)
-
-    return tokenizer
+from dataset import download_wikipedia_50mb, StreamingDataset
+from huggingface import HFManager, PeriodicPusher
 
 
 class BPEWrapper:
@@ -43,8 +19,7 @@ class BPEWrapper:
         self.vocab_size = self.tokenizer.get_vocab_size()
 
     def encode(self, text):
-        enc = self.tokenizer.encode(text)
-        return enc.ids
+        return self.tokenizer.encode(text).ids
 
     def decode(self, ids):
         return self.tokenizer.decode(ids, skip_special_tokens=False)
@@ -58,12 +33,32 @@ def create_batch(tokens, start_idx, batch_size, seq_len, stride):
         for j in range(seq_len):
             x_indices.append(tokens[current_start + j])
             y_indices.append(tokens[current_start + j + 1])
-    x = torch.tensor(x_indices, dtype=torch.long).view(batch_size, seq_len)
-    y = torch.tensor(y_indices, dtype=torch.long).view(batch_size, seq_len)
-    return x, y
+    return (torch.tensor(x_indices, dtype=torch.long).view(batch_size, seq_len),
+            torch.tensor(y_indices, dtype=torch.long).view(batch_size, seq_len))
+
+
+def train_tokenizer_from_wiki(vocab_size: int, output_path: str) -> str:
+    from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
+    wiki_path = download_wikipedia_50mb()
+    print(f"Training BPE tokenizer (vocab={vocab_size}) from {wiki_path}...")
+    tok = Tokenizer(models.BPE())
+    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tok.decoder = decoders.ByteLevel()
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["eos_token"])
+    with open(wiki_path, "r", encoding="utf-8") as f:
+        tok.train_from_iterator([f.read()], trainer=trainer)
+    tok.save(output_path)
+    print(f"Tokenizer saved to {output_path}")
+    return output_path
 
 
 def main():
+    repo_id = "ScortexIA/laurelia"
+    revision = "gens0x"
+
+    hf = HFManager(repo_id=repo_id, revision=revision)
+    pusher = PeriodicPusher(hf, interval_minutes=10)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
@@ -79,30 +74,31 @@ def main():
     warmup_steps = 50
     bpe_vocab = 16000
 
-    text_path = os.path.join(os.path.dirname(__file__), "..", "xorIA", "input.txt")
-    with open(text_path, "r", encoding="utf-8") as f:
-        text = f.read()
-    print(f"Loaded {len(text)} chars from input.txt")
+    tok_path = "tokenizer.json"
+    tokenizer = None
 
-    tok_path = os.path.join(os.path.dirname(__file__), "tokenizer.json")
     if os.path.exists(tok_path):
         from tokenizers import Tokenizer
         hf_tok = Tokenizer.from_file(tok_path)
-        print(f"Loaded existing tokenizer from {tok_path}")
+        tokenizer = BPEWrapper(hf_tok)
+        print(f"Loaded local tokenizer -> {tok_path}")
+    elif hf.tokenizer_exists():
+        print(f"Downloading tokenizer from {repo_id}@{revision}...")
+        local_tok = hf.download_tokenizer(tok_path)
+        from tokenizers import Tokenizer
+        tokenizer = BPEWrapper(Tokenizer.from_file(local_tok))
+        print(f"Loaded tokenizer from HF")
     else:
-        print(f"Training BPE tokenizer (vocab={bpe_vocab})...")
-        hf_tok = train_bpe_tokenizer(text, vocab_size=bpe_vocab)
-        hf_tok.save(tok_path)
-        print(f"Tokenizer saved to {tok_path}")
-        cfg_path = os.path.join(os.path.dirname(__file__), "tokenizer_config.json")
-        with open(cfg_path, "w") as f:
-            f.write('{"tokenizer_class": "BPE", "eos_token": "eos_token", "model_max_length": 2048}\n')
-        print(f"Config saved to {cfg_path}")
-    tokenizer = BPEWrapper(hf_tok)
+        print("No tokenizer found. Training from Wikipedia 50MB...")
+        train_tokenizer_from_wiki(bpe_vocab, tok_path)
+        tokenizer = BPEWrapper(tok_path)
+        hf.upload_tokenizer(tok_path, "tokenizer_config.json")
+        print("Tokenizer trained and uploaded to HF")
+
     print(f"Vocab size: {tokenizer.vocab_size}")
 
-    tokens = tokenizer.encode(text)
-    print(f"Total tokens: {len(tokens)}")
+    stream_data = StreamingDataset(block_mb=3.0, block_idx=0)
+    stream_data.load_tokens(tokenizer)
 
     model = TransformerLM(
         vocab_size=tokenizer.vocab_size,
@@ -120,50 +116,45 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
-    start_epoch = 0
     global_step = 0
-    checkpoint_path = os.path.join(os.path.dirname(__file__), "checkpoint.pt")
-    safetensors_path = os.path.join(os.path.dirname(__file__), "model_test.safetensors")
-    if os.path.exists(checkpoint_path):
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    checkpoint_path = "checkpoint.pt"
+    safetensors_path = "model_test.safetensors"
+
+    if hf.download_checkpoint(checkpoint_path):
+        ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model"])
-        start_epoch = ckpt["epoch"] + 1
-        global_step = ckpt["global_step"]
-        print(f"Resumed from checkpoint: epoch {start_epoch}, step {global_step}")
-    elif os.path.exists(safetensors_path):
-        from safetensors.torch import load_file
-        state = load_file(safetensors_path)
-        model.load_state_dict(state, strict=False)
-        del state
-        print(f"Loaded from safetensors: {safetensors_path}")
-    else:
-        print("No checkpoint found, starting from scratch.")
+        global_step = ckpt.get("global_step", 0)
+        print(f"Resumed from HF checkpoint (step {global_step})")
+    elif os.path.exists(checkpoint_path):
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        global_step = ckpt.get("global_step", 0)
+        print(f"Resumed from local checkpoint (step {global_step})")
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {num_params:,} params ({num_params/1e6:.2f}M)")
 
-    total_batches = (len(tokens) - seq_len) // seq_len
-    total_steps = total_batches * num_epochs
-    print(f"Batches/epoch: {total_batches} | Total steps: {total_steps}")
-    print(f"LR: {lr} | Warmup: {warmup_steps} steps | Grad accum: {grad_accum}")
-    print(f"\nStarting training from epoch {start_epoch + 1}...\n")
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+
+    total_batches_per_block = (len(stream_data.get_tokens()) - seq_len) // seq_len
+    print(f"Tokens/block: {len(stream_data.get_tokens())} | Batches/block: {total_batches_per_block}")
+    print(f"LR: {lr} | Warmup: {warmup_steps} | Grad accum: {grad_accum}")
 
     model.train()
     start_time = time.time()
+    epoch = 0
 
-    for epoch in range(start_epoch, num_epochs):
-        epoch_loss = 0.0
-        epoch_tokens = 0
-        epoch_start = time.time()
+    while True:
+        tokens = stream_data.get_tokens()
+        for batch_idx in range(0, total_batches_per_block, batch_size):
+            if global_step >= num_epochs * total_batches_per_block:
+                break
 
-        for batch_idx in range(0, total_batches, batch_size):
             if global_step < warmup_steps:
                 current_lr = lr * global_step / max(warmup_steps, 1)
-            elif global_step < total_steps:
-                t = (global_step - warmup_steps) / max(total_steps - warmup_steps, 1)
-                current_lr = lr * (0.2 + 0.8 * (1.0 + torch.tensor(3.14159 * t).cos().item()) / 2.0)
             else:
-                current_lr = lr * 0.2
+                t = (global_step - warmup_steps) / max(num_epochs * total_batches_per_block - warmup_steps, 1)
+                current_lr = lr * (0.2 + 0.8 * (1.0 + torch.tensor(3.14159 * t).cos().item()) / 2.0)
 
             for pg in optimizer.param_groups:
                 pg["lr"] = current_lr
@@ -192,57 +183,27 @@ def main():
                     optimizer.step()
                     optimizer.zero_grad()
 
-            epoch_loss += micro_loss
-            epoch_tokens += micro_count * seq_len
             global_step += 1
 
             if global_step % 100 == 0:
                 elapsed = time.time() - start_time
-                avg_loss = epoch_loss / max(epoch_tokens, 1) * seq_len
-                tps = epoch_tokens / max(elapsed, 0.001)
-                print(f"  Epoch {epoch+1}/{num_epochs} | Step {global_step} | Loss: {avg_loss:.4f} | LR: {current_lr:.6f} | {tps:.0f} tok/s")
+                avg_loss = micro_loss / max(micro_count, 1)
+                tps = micro_count * seq_len / max(elapsed, 0.001)
+                print(f"Step {global_step} | Loss: {avg_loss:.4f} | LR: {current_lr:.6f} | {tps:.0f} tok/s")
 
-        epoch_elapsed = time.time() - epoch_start
-        avg_loss = epoch_loss / max(epoch_tokens, 1) * seq_len
-        print(f"Epoch {epoch+1}/{num_epochs} done | Loss: {avg_loss:.4f} | {epoch_elapsed:.1f}s")
+            pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step)
 
-        model.eval()
-        seed = "First Citizen:"
-        seed_ids = tokenizer.encode(seed)
-        input_tensor = torch.tensor([seed_ids], dtype=torch.long).to(device)
+        epoch += 1
+        if epoch >= num_epochs:
+            break
 
-        gen_start = time.time()
-        with torch.no_grad():
-            output = model.generate(
-                input_tensor,
-                max_new_tokens=200,
-                temperature=0.8,
-                top_k=40,
-                top_p=0.95,
-            )
-        gen_elapsed = time.time() - gen_start
-        gen_tokens = output.shape[1] - len(seed_ids)
-        gen_tps = gen_tokens / max(gen_elapsed, 0.001)
+        stream_data.next_block()
+        total_batches_per_block = (len(stream_data.get_tokens()) - seq_len) // seq_len
+        print(f"Epoch {epoch} done. Loaded next block: {len(stream_data.get_tokens())} tokens")
 
-        generated = tokenizer.decode(output[0].tolist())
-        print(f"\n--- Sample (epoch {epoch+1}) ---")
-        print(generated)
-        print(f"--- Generated {gen_tokens} tokens in {gen_elapsed:.1f}s ({gen_tps:.1f} tok/s) ---\n")
-        model.train()
-
-        save_path = os.path.join(os.path.dirname(__file__), f"model_epoch{epoch+1}.pt")
-        torch.save(model.state_dict(), save_path)
-        safetensors_path = os.path.join(os.path.dirname(__file__), "model_test.safetensors")
-        mapping_path = os.path.join(os.path.dirname(__file__), "model_test_mapping.json")
-        model.export_for_rust(safetensors_path, mapping_path)
-
-        torch.save({
-            "epoch": epoch,
-            "global_step": global_step,
-            "model": model.state_dict(),
-        }, checkpoint_path)
-
-    print("Done!")
+    # Final push
+    hf.upload_checkpoint(checkpoint_path, safetensors_path, tok_path, global_step)
+    print(f"Done! {global_step} steps in {time.time()-start_time:.1f}s")
 
 
 if __name__ == "__main__":
