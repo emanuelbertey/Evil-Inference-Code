@@ -72,7 +72,7 @@ def main():
     num_layers = 24
     num_heads = 12
     num_kv_groups = 4
-    seq_len = 256
+    seq_len = 320
     batch_size = 32
     grad_accum = 4
     lr = 3e-4
@@ -130,7 +130,7 @@ def main():
 
     global_step = 0
     epoch = 0
-    block_idx = 0
+    ckpt_block = 0
     checkpoint_path = os.path.join(_DIR, "checkpoint.pt")
     safetensors_path = os.path.join(_DIR, "model_test.safetensors")
 
@@ -139,15 +139,18 @@ def main():
         model.load_state_dict(ckpt["model"])
         global_step = ckpt.get("global_step", 0)
         epoch = ckpt.get("epoch", 0)
-        block_idx = ckpt.get("block_idx", 5)
-        print(f"Resumed from local checkpoint (step {global_step}, epoch {epoch}, block {block_idx})")
+        ckpt_block = ckpt.get("block_idx", 0)
+        print(f"Local checkpoint (step {global_step}, epoch {epoch}, block {ckpt_block})")
     elif hf.download_checkpoint(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model"])
         global_step = ckpt.get("global_step", 0)
         epoch = ckpt.get("epoch", 0)
-        block_idx = ckpt.get("block_idx", 5)
-        print(f"Resumed from HF checkpoint (step {global_step}, epoch {epoch}, block {block_idx})")
+        ckpt_block = ckpt.get("block_idx", 0)
+        print(f"HF checkpoint (step {global_step}, epoch {epoch}, block {ckpt_block})")
+
+    block_input = input(f"Block [{ckpt_block}]: ").strip()
+    block_idx = int(block_input) if block_input else ckpt_block
 
     stream_data = StreamingDataset(block_mb=3.0, block_idx=block_idx)
     stream_data.load_tokens(tokenizer)
