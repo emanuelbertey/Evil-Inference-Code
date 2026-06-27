@@ -62,9 +62,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    d_model = 256
-    num_layers = 6
-    num_heads = 8
+    d_model = 768
+    num_layers = 24
+    num_heads = 12
     num_kv_groups = 4
     seq_len = 128
     batch_size = 16
@@ -171,7 +171,7 @@ def main():
                 x, y = create_batch(tokens, start_idx, 1, seq_len, seq_len)
                 x, y = x.to(device), y.to(device)
 
-                logits = model(x)
+                logits = model.forward_train_partial_rope(x, rotary_pct=0.25)
                 loss = F.cross_entropy(logits.view(-1, tokenizer.vocab_size), y.view(-1))
 
                 (loss / grad_accum).backward()
