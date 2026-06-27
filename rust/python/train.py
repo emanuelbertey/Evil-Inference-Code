@@ -66,9 +66,9 @@ def main():
     num_layers = 24
     num_heads = 12
     num_kv_groups = 4
-    seq_len = 128
+    seq_len = 160
     batch_size = 16
-    grad_accum = 2
+    grad_accum = 4
     lr = 3e-4
     num_epochs = 20
     warmup_steps = 50
