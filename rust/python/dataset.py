@@ -72,6 +72,15 @@ class StreamingDataset:
     def download_block(self):
         max_bytes = int(self.block_mb * 1024 * 1024)
         ds = load_dataset(*WIKI_CONFIG, split="train", streaming=True)
+        # Skip items based on block_idx (each block ~block_mb MB)
+        skip_mb = self.block_idx * int(self.block_mb * 1024 * 1024)
+        skipped = 0
+        for item in ds:
+            text = f"--- {item['title']} ---\n{item['text']}\n\n"
+            tam = len(text.encode("utf-8"))
+            if skipped + tam > skip_mb:
+                break
+            skipped += tam
         with open(self._path, "w", encoding="utf-8") as f:
             written = 0
             for item in ds:

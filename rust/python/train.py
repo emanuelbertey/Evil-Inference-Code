@@ -67,7 +67,7 @@ def main():
     num_heads = 12
     num_kv_groups = 4
     seq_len = 160
-    batch_size = 16
+    batch_size = 24
     grad_accum = 4
     lr = 3e-4
     num_epochs = 20
@@ -106,9 +106,6 @@ def main():
 
     print(f"Vocab size: {tokenizer.vocab_size}")
 
-    stream_data = StreamingDataset(block_mb=3.0, block_idx=0)
-    stream_data.load_tokens(tokenizer)
-
     model = TransformerLM(
         vocab_size=tokenizer.vocab_size,
         d_model=d_model,
@@ -126,19 +123,30 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
     global_step = 0
+    epoch = 0
+    block_idx = 0
     checkpoint_path = os.path.join(_DIR, "checkpoint.pt")
     safetensors_path = os.path.join(_DIR, "model_test.safetensors")
 
     if hf.download_checkpoint(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
         global_step = ckpt.get("global_step", 0)
-        print(f"Resumed from HF checkpoint (step {global_step})")
+        epoch = ckpt.get("epoch", 0)
+        block_idx = ckpt.get("block_idx", 5)
+        print(f"Resumed from HF checkpoint (step {global_step}, epoch {epoch}, block {block_idx})")
     elif os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
         global_step = ckpt.get("global_step", 0)
-        print(f"Resumed from local checkpoint (step {global_step})")
+        epoch = ckpt.get("epoch", 0)
+        block_idx = ckpt.get("block_idx", 5)
+        print(f"Resumed from local checkpoint (step {global_step}, epoch {epoch}, block {block_idx})")
+
+    stream_data = StreamingDataset(block_mb=3.0, block_idx=block_idx)
+    stream_data.load_tokens(tokenizer)
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"dim={d_model} layers={num_layers} heads={num_heads} kv_groups={num_kv_groups} seq={seq_len} vocab={tokenizer.vocab_size}")
@@ -151,14 +159,14 @@ def main():
     print(f"Tokens/block: {len(stream_data.get_tokens())} | Batches/block: {total_batches_per_block}")
     print(f"LR: {lr} | Warmup: {warmup_steps} | Grad accum: {grad_accum}")
 
-    torch.save({"global_step": global_step, "model": model.state_dict()}, checkpoint_path)
+    torch.save({"global_step": 0, "epoch": 0, "block_idx": 0,
+                "optimizer": optimizer.state_dict(), "model": model.state_dict()}, checkpoint_path)
 
     model.train()
     start_time = time.time()
     last_report_time = start_time
     last_report_step = 0
-    epoch = 0
-
+    
     while True:
         tokens = stream_data.get_tokens()
         for batch_idx in range(0, total_batches_per_block, batch_size):
@@ -212,7 +220,8 @@ def main():
                 last_report_step = global_step
 
             if time.time() - pusher.last_push >= pusher.interval:
-                torch.save({"global_step": global_step, "model": model.state_dict()}, checkpoint_path)
+                torch.save({"global_step": global_step, "epoch": epoch, "block_idx": stream_data.block_idx,
+                            "optimizer": optimizer.state_dict(), "model": model.state_dict()}, checkpoint_path)
                 model.state_dict_to_safetensors(safetensors_path)
                 pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step)
 
