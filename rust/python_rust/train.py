@@ -94,8 +94,22 @@ def download_wiki_60mb(path: str = "/tmp/wiki60mb.txt") -> str:
         print(f"Wiki 60MB already at {path}")
         return path
 
-    print("Downloading Wikipedia parquet...")
+    print("Downloading Wikipedia...")
     try:
+        from datasets import load_dataset
+        ds = load_dataset("wikipedia", "20220301.en", split="train",
+                          streaming=True)
+        with open(path, "w", encoding="utf-8") as f:
+            written = 0
+            for row in ds:
+                line = row["text"] + "\n\n"
+                f.write(line)
+                written += len(line)
+                if written >= 60_000_000:
+                    break
+        print(f"Written {written} bytes to {path}")
+    except Exception:
+        print("datasets failed, trying parquet...")
         import pyarrow.parquet as pq
         import requests
         resp = requests.get(WIKI_URL, stream=True, timeout=120)
@@ -114,20 +128,6 @@ def download_wiki_60mb(path: str = "/tmp/wiki60mb.txt") -> str:
             f.write(text[:60_000_000])
         print(f"Written {os.path.getsize(path)} bytes to {path}")
         os.remove(tmp_parquet)
-    except ImportError:
-        print("pyarrow not installed, trying HF datasets...")
-        from datasets import load_dataset
-        ds = load_dataset("wikipedia", "20220301.en", split="train",
-                          streaming=True)
-        with open(path, "w", encoding="utf-8") as f:
-            written = 0
-            for row in ds:
-                line = row["text"] + "\n\n"
-                f.write(line)
-                written += len(line)
-                if written >= 60_000_000:
-                    break
-        print(f"Written {written} bytes to {path}")
     return path
 
 
