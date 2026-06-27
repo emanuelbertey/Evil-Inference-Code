@@ -151,6 +151,8 @@ def main():
     print(f"Tokens/block: {len(stream_data.get_tokens())} | Batches/block: {total_batches_per_block}")
     print(f"LR: {lr} | Warmup: {warmup_steps} | Grad accum: {grad_accum}")
 
+    torch.save({"global_step": global_step, "model": model.state_dict()}, checkpoint_path)
+
     model.train()
     start_time = time.time()
     epoch = 0
