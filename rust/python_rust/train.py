@@ -59,48 +59,45 @@ class FileFragmentStream:
         return chunk.decode("utf-8", errors="replace")
 
 
-# ─── Data source ────────────────────────────────────────────────────────────
+# ─── Data source: auto-download Wikipedia ES ──────────────────────────────
 
-def resolve_data_source():
-    key = os.environ.get("MY_KEY", "")
-    if not key:
-        key = "/tmp/wikitext.txt"
-    if key.startswith("http://") or key.startswith("https://"):
-        import requests
-        print(f"Downloading {key} ...")
-        resp = requests.get(key, stream=True, timeout=30)
-        resp.raise_for_status()
-        local = "/tmp/stream_data.txt"
-        with open(local, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        print(f"Saved {local} ({os.path.getsize(local)} bytes)")
-        return local
-    if not os.path.exists(key):
-        raise FileNotFoundError(f"Data source not found: {key}")
-    return key
+DATA_FILE = "/content/evil_inference_bit2/rust/xorIA/input.txt"
+WIKI_ES = ("wikimedia/wikipedia", "20231101.es")
 
-
-# ─── Wikipedia 60MB download ────────────────────────────────────────────────
-
-def download_wiki_60mb(path: str = "/tmp/wiki60mb.txt") -> str:
-    if os.path.exists(path) and os.path.getsize(path) >= 60_000_000:
-        print(f"Wiki 60MB already at {path}")
-        return path
-
-    print("Downloading Wikipedia via datasets...")
+def _download_wiki(output_file: str, max_bytes: int):
     from datasets import load_dataset
-    ds = load_dataset("wikimedia/wikipedia", "20231101.en", split="train",
-                      streaming=True)
-    with open(path, "w", encoding="utf-8") as f:
+    ds = load_dataset(*WIKI_ES, split="train", streaming=True)
+    with open(output_file, "w", encoding="utf-8") as f:
         written = 0
-        for row in ds:
-            line = row["text"] + "\n\n"
-            f.write(line)
-            written += len(line)
-            if written >= 60_000_000:
+        for item in ds:
+            texto = f"--- {item['title']} ---\n{item['text']}\n\n"
+            tam = len(texto.encode('utf-8'))
+            if written + tam > max_bytes:
                 break
+            f.write(texto)
+            written += tam
+    return written
+
+def download_training_data(max_mb: float = 6.0):
+    out = DATA_FILE
+    out_dir = os.path.dirname(out)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+    max_bytes = int(max_mb * 1024 * 1024)
+    if os.path.exists(out) and os.path.getsize(out) >= max_bytes:
+        print(f"Training data already at {out} ({os.path.getsize(out)} bytes)")
+        return out
+    print(f"Downloading Wikipedia ES ({max_mb}MB block) to {out}...")
+    written = _download_wiki(out, max_bytes)
+    print(f"Written {written} bytes to {out}")
+    return out
+
+def download_wiki_tokenizer(vocab_size: int):
+    path = "/tmp/wiki_tokenizer.txt"
+    if os.path.exists(path) and os.path.getsize(path) >= 50_000_000:
+        return path
+    print("Downloading Wikipedia ES for tokenizer training...")
+    written = _download_wiki(path, 60_000_000)
     print(f"Written {written} bytes to {path}")
     return path
 
@@ -116,7 +113,7 @@ def hf_api() -> "HfApi":
 
 def train_tokenizer_from_wiki(vocab_size: int, output_path: str = "tokenizer.json"):
     from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
-    wiki_path = download_wiki_60mb()
+    wiki_path = download_wiki_tokenizer(vocab_size)
     print(f"Training BPE tokenizer (vocab={vocab_size}) from {wiki_path}...")
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
@@ -256,9 +253,8 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=0.01)
     total_steps = cfg["total_steps"]
 
-    # ── Data source ──
-    data_path = resolve_data_source()
-    print(f"Data source: {data_path}")
+    # ── Data source (auto-download Wikipedia ES) ──
+    data_path = download_training_data()
 
     # ── Train (flujo constante) ──
     model.train()
