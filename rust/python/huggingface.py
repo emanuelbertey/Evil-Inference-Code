@@ -42,6 +42,16 @@ class HFManager:
         except Exception:
             pass
 
+    def ensure_revision(self):
+        if self.revision in ("main", "master"):
+            return
+        api = self._get_api()
+        try:
+            api.create_branch(repo_id=self.repo_id, branch=self.revision, token=self._get_token())
+            print(f"Created branch '{self.revision}' on {self.repo_id}")
+        except Exception:
+            pass
+
     def tokenizer_exists(self) -> bool:
         try:
             self._get_api().file_exists(
@@ -73,6 +83,7 @@ class HFManager:
     def upload_tokenizer(self, local_path: str, config_path: str | None = None):
         api = self._get_api()
         self.ensure_repo()
+        self.ensure_revision()
         api.upload_file(
             path_or_fileobj=local_path,
             path_in_repo="tokenizer.json",
@@ -114,6 +125,7 @@ class HFManager:
                           tokenizer_path: str | None = None, step: int | None = None):
         api = self._get_api()
         self.ensure_repo()
+        self.ensure_revision()
         files = [checkpoint_path]
         if safetensors_path and os.path.exists(safetensors_path):
             files.append(safetensors_path)

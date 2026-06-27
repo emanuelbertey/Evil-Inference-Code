@@ -101,7 +101,7 @@ def main():
             from tokenizers import Tokenizer
             hf_tok = Tokenizer.from_file(tok_path)
             tokenizer = BPEWrapper(hf_tok)
-            hf.upload_tokenizer(tok_path, "tokenizer_config.json")
+            hf.upload_tokenizer(tok_path, os.path.join(_DIR, "tokenizer_config.json"))
             print("Tokenizer trained and uploaded to HF")
 
     print(f"Vocab size: {tokenizer.vocab_size}")
