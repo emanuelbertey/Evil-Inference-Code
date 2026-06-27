@@ -269,6 +269,7 @@ def train():
     ring_max = cfg["batch_size"] * cfg["stride"] + cfg["max_seq_len"] + 1
 
     step_size = cfg["batch_size"] * cfg["stride"]
+    first = True
     while global_step < total_steps:
         with FileFragmentStream(data_path, buffer_size_mb=1) as stream:
             for fragment in stream:
@@ -277,8 +278,7 @@ def train():
 
                 fragment_ids = tokenizer.encode(fragment)
                 ring.extend(fragment_ids)
-                del fragment_ids
-                del fragment
+                del fragment_ids, fragment
 
                 while len(ring) >= ring_max:
                     batch_loss = 0.0
@@ -292,10 +292,14 @@ def train():
                         x, y = create_batch(ring, start_idx, 1,
                                             cfg["max_seq_len"], cfg["stride"])
                         x, y = x.to(device), y.to(device)
+                        if first:
+                            print("  Compiling XLA (first forward)...", flush=True)
                         logits = model(x)
                         loss = F.cross_entropy(
                             logits.view(-1, tokenizer.vocab_size), y.view(-1)
                         )
+                        if first:
+                            print("  Compiling XLA (first backward)...", flush=True)
                         (loss / cfg["batch_size"]).backward()
                         batch_loss += loss.item()
                         batch_count += 1
