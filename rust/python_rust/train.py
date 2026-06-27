@@ -207,19 +207,31 @@ def train():
     repo_id = cfg["hf_repo"]
     tag = cfg["hf_tag"]
 
-    # ── Tokenizer ──
+    # ── Tokenizer: local > HF download > Wikipedia ──
     tok_path = "tokenizer.json"
     if os.path.exists(tok_path):
         tokenizer = BPEWrapper(tok_path)
         print(f"Loaded tokenizer → {tok_path}")
     else:
-        train_tokenizer_from_wiki(cfg["vocab_size"], tok_path)
-        tokenizer = BPEWrapper(tok_path)
+        downloaded = False
         if hf_logged_in:
-            with open("tokenizer_config.json", "w") as f:
-                json.dump({"tokenizer_class": "BPE", "eos_token": "eos_token"}, f)
-            push_to_hf(repo_id, [tok_path, "tokenizer_config.json"],
-                       revision=tag, commit_message="Add tokenizer")
+            try:
+                from huggingface_hub import hf_hub_download
+                tok_path = hf_hub_download(repo_id=repo_id, filename="tokenizer.json",
+                                           revision=tag)
+                tokenizer = BPEWrapper(tok_path)
+                print(f"Downloaded tokenizer from {repo_id} @ {tag}")
+                downloaded = True
+            except Exception:
+                pass
+        if not downloaded:
+            train_tokenizer_from_wiki(cfg["vocab_size"], tok_path)
+            tokenizer = BPEWrapper(tok_path)
+            if hf_logged_in:
+                with open("tokenizer_config.json", "w") as f:
+                    json.dump({"tokenizer_class": "BPE", "eos_token": "eos_token"}, f)
+                push_to_hf(repo_id, [tok_path, "tokenizer_config.json"],
+                           revision=tag, commit_message="Add tokenizer")
 
     # ── Model ──
     model = TransformerLM(
