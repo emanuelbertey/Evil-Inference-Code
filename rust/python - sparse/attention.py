@@ -17,12 +17,6 @@ import torch.nn.functional as F
 from rope import RoPE, apply_rope_partial
 from cache_kv import KVCache
 
-try:
-    from native_sparse_attention_pytorch import SparseAttention as NativeSparseAttention
-    HAS_SPARSE = True
-except ImportError:
-    HAS_SPARSE = False
-
 
 def repeat_kv(x: torch.Tensor, num_heads: int, num_kv_groups: int) -> torch.Tensor:
     """Repeat KV groups to match the number of query heads.
@@ -338,25 +332,20 @@ class SparseAttentionMio3(Attention):
         self.chunk_size = 8
 
     def _sparse_forward(self, q, k, v):
-        """Block-sparse attention con GQA: top-K por grupo KV."""
+        """Block-sparse attention: top-K por grupo KV, limpia memoria por chunk."""
         B, NH, S, HD = q.shape
-        NK = self.num_kv_groups
-        HPG = NH // NK
+        NK = self.num_kv_groups; HPG = NH // NK
         BSZ = self.block_size
         K = min(self.num_selected_blocks, max(1, (S + BSZ - 1) // BSZ))
-        CHUNK = self.chunk_size
-        scale = 1.0 / (HD ** 0.5)
-
+        CHUNK = self.chunk_size; scale = 1.0 / (HD ** 0.5)
         NB = max(1, (S + BSZ - 1) // BSZ)
+
         pad = NB * BSZ - S
-        if pad > 0:
-            k = F.pad(k, (0, 0, 0, pad))
-            v = F.pad(v, (0, 0, 0, pad))
+        if pad:
+            k = F.pad(k, (0, 0, 0, pad)); v = F.pad(v, (0, 0, 0, pad))
 
-        k_b = k[:, :NK].reshape(B, NK, NB, BSZ, HD)
-        v_b = v[:, :NK].reshape(B, NK, NB, BSZ, HD)
+        k_b, v_b = k[:, :NK].reshape(B, NK, NB, BSZ, HD), v[:, :NK].reshape(B, NK, NB, BSZ, HD)
         k_comp = k_b.mean(dim=3)
-
         out = torch.zeros_like(q)
 
         for start in range(0, S, CHUNK):
@@ -364,8 +353,7 @@ class SparseAttentionMio3(Attention):
             q_chunk = q[:, :, start:end]
             C = end - start
 
-            # scores por grupo: mean-pool Q sobre cabezas del grupo
-            q_group = q_chunk.reshape(B, NK, HPG, C, HD).mean(dim=2)  # (B, NK, C, HD)
+            q_group = q_chunk.reshape(B, NK, HPG, C, HD).mean(dim=2)
             scores = (q_group @ k_comp.transpose(-2, -1)) * scale
             if self.causal:
                 q_pos = torch.arange(start, start + C, device=q.device)
@@ -373,14 +361,12 @@ class SparseAttentionMio3(Attention):
                     (q_pos[:, None] < (torch.arange(NB, device=q.device) * BSZ)[None, :])
                     .unsqueeze(0).unsqueeze(0), float('-inf'))
 
-            _, topk = scores.topk(K, dim=-1)  # (B, NK, C, K)
-
-            # gather solo NK grupos, expandir a NH
+            _, topk = scores.topk(K, dim=-1)
             idx_b = torch.arange(B, device=q.device)[:, None, None, None]
-            k_sel = k_b[idx_b, torch.arange(NK, device=q.device)[None, :, None, None], topk]  # (B, NK, C, K, BS, HD)
+            k_sel = k_b[idx_b, torch.arange(NK, device=q.device)[None, :, None, None], topk]
             v_sel = v_b[idx_b, torch.arange(NK, device=q.device)[None, :, None, None], topk]
 
-            k_sel = k_sel.repeat_interleave(HPG, dim=1)  # (B, NH, C, K, BS, HD)
+            k_sel = k_sel.repeat_interleave(HPG, dim=1)
             v_sel = v_sel.repeat_interleave(HPG, dim=1)
 
             q_flat = q_chunk.reshape(B * NH * C, 1, HD)
@@ -390,9 +376,9 @@ class SparseAttentionMio3(Attention):
             out_flat = F.scaled_dot_product_attention(q_flat, k_flat, v_flat, is_causal=False)
             out[:, :, start:end] = out_flat.reshape(B, NH, C, HD)
 
-        if pad > 0:
-            out = out[:, :, :S]
-        return out
+            del q_chunk, q_group, scores, topk, k_sel, v_sel, q_flat, k_flat, v_flat, out_flat
+
+        return out[:, :, :S] if pad else out
 
     def forward(self, x: torch.Tensor, offset: int = 0) -> torch.Tensor:
         q, k, v = self.qkv(x)
@@ -404,6 +390,10 @@ class SparseAttentionMio3(Attention):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        if not self.training and q.shape[2] < 2048:
+            # eval con S pequenia: full attention (mas rapido)
+            return super().forward(x, offset)
 
         attn_output = self._sparse_forward(q, k, v)
         attn_output = attn_output.transpose(1, 2)
