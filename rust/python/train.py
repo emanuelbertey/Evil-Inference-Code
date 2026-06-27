@@ -131,8 +131,6 @@ def main():
     if hf.download_checkpoint(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model"])
-        if "optimizer" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer"])
         global_step = ckpt.get("global_step", 0)
         epoch = ckpt.get("epoch", 0)
         block_idx = ckpt.get("block_idx", 5)
@@ -140,8 +138,6 @@ def main():
     elif os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model"])
-        if "optimizer" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer"])
         global_step = ckpt.get("global_step", 0)
         epoch = ckpt.get("epoch", 0)
         block_idx = ckpt.get("block_idx", 5)
@@ -162,7 +158,7 @@ def main():
     print(f"LR: {lr} | Warmup: {warmup_steps} | Grad accum: {grad_accum}")
 
     torch.save({"global_step": 0, "epoch": 0, "block_idx": 0,
-                "optimizer": optimizer.state_dict(), "model": model.state_dict()}, checkpoint_path)
+                "model": model.state_dict()}, checkpoint_path)
 
     model.train()
     start_time = time.time()
@@ -223,7 +219,7 @@ def main():
 
             if time.time() - pusher.last_push >= pusher.interval:
                 torch.save({"global_step": global_step, "epoch": epoch, "block_idx": stream_data.block_idx,
-                            "optimizer": optimizer.state_dict(), "model": model.state_dict()}, checkpoint_path)
+                            "model": model.state_dict()}, checkpoint_path)
                 model.state_dict_to_safetensors(safetensors_path)
                 pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step)
 
