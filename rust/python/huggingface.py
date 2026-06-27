@@ -151,7 +151,9 @@ class PeriodicPusher:
         self.last_push = time.time()
 
     def maybe_push(self, checkpoint_path: str, safetensors_path: str | None,
-                   tokenizer_path: str | None, step: int):
+                   tokenizer_path: str | None, step: int) -> bool:
         if time.time() - self.last_push >= self.interval:
             self.hf.upload_checkpoint(checkpoint_path, safetensors_path, tokenizer_path, step)
             self.last_push = time.time()
+            return True
+        return False

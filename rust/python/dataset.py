@@ -3,9 +3,10 @@
 import os
 from datasets import load_dataset
 
+_DIR = os.path.dirname(os.path.abspath(__file__))
 WIKI_CONFIG = ("wikimedia/wikipedia", "20231101.es")
-TOKENIZER_DATA_PATH = "/tmp/wiki_tokenizer_50mb.txt"
-TRAIN_DATA_PATH = "/tmp/wiki_train_data.txt"
+TOKENIZER_DATA_PATH = os.path.join(_DIR, "wiki_tokenizer_50mb.txt")
+TRAIN_DATA_PATH = os.path.join(_DIR, "wiki_train_data.txt")
 
 
 def download_wikipedia_50mb(output_path: str = TOKENIZER_DATA_PATH) -> str:
@@ -56,7 +57,7 @@ class StreamingDataset:
     def __init__(self, block_mb: float = 3.0, block_idx: int = 0):
         self.block_mb = block_mb
         self.block_idx = block_idx
-        self._path = f"/tmp/wiki_block_{block_idx}.txt"
+        self._path = os.path.join(_DIR, f"wiki_block_{block_idx}.txt")
         self._tokens = None
         self._tokenizer = None
 
@@ -83,7 +84,7 @@ class StreamingDataset:
 
     def next_block(self):
         self.block_idx += 1
-        self._path = f"/tmp/wiki_block_{self.block_idx}.txt"
+        self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
         self.download_block()
         with open(self._path, "r", encoding="utf-8") as f:
             text = f.read()

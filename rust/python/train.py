@@ -74,7 +74,8 @@ def main():
     warmup_steps = 50
     bpe_vocab = 16000
 
-    tok_path = "tokenizer.json"
+    _DIR = os.path.dirname(os.path.abspath(__file__))
+    tok_path = os.path.join(_DIR, "tokenizer.json")
     tokenizer = None
 
     if os.path.exists(tok_path):
@@ -125,8 +126,8 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
     global_step = 0
-    checkpoint_path = "checkpoint.pt"
-    safetensors_path = "model_test.safetensors"
+    checkpoint_path = os.path.join(_DIR, "checkpoint.pt")
+    safetensors_path = os.path.join(_DIR, "model_test.safetensors")
 
     if hf.download_checkpoint(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
@@ -199,7 +200,9 @@ def main():
                 tps = micro_count * seq_len / max(elapsed, 0.001)
                 print(f"Step {global_step} | Loss: {avg_loss:.4f} | LR: {current_lr:.6f} | {tps:.0f} tok/s")
 
-            pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step)
+            if pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step):
+                torch.save({"global_step": global_step, "model": model.state_dict()}, checkpoint_path)
+                model.state_dict_to_safetensors(safetensors_path)
 
         epoch += 1
         if epoch >= num_epochs:
