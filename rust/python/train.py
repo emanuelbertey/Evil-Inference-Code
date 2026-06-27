@@ -141,7 +141,9 @@ def main():
         print(f"Resumed from local checkpoint (step {global_step})")
 
     num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {num_params:,} params ({num_params/1e6:.2f}M)")
+    print(f"dim={d_model} layers={num_layers} heads={num_heads} kv_groups={num_kv_groups} seq={seq_len} vocab={tokenizer.vocab_size}")
+    print(f"batch={batch_size} grad_accum={grad_accum} lr={lr} warmup={warmup_steps} epochs={num_epochs}")
+    print(f"model: {num_params:,} params ({num_params/1e6:.2f}M)")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
@@ -194,11 +196,13 @@ def main():
 
             global_step += 1
 
+            if global_step % 10 == 0:
+                avg_loss = micro_loss / max(micro_count, 1)
+                print(f"step {global_step} loss {avg_loss:.4f} lr {current_lr:.6f}")
             if global_step % 100 == 0:
                 elapsed = time.time() - start_time
-                avg_loss = micro_loss / max(micro_count, 1)
                 tps = micro_count * seq_len / max(elapsed, 0.001)
-                print(f"Step {global_step} | Loss: {avg_loss:.4f} | LR: {current_lr:.6f} | {tps:.0f} tok/s")
+                print(f"step {global_step} | {tps:.0f} tok/s")
 
             if pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step):
                 torch.save({"global_step": global_step, "model": model.state_dict()}, checkpoint_path)
