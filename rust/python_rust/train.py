@@ -14,6 +14,7 @@ import os
 import json
 import time
 import io
+import gc
 
 import torch
 import torch.nn.functional as F
@@ -267,14 +268,17 @@ def train():
     ring = []
     ring_max = cfg["batch_size"] * cfg["stride"] + cfg["max_seq_len"] + 1
 
+    step_size = cfg["batch_size"] * cfg["stride"]
     while global_step < total_steps:
-        with FileFragmentStream(data_path, buffer_size_mb=2) as stream:
+        with FileFragmentStream(data_path, buffer_size_mb=1) as stream:
             for fragment in stream:
                 if global_step >= total_steps:
                     break
 
                 fragment_ids = tokenizer.encode(fragment)
                 ring.extend(fragment_ids)
+                del fragment_ids
+                del fragment
 
                 while len(ring) >= ring_max:
                     batch_loss = 0.0
@@ -295,8 +299,9 @@ def train():
                         (loss / cfg["batch_size"]).backward()
                         batch_loss += loss.item()
                         batch_count += 1
+                        del x, y, logits, loss
 
-                    ring = ring[cfg["batch_size"] * cfg["stride"]:]
+                    del ring[:step_size]
 
                     # LR
                     if global_step < cfg["warmup_steps"]:
@@ -315,6 +320,7 @@ def train():
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["max_norm"])
                     if IS_TPU:
                         xm.optimizer_step(optimizer)
+                        xm.wait_device_ops()
                     else:
                         optimizer.step()
 
@@ -331,6 +337,9 @@ def train():
                             f"LR: {current_lr:.6f} | "
                             f"{tps:.0f} tok/s"
                         )
+
+                    if global_step % 200 == 0:
+                        gc.collect()
 
                     # Push cada 10 minutos
                     now = time.time()
