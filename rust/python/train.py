@@ -63,12 +63,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    prec = input("Precision (n=normal f32, f=f16): ").strip().lower()
+    use_f16 = prec == "f"
+    dtype = torch.float16 if use_f16 else torch.float32
+    print(f"Using {dtype}")
+
     d_model = 768
     num_layers = 24
     num_heads = 12
     num_kv_groups = 4
-    seq_len = 160
-    batch_size = 24
+    seq_len = 256
+    batch_size = 32
     grad_accum = 4
     lr = 3e-4
     num_epochs = 20
@@ -119,7 +124,7 @@ def main():
         residual_dropout=0.0,
         attn_dropout=0.0,
         ffn_dropout=0.0,
-    ).to(device)
+    ).to(device).to(dtype=dtype)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
