@@ -137,12 +137,11 @@ def push_to_hf(repo_id: str, local_files: list, revision: str = "gens0x",
         create_repo(repo_id=repo_id, exist_ok=True, private=False, token=hf_token())
     except Exception:
         pass
-    api.upload_files(
-        repo_id=repo_id,
-        files=local_files,
-        revision=revision,
-        commit_message=commit_message or f"Update {time.strftime('%Y-%m-%d %H:%M UTC')}",
-    )
+    for p in local_files:
+        fname = os.path.basename(p)
+        api.upload_file(path_or_fileobj=p, path_in_repo=fname,
+                        repo_id=repo_id, revision=revision,
+                        commit_message=commit_message or f"Update {fname}")
     print(f"Pushed {len(local_files)} files to {repo_id} @ {revision}")
 
 
