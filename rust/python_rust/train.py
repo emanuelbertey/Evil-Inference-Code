@@ -84,50 +84,24 @@ def resolve_data_source():
 
 # ─── Wikipedia 60MB download ────────────────────────────────────────────────
 
-WIKI_URL = ("https://huggingface.co/datasets/wikipedia/resolve/main/"
-            "20220301.en/train-00000-of-00041.parquet")
-
-
 def download_wiki_60mb(path: str = "/tmp/wiki60mb.txt") -> str:
-    """Descarga primeros 60MB de Wikipedia en texto plano."""
     if os.path.exists(path) and os.path.getsize(path) >= 60_000_000:
         print(f"Wiki 60MB already at {path}")
         return path
 
-    print("Downloading Wikipedia...")
-    try:
-        from datasets import load_dataset
-        ds = load_dataset("wikipedia", "20220301.en", split="train",
-                          streaming=True)
-        with open(path, "w", encoding="utf-8") as f:
-            written = 0
-            for row in ds:
-                line = row["text"] + "\n\n"
-                f.write(line)
-                written += len(line)
-                if written >= 60_000_000:
-                    break
-        print(f"Written {written} bytes to {path}")
-    except Exception:
-        print("datasets failed, trying parquet...")
-        import pyarrow.parquet as pq
-        import requests
-        resp = requests.get(WIKI_URL, stream=True, timeout=120)
-        resp.raise_for_status()
-        tmp_parquet = "/tmp/wiki_temp.parquet"
-        total = 0
-        with open(tmp_parquet, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-                total += len(chunk)
-                if total >= 80_000_000:
-                    break
-        table = pq.read_table(tmp_parquet, columns=["text"])
-        text = "\n\n".join(table["text"].to_pylist())
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text[:60_000_000])
-        print(f"Written {os.path.getsize(path)} bytes to {path}")
-        os.remove(tmp_parquet)
+    print("Downloading Wikipedia via datasets...")
+    from datasets import load_dataset
+    ds = load_dataset("wikimedia/wikipedia", "20231101.en", split="train",
+                      streaming=True)
+    with open(path, "w", encoding="utf-8") as f:
+        written = 0
+        for row in ds:
+            line = row["text"] + "\n\n"
+            f.write(line)
+            written += len(line)
+            if written >= 60_000_000:
+                break
+    print(f"Written {written} bytes to {path}")
     return path
 
 
