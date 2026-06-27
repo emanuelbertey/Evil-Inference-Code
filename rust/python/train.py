@@ -128,20 +128,20 @@ def main():
     checkpoint_path = os.path.join(_DIR, "checkpoint.pt")
     safetensors_path = os.path.join(_DIR, "model_test.safetensors")
 
-    if hf.download_checkpoint(checkpoint_path):
-        ckpt = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(ckpt["model"])
-        global_step = ckpt.get("global_step", 0)
-        epoch = ckpt.get("epoch", 0)
-        block_idx = ckpt.get("block_idx", 5)
-        print(f"Resumed from HF checkpoint (step {global_step}, epoch {epoch}, block {block_idx})")
-    elif os.path.exists(checkpoint_path):
+    if os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model"])
         global_step = ckpt.get("global_step", 0)
         epoch = ckpt.get("epoch", 0)
         block_idx = ckpt.get("block_idx", 5)
         print(f"Resumed from local checkpoint (step {global_step}, epoch {epoch}, block {block_idx})")
+    elif hf.download_checkpoint(checkpoint_path):
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        global_step = ckpt.get("global_step", 0)
+        epoch = ckpt.get("epoch", 0)
+        block_idx = ckpt.get("block_idx", 5)
+        print(f"Resumed from HF checkpoint (step {global_step}, epoch {epoch}, block {block_idx})")
 
     stream_data = StreamingDataset(block_mb=3.0, block_idx=block_idx)
     stream_data.load_tokens(tokenizer)
