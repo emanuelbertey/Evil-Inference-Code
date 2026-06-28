@@ -13,15 +13,12 @@ class SparseAttentionMio3(Attention):
                          dropout, attn_logit_cap, bias)
         self.block_size = block_size
         self.num_selected_blocks = num_selected_blocks
-        self.chunk_size = 64
 
     def _sparse_forward(self, q, k, v):
         B, NH, S, HD = q.shape
         NK = self.num_kv_groups; HPG = NH // NK
         BSZ = self.block_size
         K = min(self.num_selected_blocks, max(1, (S + BSZ - 1) // BSZ))
-        CHUNK = self.chunk_size
-        scale = 1.0 / (HD ** 0.5)
         NB = max(1, (S + BSZ - 1) // BSZ)
 
         pad = NB * BSZ - S
@@ -31,39 +28,40 @@ class SparseAttentionMio3(Attention):
         k_b = k[:, :NK].reshape(B, NK, NB, BSZ, HD)
         v_b = v[:, :NK].reshape(B, NK, NB, BSZ, HD)
         k_comp = k_b.mean(dim=3)
+        q_g = q.reshape(B, NK, HPG, S, HD).mean(dim=2)
+
+        scores = (q_g @ k_comp.transpose(-2, -1)) * (HD ** -0.5)
+        if self.causal:
+            q_pos = torch.arange(S, device=q.device)
+            scores.masked_fill_(
+                (q_pos[:, None] < (torch.arange(NB, device=q.device) * BSZ)[None, :])
+                .unsqueeze(0).unsqueeze(0), float('-inf'))
+
+        _, topk = scores.topk(K, dim=-1)  # (B, NK, S, K)
 
         out = torch.zeros_like(q)
-        for start in range(0, S, CHUNK):
-            end = min(start + CHUNK, S)
-            q_chunk = q[:, :, start:end]
-            C = end - start
-
-            q_g = q_chunk.reshape(B, NK, HPG, C, HD).mean(dim=2)
-            scores = (q_g @ k_comp.transpose(-2, -1)) * scale
-            if self.causal:
-                q_pos = torch.arange(start, start + C, device=q.device)
-                scores.masked_fill_(
-                    (q_pos[:, None] < (torch.arange(NB, device=q.device) * BSZ)[None, :])
-                    .unsqueeze(0).unsqueeze(0), float('-inf'))
-
-            _, topk = scores.topk(K, dim=-1)
-
-            idx_b = torch.arange(B, device=q.device)[:, None, None, None]
-            k_sel = k_b[idx_b, torch.arange(NK, device=q.device)[None, :, None, None], topk]
-            v_sel = v_b[idx_b, torch.arange(NK, device=q.device)[None, :, None, None], topk]
-
-            k_sel = k_sel.repeat_interleave(HPG, dim=1)
-            v_sel = v_sel.repeat_interleave(HPG, dim=1)
-
-            q_flat = q_chunk.reshape(B * NH * C, 1, HD)
-            k_flat = k_sel.reshape(B * NH * C, K * BSZ, HD)
-            v_flat = v_sel.reshape(B * NH * C, K * BSZ, HD)
-
-            out_chunk = F.scaled_dot_product_attention(q_flat, k_flat, v_flat, is_causal=False)
-            out[:, :, start:end] = out_chunk.reshape(B, NH, C, HD)
-
-            del q_chunk, q_g, scores, topk, k_sel, v_sel, q_flat, k_flat, v_flat, out_chunk
-
+        for blk in range(NB):
+            mask = (topk == blk).any(dim=-1)
+            if not mask.any():
+                continue
+            for g in range(NK):
+                idx = mask[:, g]
+                if not idx.any():
+                    continue
+                q_grp = q[:, g*HPG:(g+1)*HPG]  # (B, HPG, S, HD)
+                kg = k_b[:, g, blk]  # (B, BSZ, HD)
+                vg = v_b[:, g, blk]
+                for h_off in range(HPG):
+                    h = g * HPG + h_off
+                    qh = q_grp[:, h_off]  # (B, S, HD)
+                    n = idx[0].sum().item()
+                    if n == 0:
+                        continue
+                    qm = qh[:, idx[0]].transpose(0, 1)  # (n, 1, HD)
+                    km = kg.expand(n, -1, -1)  # (n, BSZ, HD)
+                    vm = vg.expand(n, -1, -1)
+                    o = F.scaled_dot_product_attention(qm, km, vm, is_causal=False)
+                    out[0, h, idx[0]] = o.squeeze(1)
         return out[:, :, :S] if pad else out
 
     def forward(self, x, offset=0):
@@ -77,7 +75,7 @@ class SparseAttentionMio3(Attention):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if not self.training and q.shape[2] < 2048 and False:
+        if not self.training and q.shape[2] < 2048:
             return super().forward(x, offset)
 
         attn_output = self._sparse_forward(q, k, v)

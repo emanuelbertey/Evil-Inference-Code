@@ -25,6 +25,18 @@ class BPEWrapper:
         return self.tokenizer.decode(ids, skip_special_tokens=False)
 
 
+@torch.no_grad()
+def generate_sample(model, tokenizer, device, prompt="hola", max_new=50):
+    model.eval()
+    ids = tokenizer.encode(prompt).ids
+    x = torch.tensor([ids], dtype=torch.long, device=device)
+    out = model.generate(x, max_new_tokens=max_new, temperature=0.8, top_k=40, top_p=0.9,
+                         use_partial_rope=True, rotary_pct=0.25)
+    text = tokenizer.decode(out[0].tolist())
+    model.train()
+    return text
+
+
 def create_batch(tokens, start_idx, batch_size, seq_len, stride):
     x_indices = []
     y_indices = []
@@ -223,6 +235,10 @@ def main():
                 print(f"step {global_step} loss {avg_loss:.4f} lr {current_lr:.6f} {tps:.0f}t/s")
                 last_report_time = now
                 last_report_step = global_step
+
+            if global_step > 0 and global_step % 50 == 0:
+                sample = generate_sample(model, tokenizer, device, prompt="desde", max_new=30)
+                print(f"  >>> {sample}
 
             if time.time() - pusher.last_push >= pusher.interval:
                 torch.save({"global_step": global_step, "epoch": epoch, "block_idx": stream_data.block_idx,

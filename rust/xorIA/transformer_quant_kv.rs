@@ -150,10 +150,11 @@ impl<B: Backend> TransformerLM<B> {
         rotary_pct: f64,
     ) -> (Tensor<B, 3>, Vec<KVCache<B>>) {
         let x = self.embedding.forward(input);
+        let x0 = x.clone();
         let mut h = x;
         let mut new_caches = Vec::with_capacity(self.num_layers);
 
-        for (layer, cache) in self.transformer.layers.iter().zip(caches.into_iter()) {
+        for (i, (layer, cache)) in self.transformer.layers.iter().zip(caches.into_iter()).enumerate() {
             let residual = h.clone();
             let h_norm = layer.attn_norm.forward(h);
 
@@ -200,6 +201,12 @@ impl<B: Backend> TransformerLM<B> {
             let h_norm = layer.ffn_norm.forward(h);
             let h_ffn = layer.ffn.forward(h_norm);
             h = residual + h_ffn;
+
+            // x0 injection
+            if let Some(ref lambdas) = self.x0_lambdas {
+                let lam = lambdas.val().slice([0..1, i..(i+1)]).unsqueeze_dim::<3>(2);
+                h = h + lam * x0.clone();
+            }
 
             new_caches.push(new_cache);
         }
@@ -535,6 +542,7 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                     use_custom_tokenizer = true;
                     custom_tokenizer_path = py_tokenizer_file.clone();
                     modo_inferencia = true;
+                    rotary_pct = 0.25;
                     break;
                 } else {
                     println!("No se encontró modelo Python en {} o {}", pytorch_file, pytorch_mapping);
@@ -690,9 +698,18 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
                         }
                     }
                 }
+                // leer config del mapping (rotary_pct, use_x0)
+                if let Some(cfg) = mapping.get("config").and_then(|c| c.as_object()) {
+                    if let Some(rp) = cfg.get("rotary_pct").and_then(|v| v.as_f64()) {
+                        rotary_pct = rp;
+                    }
+                    if let Some(x0) = cfg.get("use_x0").and_then(|v| v.as_bool()) {
+                        use_x0 = x0;
+                    }
+                }
             }
         }
-        println!("  (auto-config desde mapping: d_model={}, layers={})", d_model, num_layers);
+        println!("  (auto-config desde mapping: d_model={}, layers={}, rotary_pct={}, use_x0={})", d_model, num_layers, rotary_pct, use_x0);
     }
 
     println!("\n── Configuración del Transformer ──");
@@ -760,12 +777,26 @@ pub fn transformer_quant_kv() -> Result<(), Box<dyn Error>> {
         if let Some(d) = tensors.get("x0_lambdas") {
             model.x0_lambdas = Some(burn::module::Param::from_tensor(Tensor::<MyBackend, 2>::from_data(d.clone(), &device)));
         }
-        println!("Modelo Python cargado!");
-        if let Some(layer0) = model.transformer.layers.first() {
-            let qkv = &layer0.attention.qkv;
-            println!("  debug: qkv head_dim={}, num_heads={}, num_kv_groups={}", qkv.head_dim, qkv.num_heads, qkv.num_kv_groups);
-            println!("  debug: q_proj.weight shape: {:?}", qkv.q_proj.weight.val().dims());
-            println!("  debug: k_proj.weight shape: {:?}", qkv.k_proj.weight.val().dims());
+        println!("╔══ MODELO PYTHON CARGADO ══╗");
+        println!("  capas:        {}", model.transformer.layers.len());
+        println!("  d_model:      {}", d_model);
+        println!("  vocab_size:   {}", vocab_size);
+        println!("  x0_lambdas:   {}", if model.x0_lambdas.is_some() { format!("Si [1,{}]", num_layers) } else { "No".to_string() });
+        println!("  head.weight:  [{}]", model.head.weight.val().dims().iter().map(|d| d.to_string()).collect::<Vec<_>>().join(","));
+        println!("  embedding:    [{}]", model.embedding.weight.val().dims().iter().map(|d| d.to_string()).collect::<Vec<_>>().join(","));
+        for (i, layer) in model.transformer.layers.iter().enumerate() {
+            let att = &layer.attention;
+            let hpg = att.num_heads / att.num_kv_groups;
+            println!("  capa {}:  {}Q × {}KV ({}Q/KV) head_dim={}", i, att.num_heads, att.num_kv_groups, hpg, att.head_dim);
+            println!("    q_proj:   [{}]  out={}{}", att.qkv.q_proj.weight.val().dims().iter().map(|d| d.to_string()).collect::<Vec<_>>().join(","),
+                att.qkv.num_heads * att.qkv.head_dim, if i==0 { format!("  ← {}heads×{}dim", att.qkv.num_heads, att.qkv.head_dim) } else { String::new() });
+            println!("    k_proj:   [{}]  out={}{}", att.qkv.k_proj.weight.val().dims().iter().map(|d| d.to_string()).collect::<Vec<_>>().join(","),
+                att.qkv.num_kv_groups * att.qkv.head_dim, if i==0 { format!("  ← {}KVgroups×{}dim", att.qkv.num_kv_groups, att.qkv.head_dim) } else { String::new() });
+            println!("    v_proj:   [{}]  out={}", att.qkv.v_proj.weight.val().dims().iter().map(|d| d.to_string()).collect::<Vec<_>>().join(","),
+                att.qkv.num_kv_groups * att.qkv.head_dim);
+            println!("    o_proj:   [{}]  in={}", att.o_proj.o_proj.weight.val().dims().iter().map(|d| d.to_string()).collect::<Vec<_>>().join(","),
+                att.o_proj.num_heads * att.o_proj.head_dim);
+            println!("    rope:     head_dim={}  max_seq={}", att.rope.head_dim, att.rope.max_seq_len);
         }
     } else if model_exists {
         println!("Cargando pesos del modelo desde {}...", model_file);

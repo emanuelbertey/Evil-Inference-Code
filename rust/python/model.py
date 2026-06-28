@@ -273,12 +273,13 @@ class TransformerLM(nn.Module):
         model.load_state_dict(state)
         return model
 
-    def export_for_rust(self, path: str, mapping_path: str = None):
+    def export_for_rust(self, path: str, mapping_path: str = None, rotary_pct: float = 0.25):
         """Export weights as safetensors + mapping.json for Rust loading.
 
         Args:
             path: output .safetensors file
             mapping_path: output mapping.json (default: same dir, _mapping.json suffix)
+            rotary_pct: partial RoPE percentage used in training
         """
         import json
         from safetensors.torch import save_file
@@ -297,8 +298,16 @@ class TransformerLM(nn.Module):
                 "burn_name": name,
             }
 
+        config = {
+            "d_model": self.d_model,
+            "num_layers": self.num_layers,
+            "vocab_size": self.vocab_size,
+            "rotary_pct": rotary_pct,
+            "use_x0": self.x0_lambdas is not None,
+        }
+
         with open(mapping_path, "w") as f:
-            json.dump({"parameters": mapping}, f, indent=2)
+            json.dump({"parameters": mapping, "config": config}, f, indent=2)
 
         print(f"Exported {len(state)} tensors to {path}")
         print(f"Mapping saved to {mapping_path}")
@@ -332,41 +341,43 @@ class TransformerLM(nn.Module):
         head_dim = self.transformer.layers[0].head_dim
         num_kv_groups = self.transformer.layers[0].num_kv_groups
 
-        # Initialize empty caches
         caches = [None] * num_layers
         offset = 0
         generated = input_ids.clone()
 
-        for _ in range(max_new_tokens):
-            if use_partial_rope:
-                logits, caches = self.forward_with_cache_partial(
-                    generated[:, -1:], offset, caches, rotary_pct
-                )
-            else:
-                logits, caches = self.forward_with_cache(
-                    generated[:, -1:], offset, caches
-                )
+        # Prefill full prompt -> get logits for last position
+        if use_partial_rope:
+            logits, caches = self.forward_with_cache_partial(
+                generated, offset, caches, rotary_pct
+            )
+        else:
+            logits, caches = self.forward_with_cache(
+                generated, offset, caches
+            )
+        offset = generated.shape[1]
+        next_logits = logits[:, -1, :]  # (B, vocab_size)
 
-            next_logits = logits[:, -1, :]  # (B, vocab_size)
+        for _ in range(max_new_tokens):
+            logits_for_sample = next_logits.clone()
 
             # Repetition penalty
             if repetition_penalty != 1.0:
                 for b in range(B):
                     prev_tokens = generated[b].tolist()
                     for t in set(prev_tokens):
-                        next_logits[b, t] /= repetition_penalty
+                        logits_for_sample[b, t] /= repetition_penalty
 
             # Temperature
-            next_logits = next_logits / max(temperature, 1e-6)
+            logits_for_sample = logits_for_sample / max(temperature, 1e-6)
 
             # Top-K
             if top_k > 0:
-                indices_to_remove = next_logits < torch.topk(next_logits, top_k)[0][:, -1:]
-                next_logits[indices_to_remove] = float("-inf")
+                indices_to_remove = logits_for_sample < torch.topk(logits_for_sample, top_k)[0][:, -1:]
+                logits_for_sample[indices_to_remove] = float("-inf")
 
             # Top-P
             if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
+                sorted_logits, sorted_indices = torch.sort(logits_for_sample, descending=True)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
                 sorted_indices_to_remove = cumulative_probs > top_p
                 sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
@@ -374,11 +385,22 @@ class TransformerLM(nn.Module):
                 indices_to_remove = sorted_indices_to_remove.scatter(
                     1, sorted_indices, sorted_indices_to_remove
                 )
-                next_logits[indices_to_remove] = float("-inf")
+                logits_for_sample[indices_to_remove] = float("-inf")
 
-            probs = F.softmax(next_logits, dim=-1)
+            probs = F.softmax(logits_for_sample, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=1)
             offset += 1
+
+            # Forward with the new token to get next logits
+            if use_partial_rope:
+                logits, caches = self.forward_with_cache_partial(
+                    next_token, offset - 1, caches, rotary_pct
+                )
+            else:
+                logits, caches = self.forward_with_cache(
+                    next_token, offset - 1, caches
+                )
+            next_logits = logits[:, -1, :]
 
         return generated

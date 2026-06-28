@@ -20,6 +20,8 @@ pub struct MappingEntry {
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct MappingFile {
     pub parameters: HashMap<String, MappingEntry>,
+    #[serde(default)]
+    pub config: Option<HashMap<String, serde_json::Value>>,
 }
 
 pub struct OwnedTensor {
@@ -96,6 +98,30 @@ impl PyTorchLoader {
             if let Some(d) = tensors.get(&format!("{}.attention.o_proj.o_proj.weight", prefix)) {
                 model.layers[i].attention.o_proj.o_proj.weight = burn::module::Param::from_tensor(Tensor::<B, 2>::from_data(d.clone(), device).transpose());
             }
+
+            // infer real head_dim/num_heads from loaded weight shapes
+            // after transpose, weight shape is [d_model, out_dim]
+            let k_out = model.layers[i].attention.qkv.k_proj.weight.val().dims()[1];
+            let hd = k_out / model.layers[i].attention.qkv.num_kv_groups;
+            let q_out = model.layers[i].attention.qkv.q_proj.weight.val().dims()[1];
+            let nh = q_out / hd;
+            model.layers[i].attention.qkv.head_dim = hd;
+            model.layers[i].attention.qkv.num_heads = nh;
+            model.layers[i].attention.num_heads = nh;
+            model.layers[i].attention.head_dim = hd;
+            model.layers[i].attention.o_proj.num_heads = nh;
+            model.layers[i].attention.o_proj.head_dim = hd;
+            // re-init RoPE with correct head_dim
+            let max_seq = model.layers[i].attention.max_seq_len;
+            let rope_base = model.layers[i].attention.rope_base;
+            let rope_scaling = model.layers[i].attention.rope_scaling;
+            let new_rope: crate::blocks::trasformer::rope::RoPE<B> = crate::blocks::trasformer::rope::RoPEConfig {
+                head_dim: hd,
+                max_seq_len: max_seq,
+                base: rope_base,
+                scaling_factor: rope_scaling,
+            }.init(device);
+            model.layers[i].attention.rope = new_rope;
 
             if let Some(d) = tensors.get(&format!("{}.ffn_norm.weight", prefix)) {
                 model.layers[i].ffn_norm.gamma = burn::module::Param::from_tensor(Tensor::<B, 1>::from_data(d.clone(), device));
@@ -175,7 +201,7 @@ impl PyTorchLoader {
         let bytes = serialize(&st_owned, &None)?;
         fs::write(output_path, &bytes)?;
 
-        let mapping_file = MappingFile { parameters: mapping_params };
+        let mapping_file = MappingFile { parameters: mapping_params, config: None };
         let mapping_json = serde_json::to_string_pretty(&mapping_file)?;
         fs::write(mapping_path, mapping_json)?;
 

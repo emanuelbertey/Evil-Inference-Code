@@ -99,6 +99,12 @@ pub struct Attention<B: Backend> {
     pub causal: bool,
     /// Optional soft-cap for logits
     pub attn_logit_cap: Option<f64>,
+    /// RoPE base frequency (stored for re-init after weight loading)
+    pub rope_base: f64,
+    /// RoPE scaling factor
+    pub rope_scaling: f64,
+    /// Max sequence length (stored for re-init)
+    pub max_seq_len: usize,
 }
 
 impl AttentionConfig {
@@ -136,6 +142,9 @@ impl AttentionConfig {
             head_dim: hd,
             causal: self.causal,
             attn_logit_cap: self.attn_logit_cap,
+            rope_base: self.rope_base,
+            rope_scaling: self.rope_scaling,
+            max_seq_len: self.max_seq_len,
         }
     }
 }
