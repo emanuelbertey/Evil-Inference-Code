@@ -172,67 +172,61 @@ def main():
     print(f"batch={batch_size} grad_accum={grad_accum} lr={lr} warmup={warmup_steps} epochs={num_epochs}")
     print(f"model: {num_params:,} params ({num_params/1e6:.2f}M)")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-
-    total_batches_per_block = (len(stream_data.get_tokens()) - seq_len) // seq_len
-    print(f"Tokens/block: {len(stream_data.get_tokens())} | Batches/block: {total_batches_per_block}")
+    total_tokens = len(stream_data.get_tokens())
+    tokens_per_epoch = (total_tokens - seq_len - 1) // seq_len
+    total_steps = (tokens_per_epoch // batch_size) * num_epochs
+    print(f"Tokens/block: {total_tokens} | Sequences/epoch: {tokens_per_epoch} | Steps/epoch: {tokens_per_epoch // batch_size} | Total steps: {total_steps}")
     print(f"LR: {lr} | Warmup: {warmup_steps} | Grad accum: {grad_accum}")
-
-    torch.save({"global_step": 0, "epoch": 0, "block_idx": 0,
-                "model": model.state_dict()}, checkpoint_path)
 
     model.train()
     start_time = time.time()
     last_report_time = start_time
     last_report_step = 0
-    
+
+    def get_lr(step):
+        if step < warmup_steps:
+            return lr * step / max(warmup_steps, 1)
+        t = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+        return lr * (0.2 + 0.8 * (1.0 + torch.tensor(3.14159 * t).cos().item()) / 2.0)
+
     while True:
         tokens = stream_data.get_tokens()
-        for batch_idx in range(0, total_batches_per_block, batch_size):
-            if global_step >= num_epochs * total_batches_per_block:
+        n_seq = (len(tokens) - seq_len - 1) // seq_len
+        for batch_start in range(0, n_seq, batch_size):
+            if global_step >= total_steps:
                 break
 
-            if global_step < warmup_steps:
-                current_lr = lr * global_step / max(warmup_steps, 1)
-            else:
-                t = (global_step - warmup_steps) / max(num_epochs * total_batches_per_block - warmup_steps, 1)
-                current_lr = lr * (0.2 + 0.8 * (1.0 + torch.tensor(3.14159 * t).cos().item()) / 2.0)
+            batch_end = min(batch_start + batch_size, n_seq)
+            actual_batch = batch_end - batch_start
 
+            x_list, y_list = [], []
+            for i in range(batch_start, batch_end):
+                start_idx = i * seq_len
+                x, y = create_batch(tokens, start_idx, 1, seq_len, seq_len)
+                x_list.append(x)
+                y_list.append(y)
+
+            x = torch.cat(x_list, dim=0).to(device)
+            y = torch.cat(y_list, dim=0).to(device)
+
+            current_lr = get_lr(global_step)
             for pg in optimizer.param_groups:
                 pg["lr"] = current_lr
 
-            micro_loss = 0.0
-            micro_count = 0
             optimizer.zero_grad()
+            logits = model.forward_train_partial_rope(x, rotary_pct=0.25)
+            loss = F.cross_entropy(logits.view(-1, tokenizer.vocab_size), y.view(-1))
+            loss.backward()
 
-            for micro in range(batch_size):
-                start_idx = (batch_idx + micro) * seq_len
-                if start_idx + seq_len + 1 >= len(tokens):
-                    break
-
-                x, y = create_batch(tokens, start_idx, 1, seq_len, seq_len)
-                x, y = x.to(device), y.to(device)
-
-                logits = model.forward_train_partial_rope(x, rotary_pct=0.25)
-                loss = F.cross_entropy(logits.view(-1, tokenizer.vocab_size), y.view(-1))
-
-                (loss / grad_accum).backward()
-                micro_loss += loss.item()
-                micro_count += 1
-
-                if (micro + 1) % grad_accum == 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
-                    optimizer.zero_grad()
-
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
             global_step += 1
 
             if global_step % 10 == 0:
-                avg_loss = micro_loss / max(micro_count, 1)
                 now = time.time()
-                tok = (global_step - last_report_step) * batch_size * seq_len
+                tok = (global_step - last_report_step) * actual_batch * seq_len
                 tps = tok / max(now - last_report_time, 0.001)
-                print(f"step {global_step} loss {avg_loss:.4f} lr {current_lr:.6f} {tps:.0f}t/s")
+                print(f"step {global_step} loss {loss.item():.4f} lr {current_lr:.6f} {tps:.0f}t/s")
                 last_report_time = now
                 last_report_step = global_step
 
@@ -241,8 +235,9 @@ def main():
                 print(f"  >>> {sample}")
 
             if time.time() - pusher.last_push >= pusher.interval:
-                torch.save({"global_step": global_step, "epoch": epoch, "block_idx": stream_data.block_idx,
-                            "model": model.state_dict()}, checkpoint_path)
+                ckpt = {"global_step": global_step, "epoch": epoch, "block_idx": stream_data.block_idx,
+                        "model": model.state_dict()}
+                torch.save(ckpt, checkpoint_path)
                 model.state_dict_to_safetensors(safetensors_path)
                 pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step)
 
@@ -251,8 +246,10 @@ def main():
             break
 
         stream_data.next_block()
-        total_batches_per_block = (len(stream_data.get_tokens()) - seq_len) // seq_len
-        print(f"Epoch {epoch} done. Loaded next block: {len(stream_data.get_tokens())} tokens")
+        total_tokens = len(stream_data.get_tokens())
+        n_seq = (total_tokens - seq_len - 1) // seq_len
+        total_steps = (n_seq // batch_size) * (num_epochs - epoch)
+        print(f"Epoch {epoch} done. Loaded next block: {total_tokens} tokens")
 
     # Final push
     hf.upload_checkpoint(checkpoint_path, safetensors_path, tok_path, global_step)

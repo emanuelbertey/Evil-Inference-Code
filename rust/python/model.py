@@ -192,6 +192,7 @@ class TransformerLM(nn.Module):
         """Forward with KV cache + partial RoPE."""
         x = self.embedding(input_ids)
         h = x
+        x0 = x.clone()
         new_caches = []
 
         for i, (layer, cache) in enumerate(zip(self.transformer.layers, caches)):
@@ -251,6 +252,10 @@ class TransformerLM(nn.Module):
             h_norm = layer.ffn_norm(h)
             h_ffn = layer.ffn(h_norm)
             h = residual + h_ffn
+
+            if self.x0_lambdas is not None:
+                lam = self.x0_lambdas[0, i]
+                h = h + lam * x0
 
             new_caches.append(new_cache)
 
