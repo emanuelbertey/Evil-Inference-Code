@@ -28,7 +28,7 @@ class BPEWrapper:
 @torch.no_grad()
 def generate_sample(model, tokenizer, device, prompt="hola", max_new=50):
     model.eval()
-    ids = tokenizer.encode(prompt).ids
+    ids = tokenizer.encode(prompt)
     x = torch.tensor([ids], dtype=torch.long, device=device)
     out = model.generate(x, max_new_tokens=max_new, temperature=0.8, top_k=40, top_p=0.9,
                          use_partial_rope=True, rotary_pct=0.25)
