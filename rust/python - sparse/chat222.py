@@ -16,9 +16,10 @@ _RUST = os.path.dirname(_DIR)
 tok = Tokenizer.from_file(os.path.join(_RUST, "tokenizer.json"))
 vocab = tok.get_vocab_size()
 
+MAX_BLOCKS = 320  # 320 * 128 = 40960 tokens máximo
 model = TransformerLM(
     vocab_size=vocab, d_model=768, num_layers=24, num_heads=12, num_kv_groups=4,
-    use_swiglu=True, use_x0=True, max_seq_len=4096,
+    use_swiglu=True, use_x0=True, max_seq_len=MAX_BLOCKS * 128,
     use_sparse_attn=True, num_selected_blocks=16,
 ).to(device).eval()
 state = load_file(os.path.join(_RUST, "model_test.safetensors"))
@@ -26,6 +27,8 @@ model.load_state_dict(state, strict=False)
 print(f"Cargado sparse model_test.safetensors ({len(state)} tensors)")
 
 # Patch SparseAttentionMio3._sparse_forward - q_len != kv_len, gather único sin loops
+_sparse_global_nb = [0]
+_sparse_stats = {}  # bloque -> contador de selecciones
 _orig_sparse_fn = SparseAttentionMio3._sparse_forward
 def _cached_sparse_forward(self, q, k, v):
     B, NH, S_q, HD = q.shape
@@ -34,6 +37,9 @@ def _cached_sparse_forward(self, q, k, v):
     _, _, S_kv, _ = k.shape
     NB = max(1, (S_kv + BSZ - 1) // BSZ)
     K = min(self.num_selected_blocks, NB)
+    if NB > _sparse_global_nb[0]:
+        _sparse_global_nb[0] = NB
+        print(f"bloque {NB-1} despachado, cache {NB} bloques ({S_kv} tokens)")
     pad = NB * BSZ - S_kv
     if pad:
         k = F.pad(k, (0, 0, 0, pad))
@@ -49,7 +55,20 @@ def _cached_sparse_forward(self, q, k, v):
         scores.masked_fill_(
             (q_pos[:, None] < (torch.arange(NB, device=q.device) * BSZ)[None, :])
             .unsqueeze(0).unsqueeze(0), float('-inf'))
-    _, topk = scores.topk(K, dim=-1)  # (B, NK, S_q, K)
+    # Bloque 0 y NB-1 siempre incluidos; el resto vía topk
+    if NB > K:
+        always = [i for i in (0, NB-1) if i < NB]
+        n_a = len(always)
+        scores2 = scores.clone()
+        scores2[..., always] = float('-inf')
+        _, topk_rest = scores2.topk(K - n_a, dim=-1)
+        a_t = torch.tensor(always, device=q.device).view(1,1,1,-1).expand(B, NK, S_q, -1)
+        topk = torch.cat([a_t, topk_rest], dim=-1)
+    else:
+        _, topk = scores.topk(K, dim=-1)
+    # Stats: contar cada selección bloque por grupo
+    for b in topk[0, :, 0].flatten().tolist():
+        _sparse_stats[b] = _sparse_stats.get(b, 0) + 1
     # Expandir topk y k_b de NK → NH para gather único
     topk = topk.repeat_interleave(HPG, dim=1)  # (B, NH, S_q, K)
     k_b = k_b.repeat_interleave(HPG, dim=1)  # (B, NH, NB, BSZ, HD)
@@ -163,6 +182,8 @@ model.forward_with_cache_partial = _patched_fwcp
 # Patch generate para hacer prefill + sparse loop
 @torch.no_grad()
 def gen(prompt, max_new, temp, top_k, top_p):
+    global _sparse_stats
+    _sparse_stats = {}
     ids = tok.encode(prompt).ids
     x = torch.tensor([ids], dtype=torch.long)
     B = 1
@@ -190,6 +211,9 @@ def gen(prompt, max_new, temp, top_k, top_p):
         logits, caches = _patched_fwcp(nt, offset, caches, 0.25)
         offset += 1
         next_logits = logits[:, -1, :]
+    if _sparse_stats:
+        top3 = sorted(_sparse_stats.items(), key=lambda x: -x[1])[:3]
+        print(f"  top bloques: " + ", ".join(f"blk{b}" for b,c in top3))
     return generated
 
 settings = {"max_new": 50, "temp": 1.0, "top_k": 50, "top_p": 0.95}
