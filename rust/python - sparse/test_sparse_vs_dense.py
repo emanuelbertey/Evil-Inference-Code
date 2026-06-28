@@ -1,4 +1,4 @@
-"""Compara logits sparse vs denso (sin padding)."""
+"""Compara logits sparse vs denso (con attn_mask en lugar de padding)."""
 import os, sys, math, torch
 import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,7 +22,6 @@ model = TransformerLM(vocab_size=vocab, d_model=768, num_layers=24, num_heads=12
 state = load_file(os.path.join(_RUST, "model_test.safetensors"))
 model.load_state_dict(state, strict=False)
 
-# Forward denso
 def fwd_dense(input_ids, offset, caches):
     x = model.embedding(input_ids); h = x; x0 = x.clone(); nc = []
     for i, (layer, cache) in enumerate(zip(model.transformer.layers, caches)):
@@ -42,20 +41,18 @@ def fwd_dense(input_ids, offset, caches):
         if model.x0_lambdas is not None: h = h + model.x0_lambdas[0,i] * x0
     return model.head(model.transformer.final_norm(h)), nc
 
-# Spars forward sin padding
-def _sparse_nowpad(self, q, k, v):
+def _sparse_mask(self, q, k, v):
     B, NH, S_q, HD = q.shape; NK = self.num_kv_groups; HPG = NH // NK; BSZ = self.block_size
     _, _, S_kv, _ = k.shape; NB = max(1, (S_kv+BSZ-1)//BSZ); K = min(self.num_selected_blocks, NB)
-    k_nk = k[:,:NK]; v_nk = v[:,:NK]
     if NB <= K:
-        ke = repeat_kv(k_nk, NH, NK); ve = repeat_kv(v_nk, NH, NK)
-        s = torch.matmul(q, ke.transpose(-2,-1)) / math.sqrt(HD)
+        s = torch.matmul(q, k.transpose(-2,-1)) / math.sqrt(HD)
         if self.causal and S_q > 1: s = s + torch.triu(torch.full((S_q,S_kv),float("-inf"),device=q.device),diagonal=S_kv-S_q+1).unsqueeze(0).unsqueeze(0)
-        return torch.matmul(F.softmax(s,dim=-1), ve)
-    # NB > K: bloques sin padding
-    k_blocks = [k_nk[:,:,blk*BSZ:min((blk+1)*BSZ,S_kv)] for blk in range(NB)]
-    v_blocks = [v_nk[:,:,blk*BSZ:min((blk+1)*BSZ,S_kv)] for blk in range(NB)]
-    k_comp = torch.stack([b.mean(dim=2) for b in k_blocks], dim=2)
+        return torch.matmul(F.softmax(s,dim=-1), v)
+    pad = NB*BSZ - S_kv; last_real = S_kv - (NB-1)*BSZ
+    kp = F.pad(k, (0,0,0,pad)); vp = F.pad(v, (0,0,0,pad))
+    knk = kp[:,::HPG]; vnk = vp[:,::HPG]
+    k_b = knk.reshape(B,NK,NB,BSZ,HD); v_b = vnk.reshape(B,NK,NB,BSZ,HD)
+    k_comp = k_b.mean(dim=3)
     q_g = q.reshape(B,NK,HPG,S_q,HD).mean(dim=2)
     scores = (q_g @ k_comp.transpose(-2,-1)) * (HD**-0.5)
     if self.causal and S_q > 1:
@@ -64,14 +61,15 @@ def _sparse_nowpad(self, q, k, v):
     s2 = scores.clone(); s2[...,always] = float('-inf')
     _, tr = s2.topk(K-n_a, dim=-1)
     topk = torch.cat([torch.tensor(always,device=q.device).view(1,1,1,-1).expand(B,NK,S_q,-1), tr], dim=-1)
-    sel_k, sel_v = [], []
-    for kk in range(K):
-        blk = topk[0,0,0,kk].item()
-        sel_k.append(repeat_kv(k_blocks[blk], NH, NK))
-        sel_v.append(repeat_kv(v_blocks[blk], NH, NK))
-    ks = torch.cat(sel_k, dim=2); vs = torch.cat(sel_v, dim=2)
-    return F.scaled_dot_product_attention(q.reshape(B*NH*S_q,1,HD), ks.reshape(B*NH*S_q,ks.shape[2],HD), vs.reshape(B*NH*S_q,vs.shape[2],HD), is_causal=False).reshape(B,NH,S_q,HD)
-SparseAttentionMio3._sparse_forward = _sparse_nowpad
+    topk_nh = topk.repeat_interleave(HPG, dim=1)
+    k_b_nh = k_b.repeat_interleave(HPG, dim=1); v_b_nh = v_b.repeat_interleave(HPG, dim=1)
+    idx_b = torch.arange(B,device=q.device)[:,None,None,None]; idx_h = torch.arange(NH,device=q.device)[None,:,None,None]
+    k_sel = k_b_nh[idx_b,idx_h,topk_nh]; v_sel = v_b_nh[idx_b,idx_h,topk_nh]
+    pos = torch.arange(BSZ,device=q.device).view(1,1,1,1,BSZ)
+    amask = ((topk_nh.unsqueeze(-1)==NB-1)&(pos>=last_real)).float()*float('-inf')
+    qf = q.reshape(B*NH*S_q,1,HD); kf = k_sel.reshape(B*NH*S_q,K*BSZ,HD); vf = v_sel.reshape(B*NH*S_q,K*BSZ,HD)
+    return F.scaled_dot_product_attention(qf, kf, vf, attn_mask=amask.reshape(B*NH*S_q,1,K*BSZ)).reshape(B,NH,S_q,HD)
+SparseAttentionMio3._sparse_forward = _sparse_mask
 
 def fwd_sparse(input_ids, offset, caches):
     x = model.embedding(input_ids); h = x; x0 = x.clone(); nc = []
@@ -92,25 +90,21 @@ def fwd_sparse(input_ids, offset, caches):
 prompt = "desde las"
 ids = torch.tensor([tok.encode(prompt).ids], dtype=torch.long)
 print(f"Prompt: '{prompt}' ({ids.shape[1]} tokens)")
-
 ld, _ = fwd_dense(ids, 0, [None]*model.num_layers)
 ls, _ = fwd_sparse(ids, 0, [None]*model.num_layers)
 diff = (ld - ls).abs().max().item()
-print(f"  1 bloque, NB<=K: diff = {diff:.10f}")
+print(f"  2 tokens (NB<=K): diff = {diff:.10f}")
 print(f"  Top-5 dense:  {ld[0,-1].topk(5).indices.tolist()}")
 print(f"  Top-5 sparse: {ls[0,-1].topk(5).indices.tolist()}")
 print(f"  IDÉNTICOS: {diff < 1e-6}")
 
-# Test con cache > 2048 para sparse real
-caches_d = [None]*model.num_layers; caches_s = [None]*model.num_layers
-pretend = torch.randint(0, 100, (1, 2049), dtype=torch.long)
-ld2, caches_d = fwd_dense(pretend, 0, caches_d)
-ls2, caches_s = fwd_sparse(pretend, 0, caches_s)
-print(f"\n  2049 tokens (17 bloques, NB>K): diff prefill = {(ld2-ls2).abs().max().item():.10f}")
-nt = torch.tensor([[123]], dtype=torch.long)
-ld3, _ = fwd_dense(nt, 2049, caches_d)
-ls3, _ = fwd_sparse(nt, 2049, caches_s)
-diff3 = (ld3 - ls3).abs().max().item()
-print(f"  1 token cache 2049: diff = {diff3:.10f}")
-print(f"  Top-5 dense:  {ld3[0,-1].topk(5).indices.tolist()}")
-print(f"  Top-5 sparse: {ls3[0,-1].topk(5).indices.tolist()}")
+prompt2 = "hola mundo que tal estas hoy"
+ids2 = torch.tensor([tok.encode(prompt2).ids], dtype=torch.long)
+print(f"\nPrompt: '{prompt2}' ({ids2.shape[1]} tokens)")
+ld2, _ = fwd_dense(ids2, 0, [None]*model.num_layers)
+ls2, _ = fwd_sparse(ids2, 0, [None]*model.num_layers)
+diff2 = (ld2 - ls2).abs().max().item()
+print(f"  7 tokens (NB<=K): diff = {diff2:.10f}")
+print(f"  Top-5 dense:  {ld2[0,-1].topk(5).indices.tolist()}")
+print(f"  Top-5 sparse: {ls2[0,-1].topk(5).indices.tolist()}")
+print(f"  IDÉNTICOS: {diff2 < 1e-6}")

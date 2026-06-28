@@ -37,54 +37,47 @@ def _cached_sparse_forward(self, q, k, v):
     _, _, S_kv, _ = k.shape
     NB = max(1, (S_kv + BSZ - 1) // BSZ)
     K = min(self.num_selected_blocks, NB)
-    pad = NB * BSZ - S_kv
-    if pad:
-        k = F.pad(k, (0, 0, 0, pad))
-        v = F.pad(v, (0, 0, 0, pad))
-    # Bloques (B, NK, NB, BSZ, HD)
-    k_b = k[:, :NK].reshape(B, NK, NB, BSZ, HD)
-    v_b = v[:, :NK].reshape(B, NK, NB, BSZ, HD)
-    # Si NB <= K: todos los bloques, sin score/selection
     if NB <= K:
         if NB > _sparse_global_nb[0]:
             _sparse_global_nb[0] = NB
-        topk = torch.arange(NB, device=q.device).view(1,1,1,-1).expand(B, NK, S_q, -1)
-    else:
-        if NB > _sparse_global_nb[0]:
-            _sparse_global_nb[0] = NB
-            print(f"bloque {NB-1} despachado, cache {NB} bloques ({S_kv} tokens)")
-        k_comp = k_b.mean(dim=3)
-        q_g = q.reshape(B, NK, HPG, S_q, HD).mean(dim=2)
-        scores = (q_g @ k_comp.transpose(-2, -1)) * (HD ** -0.5)
+        s = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(HD)
         if self.causal and S_q > 1:
-            q_pos = torch.arange(S_q, device=q.device)
-            scores.masked_fill_(
-                (q_pos[:, None] < (torch.arange(NB, device=q.device) * BSZ)[None, :])
-                .unsqueeze(0).unsqueeze(0), float('-inf'))
-        always = [i for i in (0, NB-1) if i < NB]
-        n_a = len(always)
-        scores2 = scores.clone()
-        scores2[..., always] = float('-inf')
-        _, topk_rest = scores2.topk(K - n_a, dim=-1)
-        a_t = torch.tensor(always, device=q.device).view(1,1,1,-1).expand(B, NK, S_q, -1)
-        topk = torch.cat([a_t, topk_rest], dim=-1)
+            s = s + torch.triu(torch.full((S_q, S_kv), float("-inf"), device=q.device), diagonal=S_kv - S_q + 1).unsqueeze(0).unsqueeze(0)
+        return torch.matmul(F.softmax(s, dim=-1), v)
+    if NB > _sparse_global_nb[0]:
+        _sparse_global_nb[0] = NB
+        print(f"bloque {NB-1} despachado, cache {NB} bloques ({S_kv} tokens)")
+    pad = NB * BSZ - S_kv
+    kp = F.pad(k, (0, 0, 0, pad)); vp = F.pad(v, (0, 0, 0, pad))
+    last_real = S_kv - (NB - 1) * BSZ
+    knk = kp[:, ::HPG]; vnk = vp[:, ::HPG]
+    k_b = knk.reshape(B, NK, NB, BSZ, HD); v_b = vnk.reshape(B, NK, NB, BSZ, HD)
+    k_comp = k_b.mean(dim=3)
+    q_g = q.reshape(B, NK, HPG, S_q, HD).mean(dim=2)
+    scores = (q_g @ k_comp.transpose(-2, -1)) * (HD ** -0.5)
+    if self.causal and S_q > 1:
+        scores.masked_fill_((torch.arange(S_q, device=q.device)[:, None] < (torch.arange(NB, device=q.device) * BSZ)[None, :]).unsqueeze(0).unsqueeze(0), float('-inf'))
+    always = [i for i in (0, NB-1) if i < NB]
+    n_a = len(always)
+    s2 = scores.clone(); s2[..., always] = float('-inf')
+    _, topk_rest = s2.topk(K - n_a, dim=-1)
+    a_t = torch.tensor(always, device=q.device).view(1,1,1,-1).expand(B, NK, S_q, -1)
+    topk = torch.cat([a_t, topk_rest], dim=-1)
     for b in topk[0, :, 0].flatten().tolist():
         _sparse_stats[b] = _sparse_stats.get(b, 0) + 1
-    # Expandir topk y k_b de NK → NH para gather único
-    topk = topk.repeat_interleave(HPG, dim=1)  # (B, NH, S_q, K)
-    k_b = k_b.repeat_interleave(HPG, dim=1)  # (B, NH, NB, BSZ, HD)
-    v_b = v_b.repeat_interleave(HPG, dim=1)
-    # Gather único (B, NH, S_q, K, BSZ, HD)
+    topk_nh = topk.repeat_interleave(HPG, dim=1)
+    k_b_nh = k_b.repeat_interleave(HPG, dim=1); v_b_nh = v_b.repeat_interleave(HPG, dim=1)
     idx_b = torch.arange(B, device=q.device)[:, None, None, None]
     idx_h = torch.arange(NH, device=q.device)[None, :, None, None]
-    k_sel = k_b[idx_b, idx_h, topk]
-    v_sel = v_b[idx_b, idx_h, topk]
-    # SDPA única con batch = B*NH*S_q
-    q_flat = q.reshape(B * NH * S_q, 1, HD)
-    k_flat = k_sel.reshape(B * NH * S_q, K * BSZ, HD)
-    v_flat = v_sel.reshape(B * NH * S_q, K * BSZ, HD)
-    out_flat = F.scaled_dot_product_attention(q_flat, k_flat, v_flat, is_causal=False)
-    return out_flat.reshape(B, NH, S_q, HD)
+    k_sel = k_b_nh[idx_b, idx_h, topk_nh]
+    v_sel = v_b_nh[idx_b, idx_h, topk_nh]
+    # atender_mask: posiciones padding del bloque NB-1 -> -inf
+    pos = torch.arange(BSZ, device=q.device).view(1, 1, 1, 1, BSZ)
+    amask = ((topk_nh.unsqueeze(-1) == NB - 1) & (pos >= last_real)).float() * float('-inf')
+    kf = k_sel.reshape(B * NH * S_q, K * BSZ, HD)
+    vf = v_sel.reshape(B * NH * S_q, K * BSZ, HD)
+    qf = q.reshape(B * NH * S_q, 1, HD)
+    return F.scaled_dot_product_attention(qf, kf, vf, attn_mask=amask.reshape(B * NH * S_q, 1, K * BSZ)).reshape(B, NH, S_q, HD)
 SparseAttentionMio3._sparse_forward = _cached_sparse_forward
 
 # Patch SparseAttentionMio3.forward para que SIEMPRE use sparse (incluso seq_len < 2048)
