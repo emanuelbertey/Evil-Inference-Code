@@ -30,7 +30,7 @@ def generate_sample(model, tokenizer, device, prompt="hola", max_new=50):
     model.eval()
     ids = tokenizer.encode(prompt)
     x = torch.tensor([ids], dtype=torch.long, device=device)
-    out = model.generate(x, max_new_tokens=max_new, temperature=0.8, top_k=40, top_p=0.9,
+    out = model.generate(x, max_new_tokens=max_new, temperature=1.0, top_k=50, top_p=0.95,
                          use_partial_rope=True, rotary_pct=0.25)
     text = tokenizer.decode(out[0].tolist())
     model.train()
@@ -86,7 +86,7 @@ def main():
     num_kv_groups = 4
     seq_len = 320
     batch_size = 32
-    grad_accum = 4
+    grad_accum = 1
     lr = 3e-4
     num_epochs = 20
     warmup_steps = 50
