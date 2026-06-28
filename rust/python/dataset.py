@@ -93,12 +93,19 @@ class StreamingDataset:
                 written += tam
 
     def next_block(self):
+        # Delete old block file to free disk
+        old_path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
+        if os.path.exists(old_path):
+            os.remove(old_path)
+        # Drop old tokens before loading new ones
+        self._tokens = None
         self.block_idx += 1
         self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
         self.download_block()
         with open(self._path, "r", encoding="utf-8") as f:
             text = f.read()
         self._tokens = self._tokenizer.encode(text)
+        text = None
         print(f"Loaded block {self.block_idx}: {len(self._tokens)} tokens")
 
     def get_tokens(self):

@@ -256,6 +256,7 @@ def main():
         if epoch >= num_epochs:
             break
 
+        tokens = None
         stream_data.next_block()
         total_tokens = len(stream_data.get_tokens())
         n_seq = (total_tokens - seq_len - 1) // seq_len
