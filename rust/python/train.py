@@ -85,8 +85,8 @@ def main():
     num_heads = 12
     num_kv_groups = 4
     seq_len = 320
-    batch_size = 32
-    grad_accum = 1
+    batch_size = 4
+    grad_accum = 4
     lr = 3e-4
     num_epochs = 20
     warmup_steps = 50
@@ -192,6 +192,7 @@ def main():
     while True:
         tokens = stream_data.get_tokens()
         n_seq = (len(tokens) - seq_len - 1) // seq_len
+        micro_step = 0
         for batch_start in range(0, n_seq, batch_size):
             if global_step >= total_steps:
                 break
@@ -209,37 +210,47 @@ def main():
             x = torch.cat(x_list, dim=0).to(device)
             y = torch.cat(y_list, dim=0).to(device)
 
-            current_lr = get_lr(global_step)
-            for pg in optimizer.param_groups:
-                pg["lr"] = current_lr
+            if micro_step == 0:
+                current_lr = get_lr(global_step)
+                for pg in optimizer.param_groups:
+                    pg["lr"] = current_lr
+                optimizer.zero_grad()
 
-            optimizer.zero_grad()
             logits = model.forward_train_partial_rope(x, rotary_pct=0.25)
             loss = F.cross_entropy(logits.view(-1, tokenizer.vocab_size), y.view(-1))
-            loss.backward()
+            loss.div(grad_accum).backward()
 
+            micro_step += 1
+
+            if micro_step >= grad_accum:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                global_step += 1
+                micro_step = 0
+
+                if global_step % 10 == 0:
+                    now = time.time()
+                    tok = (global_step - last_report_step) * batch_size * grad_accum * seq_len
+                    tps = tok / max(now - last_report_time, 0.001)
+                    print(f"step {global_step} loss {loss.item():.4f} lr {current_lr:.6f} {tps:.0f}t/s")
+                    last_report_time = now
+                    last_report_step = global_step
+
+                if global_step % 50 == 0:
+                    sample = generate_sample(model, tokenizer, device, prompt="desde", max_new=30)
+                    print(f"  >>> {sample}")
+
+                if time.time() - pusher.last_push >= pusher.interval:
+                    ckpt = {"global_step": global_step, "epoch": epoch, "block_idx": stream_data.block_idx,
+                            "model": model.state_dict()}
+                    torch.save(ckpt, checkpoint_path)
+                    model.state_dict_to_safetensors(safetensors_path)
+                    pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step)
+
+        if micro_step > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             global_step += 1
-
-            if global_step % 10 == 0:
-                now = time.time()
-                tok = (global_step - last_report_step) * actual_batch * seq_len
-                tps = tok / max(now - last_report_time, 0.001)
-                print(f"step {global_step} loss {loss.item():.4f} lr {current_lr:.6f} {tps:.0f}t/s")
-                last_report_time = now
-                last_report_step = global_step
-
-            if global_step > 0 and global_step % 50 == 0:
-                sample = generate_sample(model, tokenizer, device, prompt="desde", max_new=30)
-                print(f"  >>> {sample}")
-
-            if time.time() - pusher.last_push >= pusher.interval:
-                ckpt = {"global_step": global_step, "epoch": epoch, "block_idx": stream_data.block_idx,
-                        "model": model.state_dict()}
-                torch.save(ckpt, checkpoint_path)
-                model.state_dict_to_safetensors(safetensors_path)
-                pusher.maybe_push(checkpoint_path, safetensors_path, tok_path, global_step)
 
         epoch += 1
         if epoch >= num_epochs:
