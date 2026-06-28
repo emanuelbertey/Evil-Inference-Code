@@ -226,11 +226,12 @@ impl<B: Backend> TransformerLM<B> {
     ) -> (Tensor<B, 3>, Vec<KuantKVCache>) {
         let device = input.device();
         let mut h = self.embedding.forward(input);
+        let x0 = h.clone();
         let [batch, _seq, _d] = h.dims();
         assert_eq!(batch, 1, "KuantKVCache requires batch=1");
 
         let mut new_caches = Vec::with_capacity(self.num_layers);
-        for (layer, mut cache) in self.transformer.layers.iter().zip(caches.into_iter()) {
+        for (i, (layer, mut cache)) in self.transformer.layers.iter().zip(caches.into_iter()).enumerate() {
             // Pre-Norm → Attention
             let residual = h.clone();
             let h_norm = layer.attn_norm.forward(h);
@@ -253,6 +254,11 @@ impl<B: Backend> TransformerLM<B> {
             let h_norm = layer.ffn_norm.forward(h);
             let h_ffn = layer.ffn.forward(h_norm);
             h = residual + h_ffn;
+
+            if let Some(ref lambdas) = self.x0_lambdas {
+                let lam = lambdas.val().slice([0..1, i..(i+1)]).unsqueeze_dim::<3>(2);
+                h = h + lam * x0.clone();
+            }
 
             new_caches.push(cache);
         }
