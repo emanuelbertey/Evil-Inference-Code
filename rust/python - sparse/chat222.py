@@ -1,0 +1,226 @@
+"""Chat con atención dispersa sparse MIO v3 desde model_test.safetensors."""
+import os, sys, math, time, torch
+import torch.nn.functional as F
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from model import TransformerLM
+from sparse import SparseAttentionMio3
+from safetensors.torch import load_file
+from tokenizers import Tokenizer
+from cache_kv import KVCache
+from attention import repeat_kv
+from rope import apply_rope_partial
+
+device = torch.device("cpu")
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_RUST = os.path.dirname(_DIR)
+tok = Tokenizer.from_file(os.path.join(_RUST, "tokenizer.json"))
+vocab = tok.get_vocab_size()
+
+model = TransformerLM(
+    vocab_size=vocab, d_model=768, num_layers=24, num_heads=12, num_kv_groups=4,
+    use_swiglu=True, use_x0=True, max_seq_len=4096,
+    use_sparse_attn=True, num_selected_blocks=16,
+).to(device).eval()
+state = load_file(os.path.join(_RUST, "model_test.safetensors"))
+model.load_state_dict(state, strict=False)
+print(f"Cargado sparse model_test.safetensors ({len(state)} tensors)")
+
+# Patch SparseAttentionMio3._sparse_forward - q_len != kv_len, gather único sin loops
+_orig_sparse_fn = SparseAttentionMio3._sparse_forward
+def _cached_sparse_forward(self, q, k, v):
+    B, NH, S_q, HD = q.shape
+    NK = self.num_kv_groups; HPG = NH // NK
+    BSZ = self.block_size
+    _, _, S_kv, _ = k.shape
+    NB = max(1, (S_kv + BSZ - 1) // BSZ)
+    K = min(self.num_selected_blocks, NB)
+    pad = NB * BSZ - S_kv
+    if pad:
+        k = F.pad(k, (0, 0, 0, pad))
+        v = F.pad(v, (0, 0, 0, pad))
+    # Bloques (B, NK, NB, BSZ, HD) + compresión
+    k_b = k[:, :NK].reshape(B, NK, NB, BSZ, HD)
+    v_b = v[:, :NK].reshape(B, NK, NB, BSZ, HD)
+    k_comp = k_b.mean(dim=3)  # (B, NK, NB, HD)
+    q_g = q.reshape(B, NK, HPG, S_q, HD).mean(dim=2)  # (B, NK, S_q, HD)
+    scores = (q_g @ k_comp.transpose(-2, -1)) * (HD ** -0.5)  # (B, NK, S_q, NB)
+    if self.causal and S_q > 1:
+        q_pos = torch.arange(S_q, device=q.device)
+        scores.masked_fill_(
+            (q_pos[:, None] < (torch.arange(NB, device=q.device) * BSZ)[None, :])
+            .unsqueeze(0).unsqueeze(0), float('-inf'))
+    _, topk = scores.topk(K, dim=-1)  # (B, NK, S_q, K)
+    # Expandir topk y k_b de NK → NH para gather único
+    topk = topk.repeat_interleave(HPG, dim=1)  # (B, NH, S_q, K)
+    k_b = k_b.repeat_interleave(HPG, dim=1)  # (B, NH, NB, BSZ, HD)
+    v_b = v_b.repeat_interleave(HPG, dim=1)
+    # Gather único (B, NH, S_q, K, BSZ, HD)
+    idx_b = torch.arange(B, device=q.device)[:, None, None, None]
+    idx_h = torch.arange(NH, device=q.device)[None, :, None, None]
+    k_sel = k_b[idx_b, idx_h, topk]
+    v_sel = v_b[idx_b, idx_h, topk]
+    # SDPA única con batch = B*NH*S_q
+    q_flat = q.reshape(B * NH * S_q, 1, HD)
+    k_flat = k_sel.reshape(B * NH * S_q, K * BSZ, HD)
+    v_flat = v_sel.reshape(B * NH * S_q, K * BSZ, HD)
+    out_flat = F.scaled_dot_product_attention(q_flat, k_flat, v_flat, is_causal=False)
+    return out_flat.reshape(B, NH, S_q, HD)
+SparseAttentionMio3._sparse_forward = _cached_sparse_forward
+
+# Patch SparseAttentionMio3.forward para que SIEMPRE use sparse (incluso seq_len < 2048)
+def _always_sparse_forward(self, x, offset=0):
+    q, k, v = self.qkv(x)
+    q, k = self.rope(q, k, offset)
+    k = repeat_kv(k, self.num_heads, self.num_kv_groups)
+    v = repeat_kv(v, self.num_heads, self.num_kv_groups)
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    attn_output = self._sparse_forward(q, k, v)
+    attn_output = attn_output.transpose(1, 2)
+    return self.o_proj(attn_output)
+SparseAttentionMio3.forward = _always_sparse_forward
+
+# Patch forward_with_cache_partial para usar sparse + x0
+def _patched_fwcp(input_ids, offset, caches, rotary_pct=0.5):
+    x = model.embedding(input_ids)
+    h = x
+    x0 = x.clone()
+    new_caches = []
+    for i, (layer, cache) in enumerate(zip(model.transformer.layers, caches)):
+        residual = h
+        h_norm = layer.attn_norm(h)
+
+        if layer.use_sparse_attn:
+            q, k_new, v_new = layer.attention.qkv(h_norm)
+            q, k_new = apply_rope_partial(
+                q, k_new, offset, rotary_pct,
+                layer.attention.rope.inv_freq, layer.attention.rope.cos_cache,
+                layer.attention.rope.sin_cache, layer.attention.head_dim,
+                layer.attention.rope.max_seq_len,
+            )
+            if cache is not None:
+                k_full = torch.cat([cache.cached_k, k_new], dim=1)
+                v_full = torch.cat([cache.cached_v, v_new], dim=1)
+            else:
+                k_full = k_new
+                v_full = v_new
+            new_cache = KVCache(cached_k=k_full.clone(), cached_v=v_full.clone())
+            # repeat KV + transpose → (B, NH, S, HD)
+            k_exp = repeat_kv(k_full, layer.num_heads, layer.num_kv_groups)
+            v_exp = repeat_kv(v_full, layer.num_heads, layer.num_kv_groups)
+            q_t = q.transpose(1, 2)
+            k_t = k_exp.transpose(1, 2)
+            v_t = v_exp.transpose(1, 2)
+            attn_out = layer.attention._sparse_forward(q_t, k_t, v_t)
+            attn_out = attn_out.transpose(1, 2)
+            h_attn = layer.attention.o_proj(attn_out)
+        else:
+            q, k_new, v_new = layer.attention.qkv(h_norm)
+            q, k_new = apply_rope_partial(
+                q, k_new, offset, rotary_pct,
+                layer.attention.rope.inv_freq, layer.attention.rope.cos_cache,
+                layer.attention.rope.sin_cache, layer.attention.head_dim,
+                layer.attention.rope.max_seq_len,
+            )
+            if cache is not None:
+                k_full = torch.cat([cache.cached_k, k_new], dim=1)
+                v_full = torch.cat([cache.cached_v, v_new], dim=1)
+            else:
+                k_full = k_new
+                v_full = v_new
+            new_cache = KVCache(cached_k=k_full.clone(), cached_v=v_full.clone())
+            k_exp = repeat_kv(k_full, layer.num_heads, layer.num_kv_groups)
+            v_exp = repeat_kv(v_full, layer.num_heads, layer.num_kv_groups)
+            q_t = q.transpose(1, 2)
+            k_t = k_exp.transpose(1, 2)
+            v_t = v_exp.transpose(1, 2)
+            scale = math.sqrt(layer.head_dim)
+            scores = torch.matmul(q_t, k_t.transpose(-2, -1)) / scale
+            if layer.attn_logit_cap is not None:
+                scores = torch.tanh(scores / layer.attn_logit_cap) * layer.attn_logit_cap
+            if layer.causal and q_t.shape[2] > 1:
+                mask = torch.triu(torch.full((q_t.shape[2], k_t.shape[2]), float("-inf"), device=h.device), diagonal=k_t.shape[2] - q_t.shape[2] + 1)
+                scores = scores + mask.unsqueeze(0).unsqueeze(0)
+            attn_w = F.softmax(scores, dim=-1)
+            attn_w = layer.attention.attn_dropout(attn_w)
+            attn_out = torch.matmul(attn_w, v_t)
+            attn_out = attn_out.transpose(1, 2)
+            h_attn = layer.attention.o_proj(attn_out)
+
+        h = residual + h_attn
+        residual = h
+        h_norm = layer.ffn_norm(h)
+        h_ffn = layer.ffn(h_norm)
+        h = residual + h_ffn
+        if model.x0_lambdas is not None:
+            h = h + model.x0_lambdas[0, i] * x0
+        new_caches.append(new_cache)
+    h = model.transformer.final_norm(h)
+    return model.head(h), new_caches
+model.forward_with_cache_partial = _patched_fwcp
+
+# Patch generate para hacer prefill + sparse loop
+@torch.no_grad()
+def gen(prompt, max_new, temp, top_k, top_p):
+    ids = tok.encode(prompt).ids
+    x = torch.tensor([ids], dtype=torch.long)
+    B = 1
+    caches = [None] * model.num_layers
+    offset = 0
+    generated = x.clone()
+    # Prefill completo
+    logits, caches = _patched_fwcp(generated, offset, caches, 0.25)
+    offset = generated.shape[1]
+    next_logits = logits[:, -1, :]
+    for _ in range(max_new):
+        l2 = next_logits.clone() / max(temp, 1e-6)
+        if top_k > 0:
+            l2[torch.topk(l2, top_k)[0][:, -1:] > l2] = float("-inf")
+        if top_p < 1.0:
+            s, si = torch.sort(l2, descending=True)
+            cp = torch.cumsum(F.softmax(s, dim=-1), dim=-1)
+            sr = cp > top_p
+            sr[:, 1:] = sr[:, :-1].clone()
+            sr[:, 0] = 0
+            l2[sr.scatter(1, si, sr)] = float("-inf")
+        p = F.softmax(l2, dim=-1)
+        nt = torch.multinomial(p, 1)
+        generated = torch.cat([generated, nt], dim=1)
+        logits, caches = _patched_fwcp(nt, offset, caches, 0.25)
+        offset += 1
+        next_logits = logits[:, -1, :]
+    return generated
+
+settings = {"max_new": 50, "temp": 1.0, "top_k": 50, "top_p": 0.95}
+print("Sparse Chat MIO v3: block_size=128, num_selected_blocks=16, cache 4096")
+print("  /help  /len N  /temp N  /top N  /top_p N")
+
+while True:
+    prompt = input("\n> ").strip()
+    if not prompt:
+        continue
+    parts = prompt.split()
+    cmd = parts[0].lower()
+    if cmd in ("help", "ayuda"):
+        print(f"max={settings['max_new']} temp={settings['temp']} top_k={settings['top_k']} top_p={settings['top_p']}")
+        continue
+    if cmd in ("max", "len") and len(parts) > 1 and parts[1].isdigit():
+        settings["max_new"] = max(1, int(parts[1]))
+        continue
+    if cmd == "temp" and len(parts) > 1:
+        settings["temp"] = max(0.01, float(parts[1]))
+        continue
+    if cmd in ("top_k", "top") and len(parts) > 1 and parts[1].isdigit():
+        settings["top_k"] = max(1, int(parts[1]))
+        continue
+    if cmd == "top_p" and len(parts) > 1:
+        settings["top_p"] = max(0.01, min(1.0, float(parts[1])))
+        continue
+    t0 = time.time()
+    out = gen(prompt, settings["max_new"], settings["temp"], settings["top_k"], settings["top_p"])
+    dt = time.time() - t0
+    n = out.shape[1] - len(tok.encode(prompt).ids)
+    print(tok.decode(out[0].tolist()))
+    if n > 0:
+        print(f"[{n} tokens en {dt:.2f}s = {n/dt:.1f} tok/s]")
