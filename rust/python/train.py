@@ -85,8 +85,8 @@ def main():
     num_heads = 12
     num_kv_groups = 4
     seq_len = 512
-    batch_size = 4
-    grad_accum = 4
+    batch_size = 8
+    grad_accum = 8
     lr = 3e-4
     num_epochs = 200000
     warmup_steps = 50
