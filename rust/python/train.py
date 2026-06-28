@@ -238,7 +238,7 @@ def main():
 
             if global_step > 0 and global_step % 50 == 0:
                 sample = generate_sample(model, tokenizer, device, prompt="desde", max_new=30)
-                print(f"  >>> {sample}
+                print(f"  >>> {sample}")
 
             if time.time() - pusher.last_push >= pusher.interval:
                 torch.save({"global_step": global_step, "epoch": epoch, "block_idx": stream_data.block_idx,
