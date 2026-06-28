@@ -1,5 +1,5 @@
 """Chat con atención dispersa sparse MIO v3 desde model_test.safetensors."""
-import os, sys, math, time, torch
+import os, sys, math, time, torch, re
 import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import TransformerLM
@@ -37,26 +37,30 @@ def _cached_sparse_forward(self, q, k, v):
     _, _, S_kv, _ = k.shape
     NB = max(1, (S_kv + BSZ - 1) // BSZ)
     K = min(self.num_selected_blocks, NB)
-    if NB > _sparse_global_nb[0]:
-        _sparse_global_nb[0] = NB
-        print(f"bloque {NB-1} despachado, cache {NB} bloques ({S_kv} tokens)")
     pad = NB * BSZ - S_kv
     if pad:
         k = F.pad(k, (0, 0, 0, pad))
         v = F.pad(v, (0, 0, 0, pad))
-    # Bloques (B, NK, NB, BSZ, HD) + compresión
+    # Bloques (B, NK, NB, BSZ, HD)
     k_b = k[:, :NK].reshape(B, NK, NB, BSZ, HD)
     v_b = v[:, :NK].reshape(B, NK, NB, BSZ, HD)
-    k_comp = k_b.mean(dim=3)  # (B, NK, NB, HD)
-    q_g = q.reshape(B, NK, HPG, S_q, HD).mean(dim=2)  # (B, NK, S_q, HD)
-    scores = (q_g @ k_comp.transpose(-2, -1)) * (HD ** -0.5)  # (B, NK, S_q, NB)
-    if self.causal and S_q > 1:
-        q_pos = torch.arange(S_q, device=q.device)
-        scores.masked_fill_(
-            (q_pos[:, None] < (torch.arange(NB, device=q.device) * BSZ)[None, :])
-            .unsqueeze(0).unsqueeze(0), float('-inf'))
-    # Bloque 0 y NB-1 siempre incluidos; el resto vía topk
-    if NB > K:
+    # Si NB <= K: todos los bloques, sin score/selection
+    if NB <= K:
+        if NB > _sparse_global_nb[0]:
+            _sparse_global_nb[0] = NB
+        topk = torch.arange(NB, device=q.device).view(1,1,1,-1).expand(B, NK, S_q, -1)
+    else:
+        if NB > _sparse_global_nb[0]:
+            _sparse_global_nb[0] = NB
+            print(f"bloque {NB-1} despachado, cache {NB} bloques ({S_kv} tokens)")
+        k_comp = k_b.mean(dim=3)
+        q_g = q.reshape(B, NK, HPG, S_q, HD).mean(dim=2)
+        scores = (q_g @ k_comp.transpose(-2, -1)) * (HD ** -0.5)
+        if self.causal and S_q > 1:
+            q_pos = torch.arange(S_q, device=q.device)
+            scores.masked_fill_(
+                (q_pos[:, None] < (torch.arange(NB, device=q.device) * BSZ)[None, :])
+                .unsqueeze(0).unsqueeze(0), float('-inf'))
         always = [i for i in (0, NB-1) if i < NB]
         n_a = len(always)
         scores2 = scores.clone()
@@ -64,9 +68,6 @@ def _cached_sparse_forward(self, q, k, v):
         _, topk_rest = scores2.topk(K - n_a, dim=-1)
         a_t = torch.tensor(always, device=q.device).view(1,1,1,-1).expand(B, NK, S_q, -1)
         topk = torch.cat([a_t, topk_rest], dim=-1)
-    else:
-        _, topk = scores.topk(K, dim=-1)
-    # Stats: contar cada selección bloque por grupo
     for b in topk[0, :, 0].flatten().tolist():
         _sparse_stats[b] = _sparse_stats.get(b, 0) + 1
     # Expandir topk y k_b de NK → NH para gather único
@@ -180,22 +181,25 @@ def _patched_fwcp(input_ids, offset, caches, rotary_pct=0.5):
 model.forward_with_cache_partial = _patched_fwcp
 
 # Patch generate para hacer prefill + sparse loop
+_caches = [None] * model.num_layers
+_offset = 0
 @torch.no_grad()
-def gen(prompt, max_new, temp, top_k, top_p):
-    global _sparse_stats
+def gen(prompt, max_new, temp, top_k, top_p, rep_penalty=1.1):
+    global _sparse_stats, _caches, _sparse_global_nb, _offset
     _sparse_stats = {}
+    _sparse_global_nb = [0]
     ids = tok.encode(prompt).ids
     x = torch.tensor([ids], dtype=torch.long)
-    B = 1
-    caches = [None] * model.num_layers
-    offset = 0
     generated = x.clone()
-    # Prefill completo
-    logits, caches = _patched_fwcp(generated, offset, caches, 0.25)
-    offset = generated.shape[1]
+    # Prefill con cache persistente y offset global
+    logits, _caches = _patched_fwcp(generated, _offset, _caches, 0.25)
+    _offset = _offset + generated.shape[1]
     next_logits = logits[:, -1, :]
     for _ in range(max_new):
         l2 = next_logits.clone() / max(temp, 1e-6)
+        if rep_penalty != 1.0:
+            for t in set(generated[0].tolist()):
+                l2[0, t] /= rep_penalty
         if top_k > 0:
             l2[torch.topk(l2, top_k)[0][:, -1:] > l2] = float("-inf")
         if top_p < 1.0:
@@ -208,12 +212,13 @@ def gen(prompt, max_new, temp, top_k, top_p):
         p = F.softmax(l2, dim=-1)
         nt = torch.multinomial(p, 1)
         generated = torch.cat([generated, nt], dim=1)
-        logits, caches = _patched_fwcp(nt, offset, caches, 0.25)
-        offset += 1
+        logits, _caches = _patched_fwcp(nt, _offset, _caches, 0.25)
+        _offset += 1
         next_logits = logits[:, -1, :]
     if _sparse_stats:
         top3 = sorted(_sparse_stats.items(), key=lambda x: -x[1])[:3]
-        print(f"  top bloques: " + ", ".join(f"blk{b}" for b,c in top3))
+        nb_total = max(_sparse_stats.keys()) + 1
+        print(f"  {nb_total} bloques | top: " + ", ".join(f"blk{b}" for b,c in top3))
     return generated
 
 settings = {"max_new": 50, "temp": 1.0, "top_k": 50, "top_p": 0.95}
