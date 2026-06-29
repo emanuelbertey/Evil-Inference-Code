@@ -59,9 +59,29 @@ out = o_proj(out.reshape(NH*hd))  # solo head_dim, no qk_dim
 
 Esto es porque `scaled_dot_product_attention(Q,K,V)` produce salida con la última dim de `V` = `head_dim`, no `qk_dim`.
 
-## Weight tying
+## Weight tying — Una sola tabla entrada/salida
 
-`head.weight = embedding.weight` — sharing entre embedding y lm_head.
+`embedding.weight` es **una** tabla de `(vocab_size, d_model)`. Sirve pa'las dos:
+
+- **Entrada**: `embedding(token_id)` → lookup por ID, devuelve la fila
+- **Salida**: `h @ weight.T` → producto punto contra todas las filas → logits
+
+`head.weight = embedding.weight` hace que ambos punten al **mismo** tensor. Ni copia ni referencia distinta — es el mismo `Parameter`.
+
+No se duplica nada. El modelo aprende un único vector por token, usado tanto para representarlo como para predecirlo.
+
+### ⚠️ Inicialización del embedding
+
+`nn.Embedding(vocab_size, d_model)` en PyTorch inicia los pesos con **N(0, 1)** (no con uniform chico como suele creerse). Con weight tying el head hereda esos pesos enormes, y los logits explotan:
+
+- `h` después de RMSNorm tiene `σ ≈ 1`
+- `head.weight` con `σ ≈ 1` → logits `σ ≈ √d_model ≈ 11.3` → loss inicial ~120+ en vez de `ln(vocab) ≈ 9.68`
+
+**Fix:** en `model.py` se reinit el embedding con `nn.init.normal_(self.embedding.weight, mean=0, std=1/math.sqrt(d_model))`.
+
+Con `std=1/√d_model`:
+- `h` σ ≈ 1, `head.weight` σ ≈ 1/√128 ≈ 0.088
+- logits σ ≈ √d_model * 1/√d_model = 1 → loss inicial ≈ ln(vocab) ≈ 9.68 ✓
 
 ## Train
 

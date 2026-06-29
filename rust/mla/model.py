@@ -64,6 +64,7 @@ class TransformerLM(nn.Module):
         self.num_layers = num_layers
 
         self.embedding = nn.Embedding(vocab_size, d_model)
+        nn.init.normal_(self.embedding.weight, mean=0, std=1/math.sqrt(d_model))
         self.transformer = Transformer(
             num_layers=num_layers,
             d_model=d_model,
