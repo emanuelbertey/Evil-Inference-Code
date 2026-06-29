@@ -138,21 +138,25 @@ def main():
     if not test_mode:
         loaded = False
         if os.path.exists(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location=device)
+            ckpt = torch.load(ckpt_path, map_location='cpu')
             ckpt["model"].pop("head.emb_weight", None)
             model.load_state_dict(ckpt["model"], strict=False)
             step = ckpt.get("step", 0)
             epoch = ckpt.get("epoch", 0)
             ckpt_block = ckpt.get("block", 0)
+            del ckpt
+            torch.cuda.empty_cache()
             print(f"Loaded checkpoint: step {step} epoch {epoch} block {ckpt_block}")
             loaded = True
         elif hf and hf.download_checkpoint(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location=device)
+            ckpt = torch.load(ckpt_path, map_location='cpu')
             ckpt["model"].pop("head.emb_weight", None)
             model.load_state_dict(ckpt["model"], strict=False)
             step = ckpt.get("step", 0)
             epoch = ckpt.get("epoch", 0)
             ckpt_block = ckpt.get("block", 0)
+            del ckpt
+            torch.cuda.empty_cache()
             print(f"Loaded HF checkpoint: step {step} epoch {epoch} block {ckpt_block}")
             loaded = True
 
