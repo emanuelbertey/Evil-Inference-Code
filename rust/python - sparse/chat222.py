@@ -20,7 +20,7 @@ MAX_BLOCKS = 320  # 320 * 128 = 40960 tokens máximo
 model = TransformerLM(
     vocab_size=vocab, d_model=768, num_layers=24, num_heads=12, num_kv_groups=4,
     use_swiglu=True, use_x0=True, max_seq_len=MAX_BLOCKS * 128,
-    use_sparse_attn=True, num_selected_blocks=16,
+    use_sparse_attn=True, num_selected_blocks=4,
 ).to(device).eval()
 state = load_file(os.path.join(_RUST, "model_test.safetensors"))
 model.load_state_dict(state, strict=False)
@@ -40,6 +40,8 @@ def _cached_sparse_forward(self, q, k, v):
     if NB <= K:
         if NB > _sparse_global_nb[0]:
             _sparse_global_nb[0] = NB
+        for b in range(NB):
+            _sparse_stats[b] = _sparse_stats.get(b, 0) + 1
         s = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(HD)
         if self.causal and S_q > 1:
             s = s + torch.triu(torch.full((S_q, S_kv), float("-inf"), device=q.device), diagonal=S_kv - S_q + 1).unsqueeze(0).unsqueeze(0)
@@ -211,7 +213,8 @@ def gen(prompt, max_new, temp, top_k, top_p, rep_penalty=1.1):
     if _sparse_stats:
         top3 = sorted(_sparse_stats.items(), key=lambda x: -x[1])[:3]
         nb_total = max(_sparse_stats.keys()) + 1
-        print(f"  {nb_total} bloques | top: " + ", ".join(f"blk{b}" for b,c in top3))
+        total_tok = generated.shape[1]
+        print(f"  {nb_total} bloques ({total_tok} tok) | top: " + ", ".join(f"blk{b}({c})" for b,c in top3))
     return generated
 
 settings = {"max_new": 50, "temp": 1.0, "top_k": 50, "top_p": 0.95}
