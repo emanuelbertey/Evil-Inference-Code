@@ -136,6 +136,7 @@ def main():
     safe_path = os.path.join(_DIR, "model_test.safetensors")
 
     if not test_mode:
+        loaded = False
         if os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location=device)
             model.load_state_dict(ckpt["model"])
@@ -143,6 +144,7 @@ def main():
             epoch = ckpt.get("epoch", 0)
             ckpt_block = ckpt.get("block", 0)
             print(f"Loaded checkpoint: step {step} epoch {epoch} block {ckpt_block}")
+            loaded = True
         elif hf and hf.download_checkpoint(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location=device)
             model.load_state_dict(ckpt["model"])
@@ -150,6 +152,10 @@ def main():
             epoch = ckpt.get("epoch", 0)
             ckpt_block = ckpt.get("block", 0)
             print(f"Loaded HF checkpoint: step {step} epoch {epoch} block {ckpt_block}")
+            loaded = True
+        if loaded:
+            # Re-link weight tying (checkpoint stores emb_weight as separate tensor)
+            model.head.emb_weight = model.embedding.weight
 
     # ── Data ────────────────────────────────────────────────────────────────
     if test_mode:
