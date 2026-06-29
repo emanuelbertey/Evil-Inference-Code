@@ -198,7 +198,6 @@ def main():
         if test_mode:
             tokens = all_tokens
         else:
-            sd.load_tokens(tokenizer)
             tokens = sd.get_tokens()
 
         n_seq = (len(tokens) - seq_len - 1) // seq_len
