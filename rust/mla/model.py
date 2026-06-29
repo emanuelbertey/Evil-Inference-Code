@@ -210,53 +210,57 @@ class TransformerLM(nn.Module):
             residual = h
             h_norm = layer.attn_norm(h)
 
-            q, k_new, v_new = layer.attention.qkv(h_norm)
-            q, k_new = apply_rope_partial(
-                q, k_new, offset, rotary_pct,
-                layer.attention.rope.inv_freq,
-                layer.attention.rope.cos_cache,
-                layer.attention.rope.sin_cache,
-                layer.attention.head_dim,
-                layer.attention.rope.max_seq_len,
-            )
-
-            if cache is not None:
-                k_full = torch.cat([cache.cached_k, k_new], dim=1)
-                v_full = torch.cat([cache.cached_v, v_new], dim=1)
+            if layer.use_mla:
+                h_attn, new_cache = layer.attention.forward_with_cache_partial(
+                    h_norm, offset, cache, rotary_pct)
             else:
-                k_full = k_new
-                v_full = v_new
-
-            new_cache = KVCache(cached_k=k_full.clone(), cached_v=v_full.clone())
-
-            k_expanded = repeat_kv(k_full, layer.num_heads, layer.num_kv_groups)
-            v_expanded = repeat_kv(v_full, layer.num_heads, layer.num_kv_groups)
-
-            q = q.transpose(1, 2)
-            k = k_expanded.transpose(1, 2)
-            v = v_expanded.transpose(1, 2)
-
-            scale = math.sqrt(layer.head_dim)
-            scores = torch.matmul(q, k.transpose(-2, -1)) / scale
-
-            if layer.attn_logit_cap is not None:
-                scores = torch.tanh(scores / layer.attn_logit_cap) * layer.attn_logit_cap
-
-            q_len = q.shape[2]
-            kv_len = k.shape[2]
-            if layer.causal and q_len > 1:
-                mask = torch.triu(
-                    torch.full((q_len, kv_len), float("-inf"), device=h.device),
-                    diagonal=kv_len - q_len + 1,
+                q, k_new, v_new = layer.attention.qkv(h_norm)
+                q, k_new = apply_rope_partial(
+                    q, k_new, offset, rotary_pct,
+                    layer.attention.rope.inv_freq,
+                    layer.attention.rope.cos_cache,
+                    layer.attention.rope.sin_cache,
+                    layer.attention.head_dim,
+                    layer.attention.rope.max_seq_len,
                 )
-                scores = scores + mask.unsqueeze(0).unsqueeze(0)
 
-            attn_weights = F.softmax(scores, dim=-1)
-            attn_weights = layer.attention.attn_dropout(attn_weights)
-            attn_output = torch.matmul(attn_weights, v)
+                if cache is not None:
+                    k_full = torch.cat([cache.cached_k, k_new], dim=1)
+                    v_full = torch.cat([cache.cached_v, v_new], dim=1)
+                else:
+                    k_full = k_new
+                    v_full = v_new
 
-            attn_output = attn_output.transpose(1, 2)
-            h_attn = layer.attention.o_proj(attn_output)
+                new_cache = KVCache(cached_k=k_full.clone(), cached_v=v_full.clone())
+
+                k_expanded = repeat_kv(k_full, layer.num_heads, layer.num_kv_groups)
+                v_expanded = repeat_kv(v_full, layer.num_heads, layer.num_kv_groups)
+
+                q = q.transpose(1, 2)
+                k = k_expanded.transpose(1, 2)
+                v = v_expanded.transpose(1, 2)
+
+                scale = math.sqrt(layer.head_dim)
+                scores = torch.matmul(q, k.transpose(-2, -1)) / scale
+
+                if layer.attn_logit_cap is not None:
+                    scores = torch.tanh(scores / layer.attn_logit_cap) * layer.attn_logit_cap
+
+                q_len = q.shape[2]
+                kv_len = k.shape[2]
+                if layer.causal and q_len > 1:
+                    mask = torch.triu(
+                        torch.full((q_len, kv_len), float("-inf"), device=h.device),
+                        diagonal=kv_len - q_len + 1,
+                    )
+                    scores = scores + mask.unsqueeze(0).unsqueeze(0)
+
+                attn_weights = F.softmax(scores, dim=-1)
+                attn_weights = layer.attention.attn_dropout(attn_weights)
+                attn_output = torch.matmul(attn_weights, v)
+
+                attn_output = attn_output.transpose(1, 2)
+                h_attn = layer.attention.o_proj(attn_output)
             h = residual + h_attn
 
             residual = h

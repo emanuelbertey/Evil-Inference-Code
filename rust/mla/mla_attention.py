@@ -29,7 +29,7 @@ class QKVProjectionMLA(nn.Module):
 
         self.W_down = nn.Linear(d_model, d_c1 + num_kv_groups * d_c + d_rotate, bias=bias)
         self.W_up_q = nn.Linear(d_c1, d_model + num_heads * d_rotate, bias=bias)
-        self.W_up_kv = nn.Linear(num_kv_groups * d_c, 2 * num_kv_groups * d_model, bias=bias)
+        self.W_up_kv = nn.Linear(num_kv_groups * d_c, 2 * num_kv_groups * head_dim, bias=bias)
 
     def forward(self, x):
         B, S, _ = x.shape
@@ -51,9 +51,9 @@ class QKVProjectionMLA(nn.Module):
 
 
 class OutputProjectionMLA(nn.Module):
-    def __init__(self, d_model, num_heads, qk_dim, bias=False):
+    def __init__(self, d_model, num_heads, head_dim, bias=False):
         super().__init__()
-        self.o_proj = nn.Linear(num_heads * qk_dim, d_model, bias=bias)
+        self.o_proj = nn.Linear(num_heads * head_dim, d_model, bias=bias)
 
     def forward(self, x):
         B, S, NH, QK = x.shape
@@ -81,8 +81,8 @@ class MultiHeadLatentAttentionGQA(nn.Module):
 
         self.qkv = QKVProjectionMLA(d_model, num_heads, num_kv_groups, head_dim,
                                      d_c, d_c1, d_rotate, bias)
-        self.o_proj = OutputProjectionMLA(d_model, num_heads, self.qkv.qk_dim, bias)
-        self.rope = RoPE(head_dim=d_rotate, max_seq_len=max_seq_len, base=rope_base, scaling=rope_scaling)
+        self.o_proj = OutputProjectionMLA(d_model, num_heads, head_dim, bias)
+        self.rope = RoPE(head_dim=d_rotate, max_seq_len=max_seq_len, base=rope_base, scaling_factor=rope_scaling)
         self.rope.head_dim = d_rotate
         self.attn_dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
