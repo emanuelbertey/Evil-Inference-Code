@@ -44,7 +44,7 @@ def get_lr(step, total, warmup, lr):
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 d_model = 768
-num_layers = 24
+num_layers = 25
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
