@@ -155,24 +155,18 @@ def main():
     if test_mode:
         with open(txt_path, "r", encoding="utf-8") as f:
             all_tokens = tokenizer.encode(f.read())
-        tokens = torch.tensor(all_tokens, dtype=torch.long, device=device)
-        n = len(tokens)
+        n = len(all_tokens)
         epochs_do = 10
         total_steps = ((n - seq_len - 1) // (batch_size * seq_len)) * epochs_do
-        stream_next = lambda: None
-        stream_block = 0
     else:
         bi = input(f"Block [{ckpt_block}]: ").strip()
         block_idx = int(bi) if bi else ckpt_block
         sd = StreamingDataset(block_mb=3.0, block_idx=block_idx)
         sd.load_tokens(tokenizer)
-        all_tokens = sd.get_tokens()
-        tokens = torch.tensor(all_tokens, dtype=torch.long, device=device)
-        n = len(tokens)
+        n = len(sd.get_tokens())
         tokens_per_epoch = (n - seq_len - 1) // seq_len
-        epochs_do = num_epochs
         total_steps = (tokens_per_epoch // batch_size) * num_epochs
-        stream_next = lambda: None  # simplified for now
+        epochs_do = num_epochs
 
     # ── Stats ──────────────────────────────────────────────────────────────
     emb_p = model.embedding.weight.numel()
@@ -196,17 +190,39 @@ def main():
     # ── Train loop ──────────────────────────────────────────────────────────
     model.train()
     t0 = time.time()
-    last_rpt = t0
+    last_rpt_time = t0
+    last_rpt_step = 0
 
-    n_seq = (n - seq_len - 1) // seq_len
-    for epoch in range(epochs_do):
+    epoch = 0
+    while True:
+        if test_mode:
+            tokens = all_tokens
+        else:
+            sd.load_tokens(tokenizer)
+            tokens = sd.get_tokens()
+
+        n_seq = (len(tokens) - seq_len - 1) // seq_len
+        if n_seq <= 0:
+            print(f"Block too small ({len(tokens)} tokens), skipping epoch {epoch}")
+            epoch += 1
+            if epoch >= epochs_do:
+                break
+            continue
+
         micro = 0
         for batch_start in range(0, n_seq, batch_size):
             if step >= total_steps:
                 break
             batch_end = min(batch_start + batch_size, n_seq)
-            x = torch.stack([tokens[i*seq_len:i*seq_len+seq_len] for i in range(batch_start, batch_end)])
-            y = torch.stack([tokens[i*seq_len+1:i*seq_len+seq_len+1] for i in range(batch_start, batch_end)])
+            x_list, y_list = [], []
+            for i in range(batch_start, batch_end):
+                idx = i * seq_len
+                x = torch.tensor([tokens[idx + j] for j in range(seq_len)], dtype=torch.long, device=device).unsqueeze(0)
+                y = torch.tensor([tokens[idx + j + 1] for j in range(seq_len)], dtype=torch.long, device=device).unsqueeze(0)
+                x_list.append(x)
+                y_list.append(y)
+            x = torch.cat(x_list, dim=0)
+            y = torch.cat(y_list, dim=0)
 
             if micro == 0:
                 lr_curr = get_lr(step, total_steps, warmup_steps, lr)
@@ -227,16 +243,18 @@ def main():
 
                 if step % 10 == 0:
                     now = time.time()
-                    tps = batch_size * grad_accum * seq_len / max(now - last_rpt, 0.001)
+                    tok = (step - last_rpt_step) * batch_size * grad_accum * seq_len
+                    tps = tok / max(now - last_rpt_time, 0.001)
                     print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
-                    last_rpt = now
+                    last_rpt_time = now
+                    last_rpt_step = step
 
                 if not test_mode and step % 50 == 0:
                     sample = generate_sample(model, tokenizer, device)
                     print(f"  >>> {sample}")
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
-                    ckpt = {"step": step, "epoch": epoch, "block": ckpt_block, "model": model.state_dict()}
+                    ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0, "model": model.state_dict()}
                     torch.save(ckpt, ckpt_path)
                     model.state_dict_to_safetensors(safe_path)
                     pusher.maybe_push(ckpt_path, safe_path, tok_path, step)
@@ -246,12 +264,20 @@ def main():
             opt.step()
             step += 1
 
+        epoch += 1
         print(f"── Epoch {epoch} done: {step} steps ──")
-        if test_mode and epoch >= epochs_do - 1:
+        if epoch >= epochs_do:
             break
 
+        if not test_mode:
+            tokens = None
+            sd.next_block()
+            total_tokens = len(sd.get_tokens())
+            n_seq = (total_tokens - seq_len - 1) // seq_len
+            total_steps = (n_seq // batch_size) * (epochs_do - epoch)
+
     if not test_mode and hf:
-        ckpt = {"step": step, "epoch": epoch, "block": ckpt_block, "model": model.state_dict()}
+        ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx, "model": model.state_dict()}
         torch.save(ckpt, ckpt_path)
         hf.upload_checkpoint(ckpt_path, safe_path, tok_path, step)
 
