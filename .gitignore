@@ -154,3 +154,5 @@ dmypy.json
 rust/input.txt
 /bitnet.c
 *.safetensors
+/rust/mla/MSA-main
+*.zip
