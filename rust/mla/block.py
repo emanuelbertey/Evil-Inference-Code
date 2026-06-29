@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 
 from attention import Attention
-from sparse import SparseAttentionMio3
 from mla_attention import MultiHeadLatentAttentionGQA
 from cache_kv import KVCache
 
