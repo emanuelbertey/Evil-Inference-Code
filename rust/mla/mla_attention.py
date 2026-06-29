@@ -28,7 +28,7 @@ class QKVProjectionMLA(nn.Module):
         self.qk_dim = head_dim + d_rotate
 
         self.W_down = nn.Linear(d_model, d_c1 + num_kv_groups * d_c + d_rotate, bias=bias)
-        self.W_up_q = nn.Linear(d_c1, d_model + num_heads * d_rotate, bias=bias)
+        self.W_up_q = nn.Linear(d_c1, num_heads * (head_dim + d_rotate), bias=bias)
         self.W_up_kv = nn.Linear(num_kv_groups * d_c, 2 * num_kv_groups * head_dim, bias=bias)
 
     def forward(self, x):

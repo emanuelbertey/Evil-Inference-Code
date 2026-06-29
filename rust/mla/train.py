@@ -12,8 +12,8 @@ def main():
     vocab_size = tok.get_vocab_size()
 
     # Model hyperparams
-    d_model = 768
-    num_layers = 24
+    d_model = 128
+    num_layers = 3
     num_heads = 12
     num_kv_groups = 4
     head_dim = d_model // num_heads  # 64
@@ -50,7 +50,7 @@ def main():
             if step >= steps * num_epochs:
                 break
             if step < warmup_steps:
-                lr_curr = lr * step / max(warmup_steps, 1)
+                lr_curr = lr * (step + 1) / max(warmup_steps, 1)
             else:
                 t = (step - warmup_steps) / max(steps * num_epochs - warmup_steps, 1)
                 lr_curr = lr * (0.2 + 0.8 * (1.0 + torch.tensor(3.14159 * t).cos().item()) / 2.0)
