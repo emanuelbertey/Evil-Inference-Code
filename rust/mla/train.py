@@ -76,7 +76,7 @@ def main():
     if not test_mode:
         hf = HFManager(repo_id=repo_id, revision=revision)
         hf._get_token()
-        pusher = PeriodicPusher(hf, interval_minutes=15)
+        pusher = PeriodicPusher(hf, interval_minutes=1)
 
     # ── Precision ──────────────────────────────────────────────────────────
     amp = False
