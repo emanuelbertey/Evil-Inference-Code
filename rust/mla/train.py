@@ -43,19 +43,23 @@ def get_lr(step, total, warmup, lr):
     return lr * (0.2 + 0.8 * (1.0 + math.cos(math.pi * t)) / 2.0)
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-d_model = 128
-num_layers = 3
+d_model = 768
+num_layers = 24
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 256
+seq_len = 320
 batch_size = 8
 grad_accum = 8
 lr = 3e-4
 num_epochs = 200000
 warmup_steps = 50
-bpe_vocab = 16000
+bpe_vocab = 32000
 rotary_pct = 0.25
+use_mla = True
+mla_d_c = 32      # 16=ahorroMaximo 32=balance(default) 64=calidadMax. Comprime K y V.
+mla_d_c1 = None      # Comprime Q. NO afecta cache, solo parametros. Dejalo igual que d_c.
+mla_d_rotate = None  # RoPE. Info de posicion del token. 16 default. No tocar.
 tok_path = os.path.join(_DIR, "tokenizer.json")
 
 def main():
@@ -72,12 +76,26 @@ def main():
     if not test_mode:
         hf = HFManager(repo_id=repo_id, revision=revision)
         hf._get_token()
-        pusher = PeriodicPusher(hf, interval_minutes=10)
-        prec = input("Precision (n=f32, f=f16): ").strip().lower()
-        dtype = torch.float16 if prec == "f" else torch.float32
-    else:
+        pusher = PeriodicPusher(hf, interval_minutes=15)
+
+    # ── Precision ──────────────────────────────────────────────────────────
+    amp = False
+    if test_mode:
         dtype = torch.float32
-    print(f"Using {dtype}")
+    else:
+        prec = input("Precision (n=f32, f=f16, b=bf16, a=amp(f16+master-f32)): ").strip().lower()
+        if prec == "b":
+            dtype = torch.bfloat16
+        elif prec == "f":
+            dtype = torch.float16
+        elif prec == "a":
+            dtype = torch.float16
+            amp = True
+        else:
+            dtype = torch.float32
+    scaler = torch.amp.GradScaler("cuda", enabled=amp) if device.type == "cuda" else torch.amp.GradScaler("cpu", enabled=amp)
+    master = "f32 (master)" if amp else str(dtype)
+    print(f"  Compute: {dtype}  |  Weights: {master}  |  AMP: {amp}  |  Scaler: {scaler.get_scale() if amp else 'off'}")
 
     # ── Tokenizer ──────────────────────────────────────────────────────────
     tokenizer = None
@@ -105,6 +123,7 @@ def main():
         use_swiglu=True, use_x0=True, max_seq_len=seq_len,
         residual_dropout=0.0, attn_dropout=0.0, ffn_dropout=0.0,
         use_mla=True, mla_block_size=128,
+        mla_d_c=mla_d_c, mla_d_c1=mla_d_c1, mla_d_rotate=mla_d_rotate,
     ).to(device).to(dtype=dtype)
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
@@ -163,6 +182,15 @@ def main():
     total_p = emb_p + layer_p + norm_p + x0_p
     print(f"Params: emb={emb_p:,} + {num_layers}capas={layer_p:,} + norm={norm_p} + x0={x0_p} = {total_p:,}")
     print(f"dim={d_model} lay={num_layers} heads={num_heads} kv={num_kv_groups} seq={seq_len} bs={batch_size} ga={grad_accum} lr={lr}")
+    gqa_cpt = 2 * num_kv_groups * head_dim
+    if use_mla:
+        a = model.transformer.layers[0].attention.qkv
+        d_c_real = a.d_c; d_rot_real = a.d_rotate; d_c1_real = a.d_c1
+        cpt = d_c_real + d_rot_real
+        pct = 100 * (1 - cpt / gqa_cpt)
+        print(f"MLA: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
+    else:
+        cpt = gqa_cpt
     print(f"Tokens: {n:,} | Steps total: {total_steps}")
 
     # ── Train loop ──────────────────────────────────────────────────────────

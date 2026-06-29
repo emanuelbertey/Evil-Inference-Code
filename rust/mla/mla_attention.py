@@ -1,8 +1,9 @@
 """Multi-head Latent Attention (MLA) with GQA.
 
 Based on DeepSeek MLA adapted for GQA.
-- Latent KV compression with per-group latents
+- Latent KV compression, shared latent across KV groups
 - RoPE on separate rotation dimension
+- Latent cache (C_KV, K_rotate_raw) en vez de K/V expandido
 - Dense attention (no sparse)
 """
 
@@ -12,7 +13,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rope import RoPE, apply_rope_partial
-from cache_kv import KVCache
 from attention import repeat_kv
 
 
@@ -27,14 +27,14 @@ class QKVProjectionMLA(nn.Module):
         self.d_rotate = d_rotate
         self.qk_dim = head_dim + d_rotate
 
-        self.W_down = nn.Linear(d_model, d_c1 + num_kv_groups * d_c + d_rotate, bias=bias)
+        self.W_down = nn.Linear(d_model, d_c1 + d_c + d_rotate, bias=bias)
         self.W_up_q = nn.Linear(d_c1, num_heads * (head_dim + d_rotate), bias=bias)
-        self.W_up_kv = nn.Linear(num_kv_groups * d_c, 2 * num_kv_groups * head_dim, bias=bias)
+        self.W_up_kv = nn.Linear(d_c, 2 * num_kv_groups * head_dim, bias=bias)
 
     def forward(self, x):
         B, S, _ = x.shape
         down = self.W_down(x)
-        C_Q, C_KV, K_rotate = down.split([self.d_c1, self.num_kv_groups * self.d_c, self.d_rotate], dim=-1)
+        C_Q, C_KV, K_rotate = down.split([self.d_c1, self.d_c, self.d_rotate], dim=-1)
 
         q_up = self.W_up_q(C_Q)
         Q_state, Q_rotate = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
@@ -113,64 +113,90 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         attn_out = torch.matmul(attn_w, v).transpose(1, 2)
         return self.o_proj(attn_out)
 
-    def forward_with_cache(self, x, offset, cache):
-        Q_state, Q_rotate, K_new, V_new, K_rot_new = self.qkv(x)
-        Q_rotate, K_rot_new = self.rope(Q_rotate, K_rot_new, offset)
-
-        K_rot_exp = K_rot_new.expand(-1, -1, self.num_kv_groups, -1)
-        K_full_new = torch.cat([K_new, K_rot_exp], dim=-1)
-
-        k_full = torch.cat([cache.cached_k, K_full_new], dim=1) if cache else K_full_new
-        v_full = torch.cat([cache.cached_v, V_new], dim=1) if cache else V_new
-        new_cache = KVCache(cached_k=k_full.clone(), cached_v=v_full.clone())
-
-        Q = torch.cat([Q_state, Q_rotate], dim=-1)
-        k_exp = repeat_kv(k_full, self.num_heads, self.num_kv_groups)
-        v_exp = repeat_kv(v_full, self.num_heads, self.num_kv_groups)
-
-        q = Q.transpose(1, 2); k = k_exp.transpose(1, 2); v = v_exp.transpose(1, 2)
+    def _attention_scores(self, Q, K, V, q_len, kv_len, causal_mask):
+        q = Q.transpose(1, 2)
+        k = K.transpose(1, 2)
+        v = V.transpose(1, 2)
         scale = math.sqrt(self.qkv.qk_dim)
         scores = torch.matmul(q, k.transpose(-2, -1)) / scale
         if self.attn_logit_cap is not None:
             scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
-
-        q_len, kv_len = q.shape[2], k.shape[2]
-        if self.causal and q_len > 1:
-            scores = scores + torch.triu(torch.full((q_len, kv_len), float("-inf"), device=scores.device), diagonal=kv_len - q_len + 1).unsqueeze(0).unsqueeze(0)
-
+        if self.causal and causal_mask:
+            mask = torch.triu(torch.full((q_len, kv_len), float("-inf"), device=scores.device), diagonal=kv_len - q_len + 1).unsqueeze(0).unsqueeze(0)
+            scores = scores + mask
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
-        attn_out = torch.matmul(attn_w, v).transpose(1, 2)
-        return self.o_proj(attn_out), new_cache
+        return torch.matmul(attn_w, v).transpose(1, 2)
+
+    def forward_with_cache(self, x, offset, cache):
+        B, S_new, _ = x.shape
+        down = self.qkv.W_down(x)
+        C_Q_new, C_KV_new, K_rot_raw = down.split([self.qkv.d_c1, self.qkv.d_c, self.qkv.d_rotate], dim=-1)
+        q_up = self.qkv.W_up_q(C_Q_new)
+        Q_state, Q_rot_raw = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.qkv.d_rotate], dim=-1)
+        Q_state = Q_state.reshape(B, S_new, self.num_heads, self.head_dim)
+        Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.qkv.d_rotate)
+        Q_rot = self.rope.apply_to_single(Q_rot_raw, offset=offset)
+
+        if cache is not None:
+            C_KV_full = torch.cat([cache[0], C_KV_new], dim=1)
+            K_rot_full = torch.cat([cache[1], K_rot_raw], dim=1)
+        else:
+            C_KV_full = C_KV_new
+            K_rot_full = K_rot_raw
+        S_full = C_KV_full.shape[1]
+
+        kv_up = self.qkv.W_up_kv(C_KV_full)
+        K_state, V_state = kv_up.chunk(2, dim=-1)
+        K_state = K_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
+        V_state = V_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
+
+        K_rot = self.rope.apply_to_single(K_rot_full.unsqueeze(2), offset=0)
+        K_rot_exp = K_rot.expand(-1, -1, self.num_kv_groups, -1)
+
+        K = torch.cat([K_state, K_rot_exp], dim=-1)
+        k = repeat_kv(K, self.num_heads, self.num_kv_groups)
+        v = repeat_kv(V_state, self.num_heads, self.num_kv_groups)
+
+        Q = torch.cat([Q_state, Q_rot], dim=-1)
+        attn_out = self._attention_scores(Q, k, v, S_new, S_full, S_new > 1)
+        return self.o_proj(attn_out), (C_KV_full, K_rot_full)
 
     def forward_with_cache_partial(self, x, offset, cache, rotary_pct):
-        Q_state, Q_rotate, K_new, V_new, K_rot_new = self.qkv(x)
-        Q_rotate, K_rot_new = apply_rope_partial(Q_rotate, K_rot_new, offset, rotary_pct,
+        B, S_new, _ = x.shape
+        down = self.qkv.W_down(x)
+        C_Q_new, C_KV_new, K_rot_raw = down.split([self.qkv.d_c1, self.qkv.d_c, self.qkv.d_rotate], dim=-1)
+        q_up = self.qkv.W_up_q(C_Q_new)
+        Q_state, Q_rot_raw = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.qkv.d_rotate], dim=-1)
+        Q_state = Q_state.reshape(B, S_new, self.num_heads, self.head_dim)
+        Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.qkv.d_rotate)
+
+        Q_rot, _ = apply_rope_partial(Q_rot_raw, Q_rot_raw, offset, rotary_pct,
             self.rope.inv_freq, self.rope.cos_cache, self.rope.sin_cache,
             self.rope.head_dim, self.rope.max_seq_len)
 
-        K_rot_exp = K_rot_new.expand(-1, -1, self.num_kv_groups, -1)
-        K_full_new = torch.cat([K_new, K_rot_exp], dim=-1)
+        if cache is not None:
+            C_KV_full = torch.cat([cache[0], C_KV_new], dim=1)
+            K_rot_full = torch.cat([cache[1], K_rot_raw], dim=1)
+        else:
+            C_KV_full = C_KV_new
+            K_rot_full = K_rot_raw
+        S_full = C_KV_full.shape[1]
 
-        k_full = torch.cat([cache.cached_k, K_full_new], dim=1) if cache else K_full_new
-        v_full = torch.cat([cache.cached_v, V_new], dim=1) if cache else V_new
-        new_cache = KVCache(cached_k=k_full.clone(), cached_v=v_full.clone())
+        kv_up = self.qkv.W_up_kv(C_KV_full)
+        K_state, V_state = kv_up.chunk(2, dim=-1)
+        K_state = K_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
+        V_state = V_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
 
-        Q = torch.cat([Q_state, Q_rotate], dim=-1)
-        k_exp = repeat_kv(k_full, self.num_heads, self.num_kv_groups)
-        v_exp = repeat_kv(v_full, self.num_heads, self.num_kv_groups)
+        _, K_rot = apply_rope_partial(K_rot_full.unsqueeze(2), K_rot_full.unsqueeze(2), 0, rotary_pct,
+            self.rope.inv_freq, self.rope.cos_cache, self.rope.sin_cache,
+            self.rope.head_dim, self.rope.max_seq_len)
+        K_rot_exp = K_rot.expand(-1, -1, self.num_kv_groups, -1)
 
-        q = Q.transpose(1, 2); k = k_exp.transpose(1, 2); v = v_exp.transpose(1, 2)
-        scale = math.sqrt(self.qkv.qk_dim)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / scale
-        if self.attn_logit_cap is not None:
-            scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
+        K = torch.cat([K_state, K_rot_exp], dim=-1)
+        k = repeat_kv(K, self.num_heads, self.num_kv_groups)
+        v = repeat_kv(V_state, self.num_heads, self.num_kv_groups)
 
-        q_len, kv_len = q.shape[2], k.shape[2]
-        if self.causal and q_len > 1:
-            scores = scores + torch.triu(torch.full((q_len, kv_len), float("-inf"), device=scores.device), diagonal=kv_len - q_len + 1).unsqueeze(0).unsqueeze(0)
-
-        attn_w = F.softmax(scores, dim=-1)
-        attn_w = self.attn_dropout(attn_w)
-        attn_out = torch.matmul(attn_w, v).transpose(1, 2)
-        return self.o_proj(attn_out), new_cache
+        Q = torch.cat([Q_state, Q_rot], dim=-1)
+        attn_out = self._attention_scores(Q, k, v, S_new, S_full, S_new > 1)
+        return self.o_proj(attn_out), (C_KV_full, K_rot_full)
