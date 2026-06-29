@@ -258,9 +258,9 @@ def main():
                     print(f"  >>> {sample}")
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
-                    sd = model.state_dict()
-                    sd.pop("head.emb_weight", None)
-                    ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0, "model": sd}
+                    state = model.state_dict()
+                    state.pop("head.emb_weight", None)
+                    ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0, "model": state}
                     torch.save(ckpt, ckpt_path)
                     model.state_dict_to_safetensors(safe_path)
                     pusher.maybe_push(ckpt_path, safe_path, tok_path, step)
