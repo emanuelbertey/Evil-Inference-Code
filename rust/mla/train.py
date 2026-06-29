@@ -48,7 +48,7 @@ num_layers = 3
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 512
+seq_len = 256
 batch_size = 8
 grad_accum = 8
 lr = 3e-4
@@ -155,8 +155,12 @@ def main():
         stream_next = lambda: None  # simplified for now
 
     # ── Stats ──────────────────────────────────────────────────────────────
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Modelo: {num_params:,} params ({num_params/1e6:.2f}M)")
+    emb_p = model.embedding.weight.numel()
+    layer_p = sum(p.numel() for l in model.transformer.layers for p in l.parameters())
+    norm_p = model.transformer.final_norm.weight.numel()
+    x0_p = model.x0_lambdas.numel() if model.x0_lambdas is not None else 0
+    total_p = emb_p + layer_p + norm_p + x0_p
+    print(f"Params: emb={emb_p:,} + {num_layers}capas={layer_p:,} + norm={norm_p} + x0={x0_p} = {total_p:,}")
     print(f"dim={d_model} lay={num_layers} heads={num_heads} kv={num_kv_groups} seq={seq_len} bs={batch_size} ga={grad_accum} lr={lr}")
     print(f"Tokens: {n:,} | Steps total: {total_steps}")
 
@@ -165,45 +169,54 @@ def main():
     t0 = time.time()
     last_rpt = t0
 
+    n_seq = (n - seq_len - 1) // seq_len
     epochs_do = 3 if test_mode else num_epochs
     for epoch in range(epochs_do):
-        for i in range(0, n - seq_len - 1, batch_size * seq_len):
+        micro = 0
+        for batch_start in range(0, n_seq, batch_size):
             if step >= total_steps:
                 break
+            batch_end = min(batch_start + batch_size, n_seq)
+            x = torch.stack([tokens[i*seq_len:i*seq_len+seq_len] for i in range(batch_start, batch_end)])
+            y = torch.stack([tokens[i*seq_len+1:i*seq_len+seq_len+1] for i in range(batch_start, batch_end)])
 
-            lr_curr = get_lr(step, total_steps, warmup_steps, lr)
-            for pg in opt.param_groups:
-                pg["lr"] = lr_curr
-            opt.zero_grad()
+            if micro == 0:
+                lr_curr = get_lr(step, total_steps, warmup_steps, lr)
+                for pg in opt.param_groups:
+                    pg["lr"] = lr_curr
+                opt.zero_grad()
 
-            b_ok = [b for b in range(batch_size) if i + b*seq_len + seq_len + 1 < n]
-            if not b_ok:
-                break
-            x = torch.stack([tokens[i+b*seq_len:i+b*seq_len+seq_len] for b in b_ok])
-            y = torch.stack([tokens[i+b*seq_len+1:i+b*seq_len+seq_len+1] for b in b_ok])
             logits = model.forward_train_partial_rope(x, rotary_pct=rotary_pct)
             loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
-            loss.backward()
+            (loss / grad_accum).backward()
+            micro += 1
 
+            if micro >= grad_accum:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                step += 1
+                micro = 0
+
+                if step % 10 == 0:
+                    now = time.time()
+                    tps = batch_size * grad_accum * seq_len / max(now - last_rpt, 0.001)
+                    print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
+                    last_rpt = now
+
+                if not test_mode and step % 50 == 0:
+                    sample = generate_sample(model, tokenizer, device)
+                    print(f"  >>> {sample}")
+
+                if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
+                    ckpt = {"step": step, "epoch": epoch, "block": ckpt_block, "model": model.state_dict()}
+                    torch.save(ckpt, ckpt_path)
+                    model.state_dict_to_safetensors(safe_path)
+                    pusher.maybe_push(ckpt_path, safe_path, tok_path, step)
+
+        if micro > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             step += 1
-
-            if step % 10 == 0:
-                now = time.time()
-                tps = batch_size * seq_len / max(now - last_rpt, 0.001)
-                print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
-                last_rpt = now
-
-            if not test_mode and step % 50 == 0:
-                sample = generate_sample(model, tokenizer, device)
-                print(f"  >>> {sample}")
-
-            if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
-                ckpt = {"step": step, "epoch": epoch, "block": ckpt_block, "model": model.state_dict()}
-                torch.save(ckpt, ckpt_path)
-                model.state_dict_to_safetensors(safe_path)
-                pusher.maybe_push(ckpt_path, safe_path, tok_path, step)
 
         print(f"── Epoch {epoch} done: {step} steps ──")
         if test_mode and epoch >= epochs_do - 1:

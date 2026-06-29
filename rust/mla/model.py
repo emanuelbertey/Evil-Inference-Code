@@ -22,6 +22,15 @@ from attention import repeat_kv
 from rope import apply_rope_partial
 
 
+class TiedHead(nn.Module):
+    """Head anclado al embedding — weight tying forzado, no se puede sacar."""
+    def __init__(self, embedding):
+        super().__init__()
+        self.emb_weight = embedding.weight
+    def forward(self, x):
+        return x @ self.emb_weight.T
+
+
 class TransformerLM(nn.Module):
     """Full Transformer Language Model.
 
@@ -90,8 +99,8 @@ class TransformerLM(nn.Module):
             mla_d_c=mla_d_c, mla_d_c1=mla_d_c1,
             mla_d_rotate=mla_d_rotate, mla_block_size=mla_block_size,
         )
-        # Output head (no bias, like Rust)
-        self.head = nn.Linear(d_model, vocab_size, bias=False)
+        # Head anclado al embedding — no se puede desactivar
+        self.head = TiedHead(self.embedding)
 
         # x0 injection: learned scalar per layer
         if use_x0:
