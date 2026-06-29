@@ -26,9 +26,10 @@ class TiedHead(nn.Module):
     """Head anclado al embedding — weight tying forzado, no se puede sacar."""
     def __init__(self, embedding):
         super().__init__()
-        self.emb_weight = embedding.weight
+        # Bypass nn.Module tracking — solo referencia, no parámetro ni submódulo
+        object.__setattr__(self, "_emb_mod", embedding)
     def forward(self, x):
-        return x @ self.emb_weight.T
+        return x @ self._emb_mod.weight.T
 
 
 class TransformerLM(nn.Module):

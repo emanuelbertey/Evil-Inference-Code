@@ -139,7 +139,8 @@ def main():
         loaded = False
         if os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location=device)
-            model.load_state_dict(ckpt["model"])
+            ckpt["model"].pop("head.emb_weight", None)
+            model.load_state_dict(ckpt["model"], strict=False)
             step = ckpt.get("step", 0)
             epoch = ckpt.get("epoch", 0)
             ckpt_block = ckpt.get("block", 0)
@@ -147,15 +148,13 @@ def main():
             loaded = True
         elif hf and hf.download_checkpoint(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location=device)
-            model.load_state_dict(ckpt["model"])
+            ckpt["model"].pop("head.emb_weight", None)
+            model.load_state_dict(ckpt["model"], strict=False)
             step = ckpt.get("step", 0)
             epoch = ckpt.get("epoch", 0)
             ckpt_block = ckpt.get("block", 0)
             print(f"Loaded HF checkpoint: step {step} epoch {epoch} block {ckpt_block}")
             loaded = True
-        if loaded:
-            # Re-link weight tying (checkpoint stores emb_weight as separate tensor)
-            model.head.emb_weight = model.embedding.weight
 
     # ── Data ────────────────────────────────────────────────────────────────
     if test_mode:
@@ -259,7 +258,9 @@ def main():
                     print(f"  >>> {sample}")
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
-                    ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0, "model": model.state_dict()}
+                    sd = model.state_dict()
+                    sd.pop("head.emb_weight", None)
+                    ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0, "model": sd}
                     torch.save(ckpt, ckpt_path)
                     model.state_dict_to_safetensors(safe_path)
                     pusher.maybe_push(ckpt_path, safe_path, tok_path, step)
