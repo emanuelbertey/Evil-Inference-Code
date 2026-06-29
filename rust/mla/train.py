@@ -138,7 +138,7 @@ def main():
             all_tokens = tokenizer.encode(f.read())
         tokens = torch.tensor(all_tokens, dtype=torch.long, device=device)
         n = len(tokens)
-        epochs_do = 3
+        epochs_do = 10
         total_steps = ((n - seq_len - 1) // (batch_size * seq_len)) * epochs_do
         stream_next = lambda: None
         stream_block = 0
@@ -151,6 +151,7 @@ def main():
         tokens = torch.tensor(all_tokens, dtype=torch.long, device=device)
         n = len(tokens)
         tokens_per_epoch = (n - seq_len - 1) // seq_len
+        epochs_do = num_epochs
         total_steps = (tokens_per_epoch // batch_size) * num_epochs
         stream_next = lambda: None  # simplified for now
 
@@ -170,7 +171,6 @@ def main():
     last_rpt = t0
 
     n_seq = (n - seq_len - 1) // seq_len
-    epochs_do = 3 if test_mode else num_epochs
     for epoch in range(epochs_do):
         micro = 0
         for batch_start in range(0, n_seq, batch_size):
