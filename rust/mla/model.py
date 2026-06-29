@@ -288,7 +288,9 @@ class TransformerLM(nn.Module):
     def state_dict_to_safetensors(self, path: str):
         """Save model weights in safetensors format (for HF compatibility)."""
         from safetensors.torch import save_file
-        save_file(self.state_dict(), path)
+        sd = self.state_dict()
+        sd.pop("head.emb_weight", None)  # shared with embedding.weight
+        save_file(sd, path)
 
     @staticmethod
     def load_from_safetensors(path: str, **model_kwargs) -> "TransformerLM":
@@ -296,7 +298,9 @@ class TransformerLM(nn.Module):
         from safetensors.torch import load_file
         state = load_file(path)
         model = TransformerLM(**model_kwargs)
-        model.load_state_dict(state)
+        # head.emb_weight excluded from save (shared with embedding.weight);
+        # re-linked via TiedHead.__init__ so strict=False is safe.
+        model.load_state_dict(state, strict=False)
         return model
 
     def export_for_rust(self, path: str, mapping_path: str = None):
