@@ -73,6 +73,7 @@ class LayerWithMoE(nn.Module):
         self.head_dim = head_dim
         self.causal = causal
         self.use_moe = use_moe
+        self.use_mla = use_mla
         self.attn_logit_cap = attn_logit_cap
         self.layer_idx = layer_idx
         self.num_layers = num_layers
