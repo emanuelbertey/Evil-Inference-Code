@@ -48,13 +48,13 @@ def get_lr(step, total, warmup, lr):
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-d_model = 768
-num_layers = 25
+d_model = 512
+num_layers = 16
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 512
-batch_size = 8
+seq_len = 320
+batch_size = 4
 grad_accum = 8
 lr = 3e-4
 num_epochs = 200000
@@ -66,6 +66,12 @@ mla_d_c = 32
 mla_d_c1 = None
 mla_d_rotate = None
 tok_path = os.path.join(_DIR, "tokenizer.json")
+
+# ─── FFN dimensions ──────────────────────────────────────────────────────────
+# Dense FFN intermediate dim. None = computed from d_model*ffn_expansion.
+dense_dim = None
+# MoE expert intermediate dim. None = same as dense_dim.
+moe_dim = None
 
 # ─── MoE Config ──────────────────────────────────────────────────────────────
 use_moe = True
@@ -90,7 +96,7 @@ def main():
 
     # ── HF ──────────────────────────────────────────────────────────────────
     repo_id = "ScortexIA/laurelia"
-    revision = "gens0mla"
+    revision = "moe-mla"
     hf = pusher = None
     if not test_mode:
         hf = HFManager(repo_id=repo_id, revision=revision)
@@ -136,14 +142,21 @@ def main():
     print(f"Vocab: {tokenizer.vocab_size}")
 
     # ── Model ───────────────────────────────────────────────────────────────
+    if dense_dim is not None:
+        ffn_expansion = dense_dim * 3.0 / 2.0 / d_model
+    else:
+        ffn_expansion = 4.0
+    exp_dim = moe_dim or dense_dim
     model = TransformerLM(
         vocab_size=tokenizer.vocab_size, d_model=d_model, num_layers=num_layers,
         num_heads=num_heads, num_kv_groups=num_kv_groups, head_dim=head_dim,
         use_swiglu=True, use_x0=False, max_seq_len=seq_len,
+        ffn_expansion=ffn_expansion,
         residual_dropout=0.0, attn_dropout=0.0, ffn_dropout=0.0,
         use_mla=True, mla_block_size=128,
         mla_d_c=mla_d_c, mla_d_c1=mla_d_c1, mla_d_rotate=mla_d_rotate,
         use_moe=use_moe, n_experts=n_experts, top_k=top_k, n_shared=n_shared,
+        expert_dim=exp_dim,
         capacity_factor=capacity_factor, z_loss_gamma=z_loss_gamma,
         bias_decay=bias_decay,
         n_dense_start=n_dense_start, n_dense_end=n_dense_end,
