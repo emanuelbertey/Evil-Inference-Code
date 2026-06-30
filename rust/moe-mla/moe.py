@@ -89,18 +89,18 @@ class MoELayer(nn.Module):
 
         Args:
             x: (N, d_model) — selected tokens
-            expert_idx: (N,) — expert assigned to each token
+            expert_idx: int — expert index (all tokens go to same expert)
         Returns:
             (N, d_model) — expert outputs
         """
         if x.shape[0] == 0:
             return x
 
-        w_fc = self.c_fc[expert_idx]  # (N, d_model, 2*edim)
-        w_proj = self.c_proj[expert_idx]  # (N, edim, d_model)
+        # Scalar index avoids materializing (N, d_model, 2*edim)
+        w_fc = self.c_fc[expert_idx]  # (d_model, 2*edim)
+        w_proj = self.c_proj[expert_idx]  # (edim, d_model)
 
-        # x @ w_fc: (N, d_model) @ (N, d_model, 2*edim) → (N, 2*edim)
-        h = torch.bmm(x.unsqueeze(1), w_fc).squeeze(1)
+        h = x @ w_fc  # (N, 2*edim)
 
         if self.b_fc is not None:
             h = h + self.b_fc[expert_idx]
@@ -108,8 +108,7 @@ class MoELayer(nn.Module):
         gate, up = h.chunk(2, dim=-1)
         h = _swiglu(up, gate)  # (N, edim)
 
-        # h @ w_proj: (N, edim) @ (N, edim, d_model) → (N, d_model)
-        out = torch.bmm(h.unsqueeze(1), w_proj).squeeze(1)
+        out = h @ w_proj  # (N, d_model)
 
         if self.b_proj is not None:
             out = out + self.b_proj[expert_idx]
@@ -184,7 +183,7 @@ class MoELayer(nn.Module):
             w_e = (w * sel).sum(dim=-1)  # (n_sel,) weight for expert e
 
             # Expert forward via bmm
-            expert_out = self._batched_expert_forward(xf[tok_idx], torch.full_like(tok_idx, e))
+            expert_out = self._batched_expert_forward(xf[tok_idx], e)
             out[tok_idx] += w_e.unsqueeze(-1) * expert_out
 
         # 6) Shared experts
