@@ -310,8 +310,6 @@ def main():
                     pm.upload(step)
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
-                    pm.plot(step)
-                    pm.upload(step)
                     state = model.state_dict()
                     state.pop("head.emb_weight", None)
                     ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0, "model": state}
