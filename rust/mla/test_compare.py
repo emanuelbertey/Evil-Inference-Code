@@ -3,7 +3,9 @@ import importlib.util
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, "LLM_D3-main"))
-from model import TransformerLM
+from model import TransformerLM as TransformerLM_MLA
+sys.path.insert(0, os.path.join(_DIR, ".."))
+from python.model import TransformerLM as TransformerLM_Py
 from LLM_2 import GPT, GPTConfig
 _nano_path = os.path.join(_DIR, "nano-moe-mla-main", "steps", "03_block_model.py")
 _nano_spec = importlib.util.spec_from_file_location("nano_block_model", _nano_path)
@@ -58,7 +60,7 @@ def init_nano(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
 
-model_ours = TransformerLM(
+model_ours = TransformerLM_MLA(
     vocab_size=vocab_size, d_model=d_model, num_layers=n_layer,
     num_heads=n_head, num_kv_groups=num_kv_groups, head_dim=head_dim,
     use_swiglu=True, use_x0=False, max_seq_len=seq_len,
@@ -68,7 +70,7 @@ model_ours = TransformerLM(
 ).to(device)
 model_ours.apply(init_nano)
 
-model_ours_x0 = TransformerLM(
+model_ours_x0 = TransformerLM_MLA(
     vocab_size=vocab_size, d_model=d_model, num_layers=n_layer,
     num_heads=n_head, num_kv_groups=num_kv_groups, head_dim=head_dim,
     use_swiglu=True, use_x0=True, max_seq_len=seq_len,
@@ -109,6 +111,14 @@ cfg_nano = MoeMlaConfig(
 )
 model_nano = MoeMlaGPT(cfg_nano).to(device)
 
+model_py = TransformerLM_Py(
+    vocab_size=vocab_size, d_model=d_model, num_layers=n_layer,
+    num_heads=n_head, num_kv_groups=num_kv_groups,
+    use_swiglu=True, use_x0=False, max_seq_len=seq_len,
+    residual_dropout=0.0, attn_dropout=0.0, ffn_dropout=0.0,
+).to(device)
+model_py.apply(init_nano)
+
 def breakdown(m):
     total = sum(p.numel() for p in m.parameters())
     emb = sum(p.numel() for n,p in m.named_parameters() if 'embed' in n or 'wte' in n or 'emb' in n)
@@ -122,6 +132,7 @@ t_x0, emb_x0, att_x0, ffn_x0, oth_x0 = breakdown(model_ours_x0)
 t_d3, emb_d3, att_d3, ffn_d3, oth_d3 = breakdown(model_d3)
 t_d5, emb_d5, att_d5, ffn_d5, oth_d5 = breakdown(model_d5)
 t_nano, emb_nano, att_nano, ffn_nano, oth_nano = breakdown(model_nano)
+t_py, emb_py, att_py, ffn_py, oth_py = breakdown(model_py)
 
 fsize = os.path.getsize(txt)
 print(f"Archivo: {os.path.basename(txt)} ({fsize:,} bytes)")
@@ -137,6 +148,7 @@ print(f"{'MLA +x0':>12} {t_x0:>10,} {emb_x0:>10,} {att_x0:>10,} {ffn_x0:>10,} {o
 print(f"{'LLM_D3':>12} {t_d3:>10,} {emb_d3:>10,} {att_d3:>10,} {ffn_d3:>10,} {oth_d3:>10,}")
 print(f"{'LLM_D5 (XSA)':>12} {t_d5:>10,} {emb_d5:>10,} {att_d5:>10,} {ffn_d5:>10,} {oth_d5:>10,}")
 print(f"{'nano-moe-mla':>12} {t_nano:>10,} {emb_nano:>10,} {att_nano:>10,} {ffn_nano:>10,} {oth_nano:>10,}")
+print(f"{'Py (GQA)':>12} {t_py:>10,} {emb_py:>10,} {att_py:>10,} {ffn_py:>10,} {oth_py:>10,}")
 print()
 
 opt_o = torch.optim.AdamW(model_ours.parameters(), lr=3e-4, weight_decay=0.01)
@@ -144,6 +156,7 @@ opt_x0 = torch.optim.AdamW(model_ours_x0.parameters(), lr=3e-4, weight_decay=0.0
 opt_d3 = torch.optim.AdamW(model_d3.parameters(), lr=3e-4, weight_decay=0.01)
 opt_d5 = torch.optim.AdamW(model_d5.parameters(), lr=3e-4, weight_decay=0.01)
 opt_nano = torch.optim.AdamW(model_nano.parameters(), lr=3e-4, weight_decay=0.01)
+opt_py = torch.optim.AdamW(model_py.parameters(), lr=3e-4, weight_decay=0.01)
 
 def grad_norms(model, tag=""):
     total_norm = 0.0
@@ -157,14 +170,15 @@ def grad_norms(model, tag=""):
     top = sorted(norms.items(), key=lambda x: -x[1])[:5]
     return total_norm, top
 
-print(f"{'step':>5}  {'MLA':>10}  {'MLA+x0':>10}  {'D3':>10}  {'D5(XSA)':>10}  {'nano':>10}")
+print(f"{'step':>5}  {'MLA':>10}  {'MLA+x0':>10}  {'D3':>10}  {'D5(XSA)':>10}  {'nano':>10}  {'Py(GQA)':>10}")
 
 # Logit stats at init (diagnostic)
 with torch.no_grad():
     l_o_init, l_x0_init = model_ours(x), model_ours_x0(x)
     l_n_init, _ = model_nano(x)
-    print(f"  Init logits std: MLA={l_o_init.std():.3f}  MLA+x0={l_x0_init.std():.3f}  nano={l_n_init.std():.3f}")
-    print(f"  Init logits max: MLA={l_o_init.max():.3f}  MLA+x0={l_x0_init.max():.3f}  nano={l_n_init.max():.3f}")
+    l_py_init = model_py(x)
+    print(f"  Init logits std: MLA={l_o_init.std():.3f}  MLA+x0={l_x0_init.std():.3f}  nano={l_n_init.std():.3f}  Py={l_py_init.std():.3f}")
+    print(f"  Init logits max: MLA={l_o_init.max():.3f}  MLA+x0={l_x0_init.max():.3f}  nano={l_n_init.max():.3f}  Py={l_py_init.max():.3f}")
 
 for step in range(10):
 
@@ -201,11 +215,18 @@ for step in range(10):
     torch.nn.utils.clip_grad_norm_(model_nano.parameters(), 1.0); opt_nano.step()
     l_nano = l.item()
 
-    print(f"{step+1:5d}  {l_o:10.6f}  {l_x0:10.6f}  {l_d3:10.6f}  {l_d5:10.6f}  {l_nano:10.6f}")
+    opt_py.zero_grad()
+    l = F.cross_entropy(model_py(x).reshape(-1, vocab_size), y.reshape(-1))
+    l.backward()
+    g_py, top_py = grad_norms(model_py)
+    torch.nn.utils.clip_grad_norm_(model_py.parameters(), 1.0); opt_py.step()
+    l_py = l.item()
+
+    print(f"{step+1:5d}  {l_o:10.6f}  {l_x0:10.6f}  {l_d3:10.6f}  {l_d5:10.6f}  {l_nano:10.6f}  {l_py:10.6f}")
 
     if step == 0:
-        print(f"\n  Grad norms (step 1, BEFORE clip): MLA total={g_o:.3f}  MLA+x0={g_x0:.3f}  nano={g_nano:.3f}")
-        for tag, m in [("MLA", model_ours), ("nano", model_nano)]:
+        print(f"\n  Grad norms (step 1, BEFORE clip): MLA total={g_o:.3f}  MLA+x0={g_x0:.3f}  nano={g_nano:.3f}  Py={g_py:.3f}")
+        for tag, m in [("MLA", model_ours), ("nano", model_nano), ("Py", model_py)]:
             print(f"  {tag} attention (before clip):")
             for n, p in m.named_parameters():
                 if p.grad is not None and ('qkv' in n or 'o_proj' in n or 'W_' in n or 'w_' in n):
