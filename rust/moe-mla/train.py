@@ -55,7 +55,7 @@ num_layers = 16
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 720
+seq_len = 768
 batch_size = 8
 grad_accum = 8
 lr = 3e-4
@@ -310,6 +310,8 @@ def main():
                     pm.upload(step)
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
+                    pm.plot(step)
+                    pm.upload(step)
                     state = model.state_dict()
                     state.pop("head.emb_weight", None)
                     ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0, "model": state}
