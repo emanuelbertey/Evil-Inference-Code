@@ -118,9 +118,9 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         """Decoupled content + RoPE scoring with per-part scaling."""
         nh, nkv, hd, dr = self.num_heads, self.num_kv_groups, self.head_dim, self.d_rotate
         # Content: (B, nh, T, hd) @ (B, nh, T, hd)^T / sqrt(hd)
+        # repeat_kv expects (B, S, nkv, D) — call before transpose
+        k_c = repeat_kv(K_state, nh, nkv).transpose(1, 2)
         q_c = Q_state.transpose(1, 2)
-        k_c = K_state.transpose(1, 2)
-        k_c = repeat_kv(k_c, nh, nkv)
         s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) / math.sqrt(hd)
 
         # RoPE: (B, nh, T, dr) @ (B, nh, T, dr)^T / sqrt(dr)
@@ -146,8 +146,7 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         scores = self._decoupled_scores(Q_state, Q_rotate, K, K_rotate, T)
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
-        v = V.transpose(1, 2)
-        v = repeat_kv(v, self.num_heads, self.num_kv_groups)
+        v = repeat_kv(V, self.num_heads, self.num_kv_groups).transpose(1, 2)
         attn_out = torch.matmul(attn_w, v).transpose(1, 2)
         return self.o_proj(attn_out)
 
@@ -162,8 +161,7 @@ class MultiHeadLatentAttentionGQA(nn.Module):
             scores = scores + mask
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
-        v = V_state.transpose(1, 2)
-        v = repeat_kv(v, self.num_heads, self.num_kv_groups)
+        v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
         return torch.matmul(attn_w, v).transpose(1, 2)
 
     def forward_with_cache(self, x, offset, cache):
