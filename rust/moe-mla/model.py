@@ -239,7 +239,8 @@ class TransformerLM(nn.Module):
             # FFN
             residual = h
             h_norm = layer.ffn_norm(h)
-            h_ffn = layer.ffn(h_norm)
+            ffn_out = layer.ffn(h_norm)
+            h_ffn = ffn_out[0] if isinstance(ffn_out, tuple) else ffn_out
             h = residual + h_ffn
 
             # x0 injection
@@ -332,7 +333,8 @@ class TransformerLM(nn.Module):
 
             residual = h
             h_norm = layer.ffn_norm(h)
-            h_ffn = layer.ffn(h_norm)
+            ffn_out = layer.ffn(h_norm)
+            h_ffn = ffn_out[0] if isinstance(ffn_out, tuple) else ffn_out
             h = residual + h_ffn
 
             new_caches.append(new_cache)
