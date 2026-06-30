@@ -3,8 +3,10 @@
 Based on DeepSeek MLA adapted for GQA.
 - Latent KV compression, shared latent across KV groups
 - RoPE on separate rotation dimension
-- Latent cache (C_KV, K_rotate_raw) en vez de K/V expandido
-- Dense attention (no sparse)
+- Latent cache (C_KV, K_rotate_raw)
+- RMSNorm on latent latents (C_Q, C_KV)
+- Decoupled scoring: content/sqrt(hd) + rope/sqrt(dr)
+- N(0, 0.02) init (matching nano-moe-mla)
 """
 
 import math
@@ -16,6 +18,17 @@ from rope import RoPE, apply_rope_partial
 from attention import repeat_kv
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        msq = x.float().pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
+        return (x.float() * msq).type_as(x) * self.weight
+
+
 class QKVProjectionMLA(nn.Module):
     def __init__(self, d_model, num_heads, num_kv_groups, head_dim, d_c, d_c1, d_rotate, bias=False):
         super().__init__()
@@ -25,9 +38,10 @@ class QKVProjectionMLA(nn.Module):
         self.d_c = d_c
         self.d_c1 = d_c1
         self.d_rotate = d_rotate
-        self.qk_dim = head_dim + d_rotate
 
         self.W_down = nn.Linear(d_model, d_c1 + d_c + d_rotate, bias=bias)
+        self.norm_cq = RMSNorm(d_c1)
+        self.norm_ckv = RMSNorm(d_c)
         self.W_up_q = nn.Linear(d_c1, num_heads * (head_dim + d_rotate), bias=bias)
         self.W_up_kv = nn.Linear(d_c, 2 * num_kv_groups * head_dim, bias=bias)
 
@@ -35,6 +49,9 @@ class QKVProjectionMLA(nn.Module):
         B, S, _ = x.shape
         down = self.W_down(x)
         C_Q, C_KV, K_rotate = down.split([self.d_c1, self.d_c, self.d_rotate], dim=-1)
+
+        C_Q = self.norm_cq(C_Q)
+        C_KV = self.norm_ckv(C_KV)
 
         q_up = self.W_up_q(C_Q)
         Q_state, Q_rotate = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
@@ -75,6 +92,7 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         self.num_heads = num_heads
         self.num_kv_groups = num_kv_groups
         self.head_dim = head_dim
+        self.d_rotate = d_rotate
         self.causal = causal
         self.attn_logit_cap = attn_logit_cap
         self.block_size = block_size
@@ -86,56 +104,79 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         self.rope.head_dim = d_rotate
         self.attn_dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, RMSNorm):
+            nn.init.ones_(m.weight)
+
+    def _decoupled_scores(self, Q_state, Q_rot, K_state, K_rot, seq_len):
+        """Decoupled content + RoPE scoring with per-part scaling."""
+        nh, nkv, hd, dr = self.num_heads, self.num_kv_groups, self.head_dim, self.d_rotate
+        # Content: (B, nh, T, hd) @ (B, nh, T, hd)^T / sqrt(hd)
+        q_c = Q_state.transpose(1, 2)
+        k_c = K_state.transpose(1, 2)
+        k_c = repeat_kv(k_c, nh, nkv)
+        s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) / math.sqrt(hd)
+
+        # RoPE: (B, nh, T, dr) @ (B, nh, T, dr)^T / sqrt(dr)
+        q_r = Q_rot.transpose(1, 2)
+        k_r = K_rot.transpose(1, 2).expand(-1, nh, -1, -1)
+        s_r = torch.matmul(q_r, k_r.transpose(-2, -1)) / math.sqrt(dr)
+
+        scores = s_c + s_r
+        if self.attn_logit_cap is not None:
+            scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
+        if self.causal and seq_len > 1:
+            scores = scores + torch.triu(
+                torch.full((seq_len, seq_len), float("-inf"), device=scores.device),
+                diagonal=1
+            ).unsqueeze(0).unsqueeze(0)
+        return scores
+
     def forward(self, x, offset=0):
         Q_state, Q_rotate, K, V, K_rotate = self.qkv(x)
         Q_rotate, K_rotate = self.rope(Q_rotate, K_rotate, offset)
+        B, T = x.shape[0], x.shape[1]
 
-        Q = torch.cat([Q_state, Q_rotate], dim=-1)
-        K_rot_exp = K_rotate.expand(-1, -1, self.num_kv_groups, -1)
-        K = torch.cat([K, K_rot_exp], dim=-1)
-
-        k = repeat_kv(K, self.num_heads, self.num_kv_groups)
-        v = repeat_kv(V, self.num_heads, self.num_kv_groups)
-
-        q = Q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
-        scale = math.sqrt(self.qkv.qk_dim)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / scale
-
-        if self.attn_logit_cap is not None:
-            scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
-
-        seq_len = q.shape[2]
-        if self.causal and seq_len > 1:
-            scores = scores + torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=scores.device), diagonal=1).unsqueeze(0).unsqueeze(0)
-
+        scores = self._decoupled_scores(Q_state, Q_rotate, K, K_rotate, T)
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
+        v = V.transpose(1, 2)
+        v = repeat_kv(v, self.num_heads, self.num_kv_groups)
         attn_out = torch.matmul(attn_w, v).transpose(1, 2)
         return self.o_proj(attn_out)
 
-    def _attention_scores(self, Q, K, V, q_len, kv_len, causal_mask):
-        q = Q.transpose(1, 2)
-        k = K.transpose(1, 2)
-        v = V.transpose(1, 2)
-        scale = math.sqrt(self.qkv.qk_dim)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / scale
-        if self.attn_logit_cap is not None:
-            scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
+    def _attention_from_components(self, Q_state, Q_rot, K_state, V_state, K_rot, q_len, kv_len, causal_mask):
+        """Compute attention output from pre-projected components with decoupled scoring."""
+        scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, q_len)
         if self.causal and causal_mask:
-            mask = torch.triu(torch.full((q_len, kv_len), float("-inf"), device=scores.device), diagonal=kv_len - q_len + 1).unsqueeze(0).unsqueeze(0)
+            mask = torch.triu(
+                torch.full((q_len, kv_len), float("-inf"), device=scores.device),
+                diagonal=kv_len - q_len + 1
+            ).unsqueeze(0).unsqueeze(0)
             scores = scores + mask
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
+        v = V_state.transpose(1, 2)
+        v = repeat_kv(v, self.num_heads, self.num_kv_groups)
         return torch.matmul(attn_w, v).transpose(1, 2)
 
     def forward_with_cache(self, x, offset, cache):
         B, S_new, _ = x.shape
         down = self.qkv.W_down(x)
         C_Q_new, C_KV_new, K_rot_raw = down.split([self.qkv.d_c1, self.qkv.d_c, self.qkv.d_rotate], dim=-1)
+        C_Q_new = self.qkv.norm_cq(C_Q_new)
+        C_KV_new = self.qkv.norm_ckv(C_KV_new)
+
         q_up = self.qkv.W_up_q(C_Q_new)
-        Q_state, Q_rot_raw = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.qkv.d_rotate], dim=-1)
+        Q_state, Q_rot_raw = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
         Q_state = Q_state.reshape(B, S_new, self.num_heads, self.head_dim)
-        Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.qkv.d_rotate)
+        Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.d_rotate)
         Q_rot = self.rope.apply_to_single(Q_rot_raw, offset=offset)
 
         if cache is not None:
@@ -152,24 +193,22 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         V_state = V_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
 
         K_rot = self.rope.apply_to_single(K_rot_full.unsqueeze(2), offset=0)
-        K_rot_exp = K_rot.expand(-1, -1, self.num_kv_groups, -1)
 
-        K = torch.cat([K_state, K_rot_exp], dim=-1)
-        k = repeat_kv(K, self.num_heads, self.num_kv_groups)
-        v = repeat_kv(V_state, self.num_heads, self.num_kv_groups)
-
-        Q = torch.cat([Q_state, Q_rot], dim=-1)
-        attn_out = self._attention_scores(Q, k, v, S_new, S_full, S_new > 1)
+        attn_out = self._attention_from_components(
+            Q_state, Q_rot, K_state, V_state, K_rot, S_new, S_full, S_new > 1)
         return self.o_proj(attn_out), (C_KV_full, K_rot_full)
 
     def forward_with_cache_partial(self, x, offset, cache, rotary_pct):
         B, S_new, _ = x.shape
         down = self.qkv.W_down(x)
         C_Q_new, C_KV_new, K_rot_raw = down.split([self.qkv.d_c1, self.qkv.d_c, self.qkv.d_rotate], dim=-1)
+        C_Q_new = self.qkv.norm_cq(C_Q_new)
+        C_KV_new = self.qkv.norm_ckv(C_KV_new)
+
         q_up = self.qkv.W_up_q(C_Q_new)
-        Q_state, Q_rot_raw = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.qkv.d_rotate], dim=-1)
+        Q_state, Q_rot_raw = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
         Q_state = Q_state.reshape(B, S_new, self.num_heads, self.head_dim)
-        Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.qkv.d_rotate)
+        Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.d_rotate)
 
         Q_rot, _ = apply_rope_partial(Q_rot_raw, Q_rot_raw, offset, rotary_pct,
             self.rope.inv_freq, self.rope.cos_cache, self.rope.sin_cache,
@@ -191,12 +230,7 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         _, K_rot = apply_rope_partial(K_rot_full.unsqueeze(2), K_rot_full.unsqueeze(2), 0, rotary_pct,
             self.rope.inv_freq, self.rope.cos_cache, self.rope.sin_cache,
             self.rope.head_dim, self.rope.max_seq_len)
-        K_rot_exp = K_rot.expand(-1, -1, self.num_kv_groups, -1)
 
-        K = torch.cat([K_state, K_rot_exp], dim=-1)
-        k = repeat_kv(K, self.num_heads, self.num_kv_groups)
-        v = repeat_kv(V_state, self.num_heads, self.num_kv_groups)
-
-        Q = torch.cat([Q_state, Q_rot], dim=-1)
-        attn_out = self._attention_scores(Q, k, v, S_new, S_full, S_new > 1)
+        attn_out = self._attention_from_components(
+            Q_state, Q_rot, K_state, V_state, K_rot, S_new, S_full, S_new > 1)
         return self.o_proj(attn_out), (C_KV_full, K_rot_full)

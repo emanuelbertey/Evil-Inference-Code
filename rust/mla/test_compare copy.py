@@ -4,6 +4,7 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, "LLM_D3-main"))
 from model import TransformerLM
+from attention import repeat_kv
 from LLM_2 import GPT, GPTConfig
 _nano_path = os.path.join(_DIR, "nano-moe-mla-main", "steps", "03_block_model.py")
 _nano_spec = importlib.util.spec_from_file_location("nano_block_model", _nano_path)
@@ -52,12 +53,6 @@ d_c = 32; d_c1 = 32; d_rotate = 16
 num_kv_groups = 4
 ffn_inter = 640  # compute_intermediate_dim(256, 4.0, SwiGLU) = 640
 
-def init_nano(m):
-    if isinstance(m, nn.Linear):
-        nn.init.normal_(m.weight, mean=0.0, std=0.02)
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
-
 model_ours = TransformerLM(
     vocab_size=vocab_size, d_model=d_model, num_layers=n_layer,
     num_heads=n_head, num_kv_groups=num_kv_groups, head_dim=head_dim,
@@ -66,8 +61,6 @@ model_ours = TransformerLM(
     use_mla=True, mla_block_size=128,
     mla_d_c=d_c, mla_d_c1=d_c1, mla_d_rotate=d_rotate,
 ).to(device)
-model_ours.apply(init_nano)
-
 model_ours_x0 = TransformerLM(
     vocab_size=vocab_size, d_model=d_model, num_layers=n_layer,
     num_heads=n_head, num_kv_groups=num_kv_groups, head_dim=head_dim,
@@ -76,7 +69,6 @@ model_ours_x0 = TransformerLM(
     use_mla=True, mla_block_size=128,
     mla_d_c=d_c, mla_d_c1=d_c1, mla_d_rotate=d_rotate,
 ).to(device)
-model_ours_x0.apply(init_nano)
 
 cfg_d3 = GPTConfig(
     block_size=seq_len, vocab_size=vocab_size, n_layer=n_layer,
@@ -157,14 +149,63 @@ def grad_norms(model, tag=""):
     top = sorted(norms.items(), key=lambda x: -x[1])[:5]
     return total_norm, top
 
+@torch.no_grad()
+def attn_entropy(model, x, tag=""):
+    """Forward pass capturing per-layer attention entropy."""
+    h = model.embedding(x)
+    for li, layer in enumerate(model.transformer.layers):
+        res = h
+        h = layer.attn_norm(h)
+        qkv = layer.attention.qkv
+        Qs, Qr, K, V, Kr = qkv(h)
+        Qr, Kr = layer.attention.rope(Qr, Kr, 0)
+        Q = torch.cat([Qs, Qr], dim=-1)
+        Kr_e = Kr.expand(-1, -1, layer.num_kv_groups, -1)
+        K_ = torch.cat([K, Kr_e], dim=-1)
+        k = repeat_kv(K_, layer.num_heads, layer.num_kv_groups)
+        v = repeat_kv(V, layer.num_heads, layer.num_kv_groups)
+        q = Q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(qkv.qk_dim)
+        attn = F.softmax(scores, dim=-1)
+        ent = -(attn * torch.log(attn.clamp(1e-10))).sum(-1).mean().item()
+        print(f"  {tag} layer{li}: scores [{scores.min():.2f}, {scores.max():.2f}] mean={scores.mean():.2f}  ent={ent:.3f}")
+        out = (attn @ v).transpose(1, 2)
+        h = res + layer.attention.o_proj(out)
+        res = h; h = layer.ffn_norm(h); h = layer.ffn(h); h = res + h
+    h = model.transformer.final_norm(h)
+    logits = model.head(h)
+    print(f"  {tag} logits: mean={logits.mean():.3f} std={logits.std():.3f} max={logits.max():.3f}")
+    return logits
+
 print(f"{'step':>5}  {'MLA':>10}  {'MLA+x0':>10}  {'D3':>10}  {'D5(XSA)':>10}  {'nano':>10}")
 
-# Logit stats at init (diagnostic)
+# Diagnóstico: atención y logits en step 0
+print("\n=== DIAG: forward pass (attention scores/entropy) ===")
+attn_entropy(model_ours, x, "MLA")
+print()
+# Repetir forward de nano internamente
 with torch.no_grad():
-    l_o_init, l_x0_init = model_ours(x), model_ours_x0(x)
-    l_n_init, _ = model_nano(x)
-    print(f"  Init logits std: MLA={l_o_init.std():.3f}  MLA+x0={l_x0_init.std():.3f}  nano={l_n_init.std():.3f}")
-    print(f"  Init logits max: MLA={l_o_init.max():.3f}  MLA+x0={l_x0_init.max():.3f}  nano={l_n_init.max():.3f}")
+    h = model_nano.tok_emb(x)
+    for li, blk in enumerate(model_nano.blocks):
+        res = h; h = blk.norm1(h); cos, sin = model_nano.rope_cos[:x.shape[1]], model_nano.rope_sin[:x.shape[1]]
+        q = blk.attn.w_q(h).view(x.shape[0], x.shape[1], 4, 80).transpose(1, 2)
+        q_c, q_r = q[..., :64], q[..., 64:]
+        c_kv = blk.attn.w_dkv(h)
+        k_c = blk.attn.w_uk(c_kv).view(x.shape[0], x.shape[1], 4, 64).transpose(1, 2)
+        v = blk.attn.w_uv(c_kv).view(x.shape[0], x.shape[1], 4, 64).transpose(1, 2)
+        k_r = blk.attn.w_kr(h).view(x.shape[0], 1, x.shape[1], 16)
+        q_r = _nano_mod.apply_rope(q_r, cos, sin)
+        k_r = _nano_mod.apply_rope(k_r, cos, sin)
+        scores = (q_c @ k_c.transpose(-2, -1) + q_r @ k_r.transpose(-2, -1)) / math.sqrt(80)
+        attn = F.softmax(scores, dim=-1)
+        ent = -(attn * torch.log(attn.clamp(1e-10))).sum(-1).mean().item()
+        print(f"  nano layer{li}: scores [{scores.min():.2f}, {scores.max():.2f}] mean={scores.mean():.2f}  ent={ent:.3f}")
+        h = res + blk.attn.w_o((attn @ v).transpose(1, 2).reshape(x.shape[0], x.shape[1], 256))
+        res = h; h = blk.norm2(h); h = blk.moe(h); h = res + h
+    h = model_nano.norm_f(h)
+    logits = model_nano.lm_head(h)
+    print(f"  nano logits: mean={logits.mean():.3f} std={logits.std():.3f} max={logits.max():.3f}")
+print()
 
 for step in range(10):
 
