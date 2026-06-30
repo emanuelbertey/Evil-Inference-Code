@@ -1,11 +1,13 @@
 import sys, os, time, math, torch
 import torch.nn.functional as F
 _DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
 from model import TransformerLM
 from dataset import download_wikipedia_50mb, StreamingDataset
 from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
+from plot import PlotManager
 
 
 class BPEWrapper:
@@ -53,7 +55,7 @@ num_layers = 16
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 640
+seq_len = 720
 batch_size = 8
 grad_accum = 8
 lr = 3e-4
@@ -85,6 +87,7 @@ z_loss_gamma = 0.001
 bias_decay = 1e-3
 # Per-layer expert counts: list or int (same for all MoE layers)
 # n_experts = [4, 4, 4, 6, 6, 6, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 6, 6, 6, 4, 4, 4, 4]
+plot_interval = 256
 
 
 def main():
@@ -102,6 +105,7 @@ def main():
         hf = HFManager(repo_id=repo_id, revision=revision)
         hf._get_token()
         pusher = PeriodicPusher(hf, interval_minutes=10)
+    pm = PlotManager(hf if not test_mode else None, save_dir=_DIR, plot_interval=plot_interval)
 
     # ── Precision ──────────────────────────────────────────────────────────
     amp = False
@@ -295,10 +299,15 @@ def main():
                     print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
                     last_rpt_time = now
                     last_rpt_step = step
+                    pm.log(step, loss.item(), lr_curr, tps, aux_loss.item() if isinstance(aux_loss, torch.Tensor) else None)
 
                 if not test_mode and step % 50 == 0:
                     sample = generate_sample(model, tokenizer, device)
                     print(f"  >>> {sample}")
+
+                if not test_mode and step % plot_interval == 0:
+                    pm.plot(step)
+                    pm.upload(step)
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
                     state = model.state_dict()
