@@ -2,10 +2,11 @@ import sys, os, time, math, torch
 import torch.nn.functional as F
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_DIR, ".."))
-from mla.model import TransformerLM
+from model import TransformerLM
 from dataset import download_wikipedia_50mb, StreamingDataset
 from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
+
 
 class BPEWrapper:
     def __init__(self, tok):
@@ -16,6 +17,7 @@ class BPEWrapper:
     def decode(self, ids):
         return self.tokenizer.decode(ids, skip_special_tokens=False)
 
+
 @torch.no_grad()
 def generate_sample(model, tokenizer, device, prompt="hola", max_new=50):
     model.eval()
@@ -24,6 +26,7 @@ def generate_sample(model, tokenizer, device, prompt="hola", max_new=50):
                          use_partial_rope=True, rotary_pct=0.25)
     model.train()
     return tokenizer.decode(out[0].tolist())
+
 
 def train_tokenizer_from_wiki(vocab_size, output_path):
     wiki = download_wikipedia_50mb()
@@ -36,11 +39,13 @@ def train_tokenizer_from_wiki(vocab_size, output_path):
     tok.save(output_path)
     return output_path
 
+
 def get_lr(step, total, warmup, lr):
     if step < warmup:
         return lr * (step + 1) / max(warmup, 1)
     t = (step - warmup) / max(total - warmup, 1)
     return lr * (0.2 + 0.8 * (1.0 + math.cos(math.pi * t)) / 2.0)
+
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 d_model = 768
@@ -57,10 +62,24 @@ warmup_steps = 50
 bpe_vocab = 32000
 rotary_pct = 0.25
 use_mla = True
-mla_d_c = 32      # 16=ahorroMaximo 32=balance(default) 64=calidadMax. Comprime K y V.
-mla_d_c1 = None      # Comprime Q. NO afecta cache, solo parametros. Dejalo igual que d_c.
-mla_d_rotate = None  # RoPE. Info de posicion del token. 16 default. No tocar.
+mla_d_c = 32
+mla_d_c1 = None
+mla_d_rotate = None
 tok_path = os.path.join(_DIR, "tokenizer.json")
+
+# ─── MoE Config ──────────────────────────────────────────────────────────────
+use_moe = True
+n_dense_start = 3
+n_dense_end = 3
+n_experts = 4
+top_k = 1
+n_shared = 1
+capacity_factor = 1.25
+z_loss_gamma = 0.001
+bias_decay = 1e-3
+# Per-layer expert counts: list or int (same for all MoE layers)
+# n_experts = [4, 4, 4, 6, 6, 6, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 6, 6, 6, 4, 4, 4, 4]
+
 
 def main():
     test_mode = len(sys.argv) > 1 and sys.argv[1].endswith(".txt")
@@ -120,10 +139,14 @@ def main():
     model = TransformerLM(
         vocab_size=tokenizer.vocab_size, d_model=d_model, num_layers=num_layers,
         num_heads=num_heads, num_kv_groups=num_kv_groups, head_dim=head_dim,
-        use_swiglu=True, use_x0=True, max_seq_len=seq_len,
+        use_swiglu=True, use_x0=False, max_seq_len=seq_len,
         residual_dropout=0.0, attn_dropout=0.0, ffn_dropout=0.0,
         use_mla=True, mla_block_size=128,
         mla_d_c=mla_d_c, mla_d_c1=mla_d_c1, mla_d_rotate=mla_d_rotate,
+        use_moe=use_moe, n_experts=n_experts, top_k=top_k, n_shared=n_shared,
+        capacity_factor=capacity_factor, z_loss_gamma=z_loss_gamma,
+        bias_decay=bias_decay,
+        n_dense_start=n_dense_start, n_dense_end=n_dense_end,
     ).to(device).to(dtype=dtype)
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
@@ -181,9 +204,8 @@ def main():
     emb_p = model.embedding.weight.numel()
     layer_p = sum(p.numel() for l in model.transformer.layers for p in l.parameters())
     norm_p = model.transformer.final_norm.weight.numel()
-    x0_p = model.x0_lambdas.numel() if model.x0_lambdas is not None else 0
-    total_p = emb_p + layer_p + norm_p + x0_p
-    print(f"Params: emb={emb_p:,} + {num_layers}capas={layer_p:,} + norm={norm_p} + x0={x0_p} = {total_p:,}")
+    total_p = emb_p + layer_p + norm_p
+    print(f"Params: emb={emb_p:,} + {num_layers}capas={layer_p:,} + norm={norm_p} = {total_p:,}")
     print(f"dim={d_model} lay={num_layers} heads={num_heads} kv={num_kv_groups} seq={seq_len} bs={batch_size} ga={grad_accum} lr={lr}")
     gqa_cpt = 2 * num_kv_groups * head_dim
     if use_mla:
@@ -194,6 +216,9 @@ def main():
         print(f"MLA: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
     else:
         cpt = gqa_cpt
+    if use_moe:
+        moe_layers = sum(1 for l in model.transformer.layers if l.use_moe)
+        print(f"MoE: {moe_layers}/{num_layers} MoE layers | {n_dense_start} dense start / {n_dense_end} dense end | n_exp={n_experts} top_k={top_k} n_shared={n_shared}")
     print(f"Tokens: {n:,} | Steps total: {total_steps}")
 
     # ── Train loop ──────────────────────────────────────────────────────────
@@ -238,8 +263,9 @@ def main():
                     pg["lr"] = lr_curr
                 opt.zero_grad()
 
-            logits = model.forward_train_partial_rope(x, rotary_pct=rotary_pct)
+            logits, aux_loss = model(x)
             loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
+            loss = loss + aux_loss  # add MoE z-loss
             (loss / grad_accum).backward()
             micro += 1
 
@@ -292,6 +318,7 @@ def main():
         hf.upload_checkpoint(ckpt_path, safe_path, tok_path, step)
 
     print(f"Done! {step} steps in {time.time()-t0:.1f}s")
+
 
 if __name__ == "__main__":
     main()

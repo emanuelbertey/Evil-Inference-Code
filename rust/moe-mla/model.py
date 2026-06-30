@@ -1,14 +1,17 @@
-"""Transformer Language Model compatible with Rust TransformerLM.
+"""Transformer Language Model — supports GQA, MLA, MoE, hybrid layers.
 
 Architecture:
-  Embedding -> Transformer(N layers x GQA+RoPE+SwiGLU) -> Linear -> logits
+  Embedding -> Transformer(N layers) -> Linear -> logits
 
 Features:
   - GQA with configurable num_heads / num_kv_groups
+  - MLA with Q/KV compression, RMSNorm latents, decoupled scoring
+  - MoE with bmm experts, shared experts, bias trick, z-loss, capacity
+  - Hybrid layers (first/last N dense, middle MoE)
   - RoPE with partial rotation support
   - x0 injection (learned scalar per layer)
+  - Depth-scaled init for stability at any depth
   - KV cache for autoregressive generation
-  - Weight conversion to/from Rust .safetensors format
 """
 
 import math
@@ -17,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from block import Transformer
+from moe_block import MoETransformer
 from cache_kv import KVCache
 from attention import repeat_kv
 from rope import apply_rope_partial
@@ -59,7 +63,7 @@ class TransformerLM(nn.Module):
         bias: bool = False,
         norm_eps: float = 1e-5,
         ffn_round_to: int = 64,
-        use_x0: bool = True,
+        use_x0: bool = False,
         use_sparse_attn: bool = False,
         num_selected_blocks: int = 16,
         use_mla: bool = False,
@@ -67,15 +71,62 @@ class TransformerLM(nn.Module):
         mla_d_c1: int | None = None,
         mla_d_rotate: int | None = None,
         mla_block_size: int = 128,
+        # MoE options
+        use_moe: bool = False,
+        n_experts: int | list[int] = 8,
+        top_k: int = 2,
+        n_shared: int = 1,
+        expert_dim: int | list[int] | None = None,
+        capacity_factor: float = 1.25,
+        z_loss_gamma: float = 0.001,
+        bias_decay: float = 1e-3,
+        n_dense_start: int = 3,
+        n_dense_end: int = 3,
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.num_layers = num_layers
+        self.use_moe = use_moe
 
         self.embedding = nn.Embedding(vocab_size, d_model)
+        self.use_moe = use_moe
+
+        # Depth-scaled init on embedding
         nn.init.normal_(self.embedding.weight, mean=0, std=0.02)
-        self.transformer = Transformer(
+
+        if use_moe:
+            self.transformer = MoETransformer(
+                num_layers=num_layers,
+                d_model=d_model,
+                num_heads=num_heads,
+                num_kv_groups=num_kv_groups,
+                head_dim=head_dim,
+                ffn_expansion=ffn_expansion,
+                use_swiglu=use_swiglu,
+                max_seq_len=max_seq_len,
+                rope_base=rope_base,
+                rope_scaling=rope_scaling,
+                causal=causal,
+                attn_dropout=attn_dropout,
+                ffn_dropout=ffn_dropout,
+                residual_dropout=residual_dropout,
+                attn_logit_cap=attn_logit_cap,
+                bias=bias,
+                norm_eps=norm_eps,
+                ffn_round_to=ffn_round_to,
+                use_mla=use_mla,
+                mla_d_c=mla_d_c, mla_d_c1=mla_d_c1,
+                mla_d_rotate=mla_d_rotate, mla_block_size=mla_block_size,
+                use_moe=use_moe,
+                n_experts=n_experts, top_k=top_k, n_shared=n_shared,
+                expert_dim=expert_dim,
+                capacity_factor=capacity_factor,
+                z_loss_gamma=z_loss_gamma, bias_decay=bias_decay,
+                n_dense_start=n_dense_start, n_dense_end=n_dense_end,
+            )
+        else:
+            self.transformer = Transformer(
             num_layers=num_layers,
             d_model=d_model,
             num_heads=num_heads,
@@ -109,17 +160,22 @@ class TransformerLM(nn.Module):
         else:
             self.x0_lambdas = None
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Standard forward (for training, no cache).
 
         Args:
             input_ids: (batch, seq_len) - token indices
         Returns:
-            logits: (batch, seq_len, vocab_size)
+            (logits, aux_loss): (batch, seq_len, vocab_size), scalar tensor
+            aux_loss is the z-loss from MoE routers (0 if no MoE).
         """
         x = self.embedding(input_ids)
-        x = self.transformer(x, 0)
-        return self.head(x)
+        if self.use_moe:
+            x, aux_loss = self.transformer(x, 0)
+        else:
+            x = self.transformer(x, 0)
+            aux_loss = 0.0
+        return self.head(x), aux_loss
 
     def forward_train_partial_rope(
         self,
