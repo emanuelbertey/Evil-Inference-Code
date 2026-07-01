@@ -180,7 +180,8 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
         attn_out = torch.matmul(attn_w, v)  # (B, nh, T, hd)
         if self.use_xsa:
-            Vn = F.normalize(v, dim=-1)
+            v_new = v[:, :, -q_len:, :]
+            Vn = F.normalize(v_new, dim=-1)
             attn_out = attn_out - (attn_out * Vn).sum(dim=-1, keepdim=True) * Vn
         return attn_out.transpose(1, 2)
 

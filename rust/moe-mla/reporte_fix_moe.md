@@ -62,11 +62,14 @@ Este documento contiene un análisis detallado de la implementación de **Mixtur
 La opción `use_xsa` está implementada en [mla_attention.py](file:///c:/Users/Emabe/Documents/GitHub/xlstm/rust/moe-mla/mla_attention.py#L153-L157) de la siguiente forma:
 ```python
 if self.use_xsa:
-    Vn = F.normalize(v, dim=-1)
+    v_new = v[:, :, -q_len:, :]
+    Vn = F.normalize(v_new, dim=-1)
     attn_out = attn_out - (attn_out * Vn).sum(dim=-1, keepdim=True) * Vn
 ```
 * **Qué es:** Realiza una proyección ortogonal restando la componente del output de atención que es paralela al vector de valores normalizado `Vn`. Esto actúa como un regularizador espacial de la atención.
-* **Estado:** **[CORREGIDO]** Se eliminaron las conversiones forzadas e innecesarias hacia y desde `float32`. Ahora el cálculo se realiza de manera nativa en la precisión del modelo (`bfloat16`, `float16` o `float32`), eliminando la penalización de rendimiento innecesaria.
+* **Estado:** **[CORREGIDO]** 
+  1. Se eliminaron las conversiones forzadas e innecesarias hacia y desde `float32` (cálculo nativo en la precisión del modelo).
+  2. **Incompatibilidad de dimensiones en Inferencia (Generación con Caché):** Se solucionó un bug crítico donde `attn_out` (longitud de secuencia `q_len=1`) se multiplicaba contra `Vn` (longitud de secuencia completa `kv_len` acumulada en el cache). Esto rompía la compatibilidad de dimensiones arrojando `RuntimeError: The size of tensor a (2) must match the size of tensor b (3)`. Ahora se realiza un slicing (`v[:, :, -q_len:, :]`) para aislar solo los vectores de valor correspondientes a los nuevos tokens generados, manteniendo la correspondencia espacial y posicional de la ortogonalización.
 * **Nota sobre la Nomenclatura:** Se etiqueta como "XSA" (Cross-Sample Attention), pero en realidad no realiza ninguna comunicación o procesamiento entre diferentes secuencias del lote (cross-sample). Es puramente un paso de ortogonalización intra-secuencia.
 
 ---
@@ -78,6 +81,7 @@ if self.use_xsa:
 | **MoELayer** | Rendimiento | **Media** | Bucle `for e in range(n_experts)` secuencial en Python. | Implementar indexación vectorizada nativa o kernel Triton. |
 | **MoELayer** | Diseño Distr. | **Alta** | Bias trick sin comunicación distribuida (`all_reduce`). | Agregar `torch.distributed.all_reduce(counts)` antes de actualizar biases. |
 | **MLA Attention** | Rendimiento | **Baja** | Creación dinámica de matrices causales de `-inf`. | **[CORREGIDO]** Se implementó `register_buffer("causal_mask")` para evitar la creación constante en GPU. |
-| **XSA Feature** | Diseño | **Baja** | Inconsistencia de nombre y conversiones de tipo. | **[CORREGIDO]** Se eliminaron las conversiones redundantes a `float32`. |
+| **XSA Feature** | Diseño / Bug | **Baja** | Inconsistencia de tipo y crash de dimensiones en inferencia. | **[CORREGIDO]** Se removieron los casts a float32 y se sliceó el vector de valores en inferencia para coincidir con `q_len`. |
+
 
 
