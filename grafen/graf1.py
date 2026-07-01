@@ -10,85 +10,99 @@ from sklearn.cluster import KMeans
 from sentence_transformers import SentenceTransformer
 
 # ── Download Wikipedia ES 100MB ──────────────────────────────────────────
-print("Downloading ~100MB Spanish Wikipedia...")
-from datasets import load_dataset
-ds = load_dataset("wikimedia/wikipedia", "20231101.es", split="train", streaming=True)
-
+import json, pickle
+WIKI_CACHE = "wiki_100mb.json"
 texts = []
-total = 0
-for item in ds:
-    t = f"{item['title']}. {item['text']}"
-    texts.append(t)
-    total += len(t.encode("utf-8"))
-    if total >= 100_000_000:
-        break
-print(f"Downloaded {len(texts)} articles, ~{total//1024//1024}MB")
+if os.path.exists(WIKI_CACHE):
+    with open(WIKI_CACHE, encoding="utf-8") as f:
+        texts = json.load(f)
+    print(f"Loaded {len(texts)} articles from {WIKI_CACHE}")
+else:
+    print("Downloading ~100MB Spanish Wikipedia...")
+    from datasets import load_dataset
+    ds = load_dataset("wikimedia/wikipedia", "20231101.es", split="train", streaming=True)
+    total = 0
+    for item in ds:
+        t = f"{item['title']}. {item['text']}"
+        texts.append(t)
+        total += len(t.encode("utf-8"))
+        if total >= 100_000_000:
+            break
+    with open(WIKI_CACHE, "w", encoding="utf-8") as f:
+        json.dump(texts, f, ensure_ascii=False)
+    print(f"Downloaded {len(texts)} articles, ~{total//1024//1024}MB, cached to {WIKI_CACHE}")
 
-# ── Load models ──────────────────────────────────────────────────────────
-print("Loading NLP models...")
-nlp = spacy.load("es_core_news_sm")
-bert = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+KG_CACHE = "knowledge_graph.pkl"
+if os.path.exists(KG_CACHE):
+    print(f"Loading cached KG from {KG_CACHE}...")
+    with open(KG_CACHE, "rb") as f:
+        cached = pickle.load(f)
+    entities = cached["entities"]
+    cooc = cached["cooc"]
+    hierarchy = cached["hierarchy"]
+    cluster_names = cached["cluster_names"]
+    entity_names = cached["entity_names"]
+    embeds = cached["embeds"]
+    print(f"Loaded: {len(entity_names)} entities, {len(cooc)} relationships")
+else:
+    print("Loading NLP models...")
+    nlp = spacy.load("es_core_news_sm")
+    bert = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 
-# ── Extract entities ─────────────────────────────────────────────────────
-print("Extracting entities (NER)...")
-entities = {}  # name -> {type, count, contexts}
-for text in texts[:500]:  # sample first 500 articles
-    doc = nlp(text[:10000])
-    for ent in doc.ents:
-        name = ent.text.strip()
-        if len(name) < 3:
-            continue
-        if name not in entities:
-            entities[name] = {"type": ent.label_, "count": 0, "contexts": [], "articles": set()}
-        entities[name]["count"] += 1
-        if len(entities[name]["contexts"]) < 5:
-            entities[name]["contexts"].append(doc.text[max(0, ent.start_char-50):ent.end_char+50])
-        entities[name]["articles"].add(text[:50])
+    print("Extracting entities (NER)...")
+    entities = {}
+    for text in texts[:500]:
+        doc = nlp(text[:10000])
+        for ent in doc.ents:
+            name = ent.text.strip()
+            if len(name) < 3:
+                continue
+            if name not in entities:
+                entities[name] = {"type": ent.label_, "count": 0, "contexts": []}
+            entities[name]["count"] += 1
+            if len(entities[name]["contexts"]) < 5:
+                entities[name]["contexts"].append(doc.text[max(0, ent.start_char-50):ent.end_char+50])
 
-print(f"Found {len(entities)} entities")
+    print(f"Found {len(entities)} entities")
 
-# ── Build knowledge graph ────────────────────────────────────────────────
-print("Building knowledge graph...")
-entity_names = list(entities.keys())[:200]  # top 200
-entity_types = [entities[e]["type"] for e in entity_names]
-entity_counts = [entities[e]["count"] for e in entity_names]
+    print("Building knowledge graph...")
+    entity_names = list(entities.keys())[:200]
+    entity_counts = [entities[e]["count"] for e in entity_names]
 
-# Embeddings for semantic clustering
-embeds = bert.encode(entity_names, show_progress_bar=True)
+    embeds = bert.encode(entity_names, show_progress_bar=True)
 
-# Cluster into categories
-n_clusters = min(15, len(entity_names) // 5)
-kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-clusters = kmeans.fit_predict(embeds)
+    n_clusters = min(15, max(3, len(entity_names) // 5))
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    clusters = kmeans.fit_predict(embeds)
 
-# Build hierarchy: cluster → entity
-hierarchy = defaultdict(list)
-for name, cluster_id in zip(entity_names, clusters):
-    hierarchy[f"category_{cluster_id}"].append(name)
+    hierarchy = defaultdict(list)
+    for name, cluster_id in zip(entity_names, clusters):
+        hierarchy[f"category_{cluster_id}"].append(name)
 
-# Name categories by most representative entity
-cluster_names = {}
-for i in range(n_clusters):
-    members = [(entity_names[j], entity_counts[j]) for j in range(len(entity_names)) if clusters[j] == i]
-    members.sort(key=lambda x: -x[1])
-    cluster_names[f"category_{i}"] = members[0][0] if members else f"cat_{i}"
+    cluster_names = {}
+    for i in range(n_clusters):
+        members = [(entity_names[j], entity_counts[j]) for j in range(len(entity_names)) if clusters[j] == i]
+        members.sort(key=lambda x: -x[1])
+        cluster_names[f"category_{i}"] = members[0][0] if members else f"cat_{i}"
 
-# Co-occurrence edges (within same article)
-print("Building relationships...")
-cooc = defaultdict(int)
-entity_set = set(entity_names)
-article_entities = []
-for text in texts[:500]:
-    doc = nlp(text[:10000])
-    found = set()
-    for ent in doc.ents:
-        if ent.text in entity_set:
-            found.add(ent.text)
-    article_entities.append(found)
-    for e1 in found:
-        for e2 in found:
-            if e1 < e2:
-                cooc[tuple(sorted([e1, e2]))] += 1
+    print("Building relationships...")
+    cooc = defaultdict(int)
+    entity_set = set(entity_names)
+    for text in texts[:500]:
+        doc = nlp(text[:10000])
+        found = set()
+        for ent in doc.ents:
+            if ent.text in entity_set:
+                found.add(ent.text)
+        for e1 in found:
+            for e2 in found:
+                if e1 < e2:
+                    cooc[tuple(sorted([e1, e2]))] += 1
+
+    with open(KG_CACHE, "wb") as f:
+        pickle.dump({"entities": entities, "cooc": cooc, "hierarchy": hierarchy,
+                     "cluster_names": cluster_names, "entity_names": entity_names, "embeds": embeds}, f)
+    print("KG cached to", KG_CACHE)
 
 # ── Query engine ─────────────────────────────────────────────────────────
 class KnowledgeGraph:
@@ -227,9 +241,4 @@ while True:
     except KeyboardInterrupt:
         break
 
-# ── Save for reuse ───────────────────────────────────────────────────────
-import pickle
-with open("knowledge_graph.pkl", "wb") as f:
-    pickle.dump({"entities": entities, "cooc": cooc, "hierarchy": hierarchy,
-                 "cluster_names": cluster_names, "entity_names": entity_names}, f)
-print("\nSaved: knowledge_graph.pkl")
+print("\nKG ready. Load with: kg = KnowledgeGraph(entities, cooc, hierarchy, cluster_names, embeds, entity_names)")
