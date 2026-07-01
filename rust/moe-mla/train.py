@@ -64,6 +64,7 @@ warmup_steps = 50
 bpe_vocab = 32000
 rotary_pct = 0.25
 use_mla = True
+use_xsa = True
 mla_d_c = 32
 mla_d_c1 = None
 mla_d_rotate = None
@@ -157,7 +158,7 @@ def main():
         use_swiglu=True, use_x0=False, max_seq_len=seq_len,
         ffn_expansion=ffn_expansion,
         residual_dropout=0.0, attn_dropout=0.0, ffn_dropout=0.0,
-        use_mla=True, mla_block_size=128,
+        use_mla=True, use_xsa=use_xsa, mla_block_size=128,
         mla_d_c=mla_d_c, mla_d_c1=mla_d_c1, mla_d_rotate=mla_d_rotate,
         use_moe=use_moe, n_experts=n_experts, top_k=top_k, n_shared=n_shared,
         expert_dim=exp_dim,
@@ -230,7 +231,8 @@ def main():
         d_c_real = a.d_c; d_rot_real = a.d_rotate; d_c1_real = a.d_c1
         cpt = d_c_real + d_rot_real
         pct = 100 * (1 - cpt / gqa_cpt)
-        print(f"MLA: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
+        xsa_tag = " + XSA" if use_xsa else ""
+        print(f"MLA{xsa_tag}: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
     else:
         cpt = gqa_cpt
     if use_moe:

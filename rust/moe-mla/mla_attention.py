@@ -81,7 +81,8 @@ class MultiHeadLatentAttentionGQA(nn.Module):
     def __init__(self, d_model, num_heads, num_kv_groups=0, head_dim=None,
                  max_seq_len=2048, rope_base=10000.0, rope_scaling=1.0,
                  causal=True, dropout=0.0, attn_logit_cap=None, bias=False,
-                 d_c=None, d_c1=None, d_rotate=None, block_size=128):
+                 d_c=None, d_c1=None, d_rotate=None, block_size=128,
+                 use_xsa=False):
         super().__init__()
         if num_kv_groups == 0: num_kv_groups = num_heads
         if head_dim is None: head_dim = d_model // num_heads
@@ -96,6 +97,7 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         self.causal = causal
         self.attn_logit_cap = attn_logit_cap
         self.block_size = block_size
+        self.use_xsa = use_xsa
 
         self.qkv = QKVProjectionMLA(d_model, num_heads, num_kv_groups, head_dim,
                                      d_c, d_c1, d_rotate, bias)
@@ -103,6 +105,10 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         self.rope = RoPE(head_dim=d_rotate, max_seq_len=max_seq_len, base=rope_base, scaling_factor=rope_scaling)
         self.rope.head_dim = d_rotate
         self.attn_dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
+        if causal:
+            mask = torch.triu(torch.full((max_seq_len, max_seq_len), float("-inf")), diagonal=1)
+            self.register_buffer("causal_mask", mask, persistent=False)
 
         self.apply(self._init_weights)
 
@@ -114,7 +120,7 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         elif isinstance(m, RMSNorm):
             nn.init.ones_(m.weight)
 
-    def _decoupled_scores(self, Q_state, Q_rot, K_state, K_rot, seq_len):
+    def _decoupled_scores(self, Q_state, Q_rot, K_state, K_rot, seq_len, kv_len=None, causal=None):
         """Decoupled content + RoPE scoring with per-part scaling."""
         nh, nkv, hd, dr = self.num_heads, self.num_kv_groups, self.head_dim, self.d_rotate
         # Content: (B, nh, T, hd) @ (B, nh, T, hd)^T / sqrt(hd)
@@ -131,11 +137,24 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         scores = s_c + s_r
         if self.attn_logit_cap is not None:
             scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
-        if self.causal and seq_len > 1:
-            scores = scores + torch.triu(
-                torch.full((seq_len, seq_len), float("-inf"), device=scores.device),
-                diagonal=1
-            ).unsqueeze(0).unsqueeze(0)
+
+        is_causal = self.causal if causal is None else causal
+        if is_causal:
+            if kv_len is None:
+                kv_len = K_state.shape[1]
+            if seq_len > 1:
+                if seq_len == kv_len:
+                    if seq_len <= self.causal_mask.shape[0]:
+                        scores = scores + self.causal_mask[:seq_len, :seq_len]
+                    else:
+                        mask = torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=scores.device), diagonal=1)
+                        scores = scores + mask
+                else:
+                    mask = torch.triu(
+                        torch.full((seq_len, kv_len), float("-inf"), device=scores.device),
+                        diagonal=kv_len - seq_len + 1
+                    )
+                    scores = scores + mask
         return scores
 
     def forward(self, x, offset=0):
@@ -147,22 +166,23 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V, self.num_heads, self.num_kv_groups).transpose(1, 2)
-        attn_out = torch.matmul(attn_w, v).transpose(1, 2)
-        return self.o_proj(attn_out)
+        attn_out = torch.matmul(attn_w, v)  # (B, nh, T, hd)
+        if self.use_xsa:
+            Vn = F.normalize(v, dim=-1)
+            attn_out = attn_out - (attn_out * Vn).sum(dim=-1, keepdim=True) * Vn
+        return self.o_proj(attn_out.transpose(1, 2))
 
     def _attention_from_components(self, Q_state, Q_rot, K_state, V_state, K_rot, q_len, kv_len, causal_mask):
         """Compute attention output from pre-projected components with decoupled scoring."""
-        scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, q_len)
-        if self.causal and causal_mask:
-            mask = torch.triu(
-                torch.full((q_len, kv_len), float("-inf"), device=scores.device),
-                diagonal=kv_len - q_len + 1
-            ).unsqueeze(0).unsqueeze(0)
-            scores = scores + mask
+        scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, q_len, kv_len, causal=causal_mask)
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
-        return torch.matmul(attn_w, v).transpose(1, 2)
+        attn_out = torch.matmul(attn_w, v)  # (B, nh, T, hd)
+        if self.use_xsa:
+            Vn = F.normalize(v, dim=-1)
+            attn_out = attn_out - (attn_out * Vn).sum(dim=-1, keepdim=True) * Vn
+        return attn_out.transpose(1, 2)
 
     def forward_with_cache(self, x, offset, cache):
         B, S_new, _ = x.shape

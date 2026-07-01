@@ -46,6 +46,7 @@ class LayerWithMoE(nn.Module):
         norm_eps=1e-5,
         ffn_round_to=64,
         use_mla=False,
+        use_xsa=False,
         mla_d_c=None,
         mla_d_c1=None,
         mla_d_rotate=None,
@@ -74,6 +75,7 @@ class LayerWithMoE(nn.Module):
         self.causal = causal
         self.use_moe = use_moe
         self.use_mla = use_mla
+        self.use_xsa = use_xsa
         self.attn_logit_cap = attn_logit_cap
         self.layer_idx = layer_idx
         self.num_layers = num_layers
@@ -91,6 +93,7 @@ class LayerWithMoE(nn.Module):
                 attn_logit_cap=attn_logit_cap, bias=bias,
                 d_c=mla_d_c, d_c1=mla_d_c1, d_rotate=mla_d_rotate,
                 block_size=mla_block_size,
+                use_xsa=use_xsa,
             )
         else:
             self.attention = Attention(
@@ -162,7 +165,7 @@ class MoETransformer(nn.Module):
                  causal=True, attn_dropout=0.0, ffn_dropout=0.0,
                  residual_dropout=0.0, attn_logit_cap=None, bias=False,
                  norm_eps=1e-5, ffn_round_to=64,
-                 use_mla=False, mla_d_c=None, mla_d_c1=None,
+                 use_mla=False, use_xsa=False, mla_d_c=None, mla_d_c1=None,
                  mla_d_rotate=None, mla_block_size=128,
                  use_moe=False, n_experts=8, top_k=2, n_shared=1,
                  expert_dim=None, capacity_factor=1.25, z_loss_gamma=0.001,
@@ -201,6 +204,7 @@ class MoETransformer(nn.Module):
                 norm_eps=norm_eps,
                 ffn_round_to=ffn_round_to,
                 use_mla=use_mla,
+                use_xsa=use_xsa,
                 mla_d_c=mla_d_c, mla_d_c1=mla_d_c1,
                 mla_d_rotate=mla_d_rotate, mla_block_size=mla_block_size,
                 use_moe=use_moe_this,
