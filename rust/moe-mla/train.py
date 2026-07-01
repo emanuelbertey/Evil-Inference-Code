@@ -21,7 +21,7 @@ class BPEWrapper:
 
 
 @torch.no_grad()
-def generate_sample(model, tokenizer, device, prompt="hola", max_new=50):
+def generate_sample(model, tokenizer, device, prompt="hola", max_new=100):
     model.eval()
     x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
     out = model.generate(x, max_new_tokens=max_new, temperature=1.0, top_k=50, top_p=0.95,
@@ -55,7 +55,7 @@ num_layers = 16
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 680
+seq_len = 632
 batch_size = 8
 grad_accum = 8
 lr = 3e-4
@@ -326,8 +326,10 @@ def main():
                            grad_norm=grad_norm.item(), moe_dist=moe_dist)
 
                 if not test_mode and step % 50 == 0:
+                    t_gen = time.time()
                     sample = generate_sample(model, tokenizer, device)
-                    print(f"  >>> {sample}")
+                    gen_tps = 100 / (time.time() - t_gen)
+                    print(f"  >>> {sample}  [{gen_tps:.0f} tok/s]")
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
                     state = model.state_dict()
