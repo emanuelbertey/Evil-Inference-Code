@@ -110,31 +110,34 @@ class PlotManager:
         moe_entries = [e for e in self.history if "moe_dist" in e]
         if not grad_entries and not moe_entries:
             return
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+        moe_layers = list(moe_entries[0]["moe_dist"].keys()) if moe_entries else []
+        n_moe = len(moe_layers)
+        n_rows = (n_moe + 3) // 4  # up to 4 cols
+        fig = plt.figure(figsize=(14, 3 + 2.5 * n_rows))
+        gs = fig.add_gridspec(n_rows + 1, 4, height_ratios=[1] + [0.6] * n_rows,
+                               hspace=0.3, wspace=0.3)
+        ax_top = fig.add_subplot(gs[0, :])
         if grad_entries:
-            gs, gn = zip(*grad_entries)
-            ax1.plot(gs, gn, color="tab:red", alpha=0.7)
-            ax1.set_ylabel("grad norm")
-            ax1.grid(True, alpha=0.3)
-            ax1.set_title(f"Gradient norm (step {step})")
+            gs_, gn = zip(*grad_entries)
+            ax_top.plot(gs_, gn, color="tab:red", alpha=0.7)
+            ax_top.set_ylabel("grad norm")
+            ax_top.grid(True, alpha=0.3)
+            ax_top.set_title(f"Gradient norm (step {step})")
         else:
-            ax1.set_visible(False)
+            ax_top.set_visible(False)
         if moe_entries:
-            layers = list(moe_entries[0]["moe_dist"].keys())
-            n_exp = max(len(v) for e in moe_entries for v in e["moe_dist"].values())
             ms = [e["step"] for e in moe_entries]
-            ax2.stackplot(ms,
-                         *[[e["moe_dist"].get(l, [0]*n_exp) for e in moe_entries]
-                          for l in layers],
-                         labels=layers, alpha=0.6)
-            ax2.set_ylabel("expert usage %")
-            ax2.set_xlabel("step")
-            ax2.legend(loc="upper right", fontsize=8)
-            ax2.grid(True, alpha=0.3)
-            ax2.set_title("MoE expert distribution per layer")
-        else:
-            ax2.set_visible(False)
-        fig.tight_layout()
+            for idx, layer in enumerate(moe_layers):
+                r, c = divmod(idx, 4)
+                ax = fig.add_subplot(gs[r + 1, c])
+                series = [[e["moe_dist"][layer][ei] for e in moe_entries]
+                          for ei in range(len(moe_entries[0]["moe_dist"][layer]))]
+                ax.stackplot(ms, *series, alpha=0.6)
+                ax.set_title(layer, fontsize=9)
+                ax.set_ylim(0, 100)
+                if r < n_rows - 1:
+                    ax.tick_params(labelbottom=False)
+        fig.suptitle(f"MoE expert distribution (step {step})", fontsize=12)
         path = self.save_dir / f"train_grad_moe_{step}.png"
         fig.savefig(path, dpi=100, bbox_inches="tight")
         plt.close(fig)
