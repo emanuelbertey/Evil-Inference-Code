@@ -176,3 +176,16 @@ Para modelos chicos (<100M params): gana nano — simple, funciona, bias trick s
 Para modelos grandes (>100M params): gana LLM-D3 — depth-scaling init, bmm experts, capacity factor, capas híbridas, z-loss. Todo necesario para estabilidad a escala.
 
 Lo ideal: combinación de ambos. Tomar la compresión de Q y QK-Norm de D3, el scoring desacoplado y bias trick de nano, y sumarle depth-scaling init + shared experts + z-loss. Eso es básicamente DeepSeek-V3.
+
+
+
+
+Modelo	Loss	vs MLA dense
+MLA+MoE+sh	0.917	-19%
+MLA+MoE	1.090	-3%
+MLA+x0	1.110	-1%
+MLA dense	1.126	—
+D5(XSA)	1.149	+2%
+nano-mla	1.288	+14%
+D3	1.283	+14%
+Py GQA	3.046	+170%

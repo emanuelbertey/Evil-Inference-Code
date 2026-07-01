@@ -82,7 +82,7 @@ class MultiHeadLatentAttentionGQA(nn.Module):
                  max_seq_len=2048, rope_base=10000.0, rope_scaling=1.0,
                  causal=True, dropout=0.0, attn_logit_cap=None, bias=False,
                  d_c=None, d_c1=None, d_rotate=None, block_size=128,
-                 use_xsa=False):
+                 use_xsa=False, qk_norm=True):
         super().__init__()
         if num_kv_groups == 0: num_kv_groups = num_heads
         if head_dim is None: head_dim = d_model // num_heads
@@ -98,6 +98,10 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         self.attn_logit_cap = attn_logit_cap
         self.block_size = block_size
         self.use_xsa = use_xsa
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.q_norm = RMSNorm(head_dim)
+            self.k_norm = RMSNorm(head_dim)
 
         self.qkv = QKVProjectionMLA(d_model, num_heads, num_kv_groups, head_dim,
                                      d_c, d_c1, d_rotate, bias)
@@ -162,6 +166,9 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         Q_rotate, K_rotate = self.rope(Q_rotate, K_rotate, offset)
         B, T = x.shape[0], x.shape[1]
 
+        if self.qk_norm:
+            Q_state = self.q_norm(Q_state)
+            K = self.k_norm(K)
         scores = self._decoupled_scores(Q_state, Q_rotate, K, K_rotate, T)
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
@@ -174,6 +181,9 @@ class MultiHeadLatentAttentionGQA(nn.Module):
 
     def _attention_from_components(self, Q_state, Q_rot, K_state, V_state, K_rot, q_len, kv_len, causal_mask):
         """Compute attention output from pre-projected components with decoupled scoring."""
+        if self.qk_norm:
+            Q_state = self.q_norm(Q_state)
+            K_state = self.k_norm(K_state)
         scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, q_len, kv_len, causal=causal_mask)
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)

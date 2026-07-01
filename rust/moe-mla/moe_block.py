@@ -47,6 +47,8 @@ class LayerWithMoE(nn.Module):
         ffn_round_to=64,
         use_mla=False,
         use_xsa=False,
+        qk_norm=True,
+        use_sandwich_norm=False,
         mla_d_c=None,
         mla_d_c1=None,
         mla_d_rotate=None,
@@ -58,7 +60,8 @@ class LayerWithMoE(nn.Module):
         expert_dim=None,
         capacity_factor=1.25,
         z_loss_gamma=0.001,
-        bias_decay=1e-3,
+        bias_decay=0.1,
+        noise_std=0.01,
         layer_idx=0,
         num_layers=1,
     ):
@@ -76,6 +79,7 @@ class LayerWithMoE(nn.Module):
         self.use_moe = use_moe
         self.use_mla = use_mla
         self.use_xsa = use_xsa
+        self.use_sandwich_norm = use_sandwich_norm
         self.attn_logit_cap = attn_logit_cap
         self.layer_idx = layer_idx
         self.num_layers = num_layers
@@ -93,7 +97,7 @@ class LayerWithMoE(nn.Module):
                 attn_logit_cap=attn_logit_cap, bias=bias,
                 d_c=mla_d_c, d_c1=mla_d_c1, d_rotate=mla_d_rotate,
                 block_size=mla_block_size,
-                use_xsa=use_xsa,
+                use_xsa=use_xsa, qk_norm=qk_norm,
             )
         else:
             self.attention = Attention(
@@ -110,12 +114,17 @@ class LayerWithMoE(nn.Module):
                 d_model=d_model, n_experts=n_experts, top_k=top_k,
                 n_shared=n_shared, expert_dim=expert_dim or inter_dim,
                 capacity_factor=capacity_factor, z_loss_gamma=z_loss_gamma,
-                bias_decay=bias_decay, bias=bias,
+                bias_decay=bias_decay, bias=bias, noise_std=noise_std,
             )
         else:
             self.ffn = DenseFFN(d_model, inter_dim, ffn_dropout, bias)
 
         self.residual_dropout = nn.Dropout(residual_dropout) if residual_dropout > 0.0 else nn.Identity()
+
+        # Sandwich norm: extra RMSNorm after each sub-layer
+        if use_sandwich_norm:
+            self.post_attn_norm = RMSNorm(d_model, eps=norm_eps)
+            self.post_ffn_norm = RMSNorm(d_model, eps=norm_eps)
 
     def forward(self, x, offset=0):
         residual = x
@@ -123,6 +132,8 @@ class LayerWithMoE(nn.Module):
         h = self.attention(h, offset)
         h = self.residual_dropout(h)
         x = residual + h
+        if self.use_sandwich_norm:
+            x = self.post_attn_norm(x)
 
         residual = x
         h = self.ffn_norm(x)
@@ -132,7 +143,10 @@ class LayerWithMoE(nn.Module):
             h = self.ffn(h)
             aux_loss = 0.0
         h = self.residual_dropout(h)
-        return residual + h, aux_loss
+        x = residual + h
+        if self.use_sandwich_norm:
+            x = self.post_ffn_norm(x)
+        return x, aux_loss
 
 
 def _resolve_per_layer(val, num_layers, default=0):
@@ -165,11 +179,12 @@ class MoETransformer(nn.Module):
                  causal=True, attn_dropout=0.0, ffn_dropout=0.0,
                  residual_dropout=0.0, attn_logit_cap=None, bias=False,
                  norm_eps=1e-5, ffn_round_to=64,
-                 use_mla=False, use_xsa=False, mla_d_c=None, mla_d_c1=None,
+                 use_mla=False, use_xsa=False, qk_norm=True, use_sandwich_norm=False,
+                 mla_d_c=None, mla_d_c1=None,
                  mla_d_rotate=None, mla_block_size=128,
                  use_moe=False, n_experts=8, top_k=2, n_shared=1,
                  expert_dim=None, capacity_factor=1.25, z_loss_gamma=0.001,
-                 bias_decay=1e-3,
+                 bias_decay=1e-3, noise_std=0.01,
                  n_dense_start=3, n_dense_end=3):
         super().__init__()
 
@@ -205,6 +220,8 @@ class MoETransformer(nn.Module):
                 ffn_round_to=ffn_round_to,
                 use_mla=use_mla,
                 use_xsa=use_xsa,
+                qk_norm=qk_norm,
+                use_sandwich_norm=use_sandwich_norm,
                 mla_d_c=mla_d_c, mla_d_c1=mla_d_c1,
                 mla_d_rotate=mla_d_rotate, mla_block_size=mla_block_size,
                 use_moe=use_moe_this,
@@ -212,6 +229,7 @@ class MoETransformer(nn.Module):
                 expert_dim=expert_dim_list[i] if expert_dim_list[i] is not None else None,
                 capacity_factor=capacity_factor,
                 z_loss_gamma=z_loss_gamma, bias_decay=bias_decay,
+                noise_std=noise_std,
                 layer_idx=i, num_layers=num_layers,
             ))
         self.layers = nn.ModuleList(layers)

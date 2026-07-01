@@ -57,7 +57,7 @@ class MoELayer(nn.Module):
 
     def __init__(self, d_model, n_experts, top_k, n_shared=1, expert_dim=None,
                  capacity_factor=1.25, z_loss_gamma=0.001, bias_decay=0.1,
-                 bias=False):
+                 bias=False, noise_std=0.01):
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
@@ -65,6 +65,7 @@ class MoELayer(nn.Module):
         self.capacity_factor = capacity_factor
         self.z_loss_gamma = z_loss_gamma
         self.bias_decay = bias_decay
+        self.noise_std = noise_std
 
         if expert_dim is None:
             expert_dim = 2 * d_model
@@ -155,6 +156,11 @@ class MoELayer(nn.Module):
 
         # 1) Router scores
         scores = self.router(xf)  # (N, n_experts)
+
+        # Noisy top-k: add gaussian noise during training for exploration
+        if self.training and self.noise_std > 0:
+            noise = torch.randn_like(scores) * self.noise_std
+            scores = scores + noise
 
         # 2) Bias trick: add non-learned bias
         biased_scores = scores + self.expert_bias.unsqueeze(0)

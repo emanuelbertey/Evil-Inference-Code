@@ -68,6 +68,8 @@ class TransformerLM(nn.Module):
         num_selected_blocks: int = 16,
         use_mla: bool = False,
         use_xsa: bool = False,
+        qk_norm: bool = True,
+        use_sandwich_norm: bool = False,
         mla_d_c: int | None = None,
         mla_d_c1: int | None = None,
         mla_d_rotate: int | None = None,
@@ -81,6 +83,7 @@ class TransformerLM(nn.Module):
         capacity_factor: float = 1.25,
         z_loss_gamma: float = 0.001,
         bias_decay: float = 1e-3,
+        noise_std: float = 0.01,
         n_dense_start: int = 3,
         n_dense_end: int = 3,
     ):
@@ -118,6 +121,8 @@ class TransformerLM(nn.Module):
                 ffn_round_to=ffn_round_to,
                 use_mla=use_mla,
                 use_xsa=use_xsa,
+                qk_norm=qk_norm,
+                use_sandwich_norm=use_sandwich_norm,
                 mla_d_c=mla_d_c, mla_d_c1=mla_d_c1,
                 mla_d_rotate=mla_d_rotate, mla_block_size=mla_block_size,
                 use_moe=use_moe,
@@ -125,6 +130,7 @@ class TransformerLM(nn.Module):
                 expert_dim=expert_dim,
                 capacity_factor=capacity_factor,
                 z_loss_gamma=z_loss_gamma, bias_decay=bias_decay,
+                noise_std=noise_std,
                 n_dense_start=n_dense_start, n_dense_end=n_dense_end,
             )
         else:

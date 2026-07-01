@@ -55,7 +55,7 @@ num_layers = 16
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 700
+seq_len = 680
 batch_size = 8
 grad_accum = 8
 lr = 3e-4
@@ -65,6 +65,9 @@ bpe_vocab = 32000
 rotary_pct = 0.25
 use_mla = True
 use_xsa = True
+qk_norm = True
+use_sandwich_norm = True
+noise_std = 0.01
 mla_d_c = 32
 mla_d_c1 = None
 mla_d_rotate = None
@@ -158,7 +161,9 @@ def main():
         use_swiglu=True, use_x0=False, max_seq_len=seq_len,
         ffn_expansion=ffn_expansion,
         residual_dropout=0.0, attn_dropout=0.0, ffn_dropout=0.0,
-        use_mla=True, use_xsa=use_xsa, mla_block_size=128,
+        use_mla=True, use_xsa=use_xsa, qk_norm=qk_norm,
+        use_sandwich_norm=use_sandwich_norm, noise_std=noise_std,
+        mla_block_size=128,
         mla_d_c=mla_d_c, mla_d_c1=mla_d_c1, mla_d_rotate=mla_d_rotate,
         use_moe=use_moe, n_experts=n_experts, top_k=top_k, n_shared=n_shared,
         expert_dim=exp_dim,
@@ -232,12 +237,15 @@ def main():
         cpt = d_c_real + d_rot_real
         pct = 100 * (1 - cpt / gqa_cpt)
         xsa_tag = " + XSA" if use_xsa else ""
-        print(f"MLA{xsa_tag}: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
+        qkn_tag = " + QK-Norm" if qk_norm else ""
+        sn_tag = " + SandwichNorm" if use_sandwich_norm else ""
+        print(f"MLA{xsa_tag}{qkn_tag}{sn_tag}: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
     else:
         cpt = gqa_cpt
     if use_moe:
         moe_layers = sum(1 for l in model.transformer.layers if l.use_moe)
-        print(f"MoE: {moe_layers}/{num_layers} MoE layers | {n_dense_start} dense start / {n_dense_end} dense end | n_exp={n_experts} top_k={top_k} n_shared={n_shared}")
+        ntk_tag = " + NoisyTopK" if noise_std > 0 else ""
+        print(f"MoE{ntk_tag}: {moe_layers}/{num_layers} MoE layers | {n_dense_start} dense start / {n_dense_end} dense end | n_exp={n_experts} top_k={top_k} n_shared={n_shared}")
     print(f"Tokens: {n:,} | Steps total: {total_steps}")
 
     # ── Train loop ──────────────────────────────────────────────────────────

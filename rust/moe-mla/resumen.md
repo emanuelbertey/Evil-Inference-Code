@@ -114,3 +114,24 @@ Desventajas:
 - Mayor cantidad de parámetros (MoE almacena 4 expertos aunque solo active 1)
 - Router bias trick requiere syncing en training distribuido (no implementado)
 - Capacity factor puede descartar tokens informativos si está muy ajustado
+
+
+
+
+
+
+
+
+step 3250 loss 3.4360 lr 0.000300 2624t/s
+  >>> desde fines de la década de los 80, se extendió así a los Estados Unidos el crecimiento sostenido para el desarrollo urbano.
+
+Los problemas medioambi
+Loaded block 130: 767739 tokens
+Epoch 80 done. Loaded next block: 767739 tokens
+step 3260 loss 3.6684 lr 0.000300 2271t/s
+step 3270 loss 3.5427 lr 0.000300 2630t/s
+Loaded block 131: 775602 tokens
+Epoch 81 done. Loaded next block: 775602 tokens
+step 3280 loss 3.6137 lr 0.000300 2326t/s
+Processing Files (0 / 0)      : |          |  0.00B /  0.00B            
+New Data Upload 
