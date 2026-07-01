@@ -245,6 +245,7 @@ def main():
     last_rpt_step = 0
 
     epoch = 0
+    torch.cuda.empty_cache()
     while True:
         if test_mode:
             tokens = all_tokens
