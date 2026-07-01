@@ -321,11 +321,6 @@ def main():
                     sample = generate_sample(model, tokenizer, device)
                     print(f"  >>> {sample}")
 
-                if not test_mode and step % plot_interval == 0:
-                    pm.plot(step)
-                    pm.plot_grad_moe(step)
-                    pm.upload(step)
-
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
                     state = model.state_dict()
                     state.pop("head.emb_weight", None)
@@ -333,6 +328,9 @@ def main():
                     torch.save(ckpt, ckpt_path)
                     model.state_dict_to_safetensors(safe_path)
                     pusher.maybe_push(ckpt_path, safe_path, tok_path, step)
+                    pm.plot(step)
+                    pm.plot_grad_moe(step)
+                    pm.upload(step)
 
         if micro > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
