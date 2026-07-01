@@ -84,7 +84,7 @@ top_k = 1
 n_shared = 1
 capacity_factor = 1.25
 z_loss_gamma = 0.001
-bias_decay = 1e-3
+bias_decay = 0.1
 # Per-layer expert counts: list or int (same for all MoE layers)
 # n_experts = [4, 4, 4, 6, 6, 6, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 6, 6, 6, 4, 4, 4, 4]
 plot_interval = 256
@@ -104,7 +104,7 @@ def main():
     if not test_mode:
         hf = HFManager(repo_id=repo_id, revision=revision)
         hf._get_token()
-        pusher = PeriodicPusher(hf, interval_minutes=10)
+        pusher = PeriodicPusher(hf, interval_minutes=20)
     pm = PlotManager(hf if not test_mode else None, save_dir=_DIR, plot_interval=plot_interval)
 
     # ── Precision ──────────────────────────────────────────────────────────

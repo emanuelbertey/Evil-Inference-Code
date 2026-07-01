@@ -56,7 +56,7 @@ class MoELayer(nn.Module):
     """
 
     def __init__(self, d_model, n_experts, top_k, n_shared=1, expert_dim=None,
-                 capacity_factor=1.25, z_loss_gamma=0.001, bias_decay=1e-3,
+                 capacity_factor=1.25, z_loss_gamma=0.001, bias_decay=0.1,
                  bias=False):
         super().__init__()
         self.n_experts = n_experts
@@ -120,10 +120,13 @@ class MoELayer(nn.Module):
         return out
 
     def _update_expert_bias(self, counts, n_tokens):
-        """Update load-balancing biases via feedback (no loss)."""
+        """Update load-balancing biases via feedback (no loss).
+        Normalised delta: expert_bias decays toward the target proportion,
+        scaled by bias_decay per token to decouple from batch size.
+        """
         target = n_tokens / self.n_experts
         load = counts.float()
-        delta = self.bias_decay * (target - load)
+        delta = self.bias_decay * (target - load) / max(n_tokens, 1)
         self.expert_bias.add_(delta.to(self.expert_bias.dtype))
 
     def _router_z_loss(self, logits):
