@@ -134,7 +134,7 @@ class KnowledgeGraph:
             info = self.entities.get(ent, {})
             # Find relationships
             relations = []
-            for (a, b), w in self.cooc.most_common(100):
+            for (a, b), w in sorted(self.cooc.items(), key=lambda x: -x[1])[:100]:
                 if a == ent:
                     relations.append((b, w))
                 elif b == ent:
