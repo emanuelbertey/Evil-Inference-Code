@@ -110,9 +110,10 @@ def main():
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
-    # Load checkpoint
+    # Load checkpoint (local → HF → fresh)
     step = 0
     epoch = 0
+    loaded = False
     if os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location="cpu")
         model.load_state_dict(ckpt["model"], strict=False)
@@ -121,6 +122,18 @@ def main():
         print(f"Loaded checkpoint: step {step} epoch {epoch}")
         del ckpt
         torch.cuda.empty_cache()
+        loaded = True
+    if not loaded and hf:
+        if hf.download_checkpoint(ckpt_path, filename="xlstm_checkpoint.pt"):
+            ckpt = torch.load(ckpt_path, map_location="cpu")
+            model.load_state_dict(ckpt["model"], strict=False)
+            step = ckpt.get("step", 0)
+            epoch = ckpt.get("epoch", 0)
+            print(f"Loaded HF checkpoint: step {step} epoch {epoch}")
+            del ckpt
+            torch.cuda.empty_cache()
+    if not loaded:
+        print("No checkpoint found, starting fresh")
 
     # Data
     sd = StreamingDataset(block_idx=step // 2000)
@@ -136,7 +149,7 @@ def main():
 
     while True:
         if tokens is None:
-            sd.load_tokens(tokenizer.tokenizer)
+            sd.load_tokens(tokenizer)
             tokens = sd.get_tokens()
         n_seq = (len(tokens) - seq_len - 1) // seq_len
         if n_seq <= 0:
