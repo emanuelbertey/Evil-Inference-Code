@@ -287,7 +287,7 @@ def main():
             micro += 1
 
             if micro >= grad_accum:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
                 step += 1
                 micro = 0
@@ -297,16 +297,22 @@ def main():
                     tok = (step - last_rpt_step) * batch_size * grad_accum * seq_len
                     tps = tok / max(now - last_rpt_time, 0.001)
                     balance_strs = []
+                    moe_dist = {}
                     for li, layer in enumerate(model.transformer.layers):
-                        if getattr(layer, 'use_moe', False) and hasattr(layer.ffn, 'balance_str'):
-                            balance_strs.append(f"L{li}:{layer.ffn.balance_str()}")
+                        if getattr(layer, 'use_moe', False) and hasattr(layer.ffn, 'last_counts'):
+                            ffn = layer.ffn
+                            total = ffn.last_total or 1
+                            pcts = (ffn.last_counts.float() / total * 100).tolist()
+                            moe_dist[f"L{li}"] = pcts
+                            balance_strs.append(f"L{li}:{ffn.balance_str()}")
                     bal = " | ".join(balance_strs[:3])  # first 3 MoE layers only
                     print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
                     if bal:
                         print(f"  MoE balance: {bal}")
                     last_rpt_time = now
                     last_rpt_step = step
-                    pm.log(step, loss.item(), lr_curr, tps, aux_loss.item() if isinstance(aux_loss, torch.Tensor) else None)
+                    pm.log(step, loss.item(), lr_curr, tps, aux_loss.item() if isinstance(aux_loss, torch.Tensor) else None,
+                           grad_norm=grad_norm.item(), moe_dist=moe_dist)
 
                 if not test_mode and step % 50 == 0:
                     sample = generate_sample(model, tokenizer, device)
@@ -314,6 +320,7 @@ def main():
 
                 if not test_mode and step % plot_interval == 0:
                     pm.plot(step)
+                    pm.plot_grad_moe(step)
                     pm.upload(step)
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:

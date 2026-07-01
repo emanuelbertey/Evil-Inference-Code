@@ -51,7 +51,8 @@ class PlotManager:
                 print(f"No remote history ({e}), starting fresh")
         return []
 
-    def log(self, step, loss, lr=None, tps=None, aux_loss=None):
+    def log(self, step, loss, lr=None, tps=None, aux_loss=None,
+            grad_norm=None, moe_dist=None):
         """Append one row to history and save JSON."""
         entry = {"step": step, "loss": loss, "time": time.time()}
         if lr is not None:
@@ -60,6 +61,10 @@ class PlotManager:
             entry["tps"] = tps
         if aux_loss is not None:
             entry["aux_loss"] = aux_loss
+        if grad_norm is not None:
+            entry["grad_norm"] = grad_norm
+        if moe_dist is not None:
+            entry["moe_dist"] = moe_dist
         self.history.append(entry)
         with open(self.history_file, "w") as f:
             json.dump(self.history, f, indent=2)
@@ -80,7 +85,8 @@ class PlotManager:
         ax1.plot(steps, losses, label="loss", color="tab:blue")
         ax1.set_xlabel("step")
         ax1.set_ylabel("loss", color="tab:blue")
-        if "aux_loss" in self.history[0]:
+        has_aux = any("aux_loss" in e for e in self.history)
+        if has_aux:
             aux = [e.get("aux_loss", 0) for e in self.history]
             ax2 = ax1.twinx()
             ax2.plot(steps, aux, label="aux_loss", alpha=0.5, color="tab:orange")
@@ -92,8 +98,49 @@ class PlotManager:
         fig.savefig(path, dpi=100, bbox_inches="tight")
         plt.close(fig)
 
+    def plot_grad_moe(self, step):
+        """Generate gradient + MoE distribution plot. Skips entries lacking data."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return
+        grad_entries = [(e["step"], e["grad_norm"]) for e in self.history if "grad_norm" in e]
+        moe_entries = [e for e in self.history if "moe_dist" in e]
+        if not grad_entries and not moe_entries:
+            return
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+        if grad_entries:
+            gs, gn = zip(*grad_entries)
+            ax1.plot(gs, gn, color="tab:red", alpha=0.7)
+            ax1.set_ylabel("grad norm")
+            ax1.grid(True, alpha=0.3)
+            ax1.set_title(f"Gradient norm (step {step})")
+        else:
+            ax1.set_visible(False)
+        if moe_entries:
+            layers = list(moe_entries[0]["moe_dist"].keys())
+            n_exp = max(len(v) for e in moe_entries for v in e["moe_dist"].values())
+            ms = [e["step"] for e in moe_entries]
+            ax2.stackplot(ms,
+                         *[[e["moe_dist"].get(l, [0]*n_exp) for e in moe_entries]
+                          for l in layers],
+                         labels=layers, alpha=0.6)
+            ax2.set_ylabel("expert usage %")
+            ax2.set_xlabel("step")
+            ax2.legend(loc="upper right", fontsize=8)
+            ax2.grid(True, alpha=0.3)
+            ax2.set_title("MoE expert distribution per layer")
+        else:
+            ax2.set_visible(False)
+        fig.tight_layout()
+        path = self.save_dir / f"train_grad_moe_{step}.png"
+        fig.savefig(path, dpi=100, bbox_inches="tight")
+        plt.close(fig)
+
     def upload(self, step):
-        """Upload JSON (overwrite) + plot (step-prefixed) to HF."""
+        """Upload JSON (overwrite) + both plots to HF."""
         if not self.hf:
             return
         api = self.hf._get_api()
@@ -101,7 +148,6 @@ class PlotManager:
         self.hf.ensure_revision()
         msg = f"Training step {step}"
 
-        # Upload history JSON (overwrites)
         if self.history_file.exists():
             api.upload_file(
                 path_or_fileobj=str(self.history_file),
@@ -111,16 +157,18 @@ class PlotManager:
                 token=self.hf._get_token(),
                 commit_message=msg,
             )
+            print(f"  [plot] uploaded {self.history_file.name} to {self.hf.repo_id}@{self.hf.revision}")
 
-        # Upload step plot
-        plot_path = self.save_dir / f"plot_train_step_{step}.png"
-        if plot_path.exists():
-            api.upload_file(
-                path_or_fileobj=str(plot_path),
-                path_in_repo=plot_path.name,
-                repo_id=self.hf.repo_id,
-                revision=self.hf.revision,
-                token=self.hf._get_token(),
-                commit_message=msg,
-            )
-            self.last_uploaded_step = step
+        for name in [f"plot_train_step_{step}.png", f"train_grad_moe_{step}.png"]:
+            p = self.save_dir / name
+            if p.exists():
+                api.upload_file(
+                    path_or_fileobj=str(p),
+                    path_in_repo=p.name,
+                    repo_id=self.hf.repo_id,
+                    revision=self.hf.revision,
+                    token=self.hf._get_token(),
+                    commit_message=msg,
+                )
+                print(f"  [plot] uploaded {p.name}")
+        self.last_uploaded_step = step
