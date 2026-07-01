@@ -4,9 +4,9 @@ import subprocess, sys, os, json, re, math
 from collections import defaultdict, Counter
 
 subprocess.run([sys.executable, "-m", "pip", "install", "spacy", "scikit-learn", "sentence-transformers", "datasets", "-q"], capture_output=True)
+subprocess.run([sys.executable, "-m", "spacy", "download", "es_core_news_sm", "-q"], capture_output=True)
 import spacy
 from sklearn.cluster import KMeans
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sentence_transformers import SentenceTransformer
 
 # ── Download Wikipedia ES 100MB ──────────────────────────────────────────
