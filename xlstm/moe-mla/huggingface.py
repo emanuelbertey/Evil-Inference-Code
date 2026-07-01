@@ -7,7 +7,7 @@ import getpass
 from pathlib import Path
 
 from huggingface_hub import HfApi, create_repo, hf_hub_download
-from huggingface_hub.errors import RepositoryNotFoundError, EntryNotFoundError
+from huggingface_hub.errors import RepositoryNotFoundError, EntryNotFoundError, RevisionNotFoundError
 
 
 class HFManager:
@@ -52,23 +52,20 @@ class HFManager:
         except Exception:
             pass
 
-    def tokenizer_exists(self) -> bool:
+    def tokenizer_exists(self, filename: str = "tokenizer.json") -> bool:
         try:
-            self._get_api().file_exists(
-                repo_id=self.repo_id, filename="tokenizer.json", revision=self.revision
+            return self._get_api().file_exists(
+                repo_id=self.repo_id, filename=filename, revision=self.revision
             )
-            return True
-        except (RepositoryNotFoundError, EntryNotFoundError):
+        except (RepositoryNotFoundError, EntryNotFoundError, RevisionNotFoundError):
             return False
 
-    def download_tokenizer(self, local_path: str) -> str:
-        """Download tokenizer.json from HF. Returns local path."""
-        api = self._get_api()
-        self.ensure_repo()
+    def download_tokenizer(self, local_path: str, remote_filename: str = "tokenizer.json") -> str | None:
+        """Download tokenizer from HF. Returns local path or None."""
         try:
             path = hf_hub_download(
                 repo_id=self.repo_id,
-                filename="tokenizer.json",
+                filename=remote_filename,
                 revision=self.revision,
                 token=self._get_token(),
             )
@@ -78,7 +75,7 @@ class HFManager:
             return local_path
         except Exception as e:
             print(f"Failed to download tokenizer from {self.repo_id}@{self.revision}: {e}")
-            raise
+            return None
 
     def upload_tokenizer(self, local_path: str, config_path: str | None = None):
         api = self._get_api()

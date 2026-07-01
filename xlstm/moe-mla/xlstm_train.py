@@ -1,4 +1,4 @@
-"""xLSTM MoE Training — mLSTM + MoE with xlstm_ prefixed files."""
+"""xLSTM MoE Training — mLSTM + MoE (uses transformer tokenizer, same revision)."""
 import sys, os, time, math, torch, json
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
@@ -27,17 +27,6 @@ def generate_sample(model, tokenizer, device, prompt="hola", max_new=100):
     model.train()
     return tokenizer.decode(out[0].tolist())
 
-def train_tokenizer_from_wiki(vocab_size, output_path):
-    wiki = download_wikipedia_50mb()
-    tok = Tokenizer(models.BPE())
-    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tok.decoder = decoders.ByteLevel()
-    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["eos_token"])
-    with open(wiki, "r", encoding="utf-8") as f:
-        tok.train_from_iterator([f.read()], trainer=trainer)
-    tok.save(output_path)
-    return output_path
-
 def get_lr(step, total, warmup, lr):
     if step < warmup:
         return lr * (step + 1) / max(warmup, 1)
@@ -55,7 +44,7 @@ lr = 3e-4
 num_epochs = 200000
 warmup_steps = 50
 bpe_vocab = 32000
-tok_path = os.path.join(_DIR, "xlstm_tokenizer.json")
+tok_path = os.path.join(_DIR, "tokenizer.json")  # same tokenizer as transformer
 train_json = os.path.join(_DIR, "xlstm_train_state.json")
 ckpt_path = os.path.join(_DIR, "xlstm_checkpoint.pt")
 plot_dir = _DIR
@@ -75,7 +64,7 @@ def main():
     print(f"Device: {device}")
 
     repo_id = "ScortexIA/laurelia"
-    revision = "xlstm-moe"
+    revision = "moe-mla"  # same branch as transformer
     hf = pusher = None
     if not test_mode:
         hf = HFManager(repo_id=repo_id, revision=revision)
@@ -88,17 +77,22 @@ def main():
     dtype = {"b": torch.bfloat16, "f": torch.float16}.get(prec, torch.float32)
     print(f"  Compute: {dtype}")
 
-    # Tokenizer
+    # Tokenizer (same as transformer, no xlstm prefix)
     if os.path.exists(tok_path):
         tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
-    elif hf and hf.tokenizer_exists():
-        local_tok = hf.download_tokenizer(tok_path)
+    elif hf and hf.tokenizer_exists(filename="tokenizer.json"):
+        local_tok = hf.download_tokenizer(tok_path, remote_filename="tokenizer.json")
         tokenizer = BPEWrapper(Tokenizer.from_file(local_tok))
     else:
-        train_tokenizer_from_wiki(bpe_vocab, tok_path)
+        wiki = download_wikipedia_50mb()
+        tok = Tokenizer(models.BPE())
+        tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        tok.decoder = decoders.ByteLevel()
+        trainer = trainers.BpeTrainer(vocab_size=bpe_vocab, special_tokens=["eos_token"])
+        with open(wiki, "r", encoding="utf-8") as f:
+            tok.train_from_iterator([f.read()], trainer=trainer)
+        tok.save(tok_path)
         tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
-        if hf:
-            hf.upload_tokenizer(tok_path, os.path.join(_DIR, "xlstm_tokenizer_config.json"))
     print(f"Vocab: {tokenizer.vocab_size}")
 
     # Model
@@ -202,7 +196,7 @@ def main():
                 state = model.state_dict()
                 ckpt = {"step": step, "epoch": epoch, "model": state}
                 torch.save(ckpt, ckpt_path)
-                pusher.push(state, ckpt_path, step, epoch)
+                pusher.maybe_push(ckpt_path, None, None, step)
 
             step += 1
 
