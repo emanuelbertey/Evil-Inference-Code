@@ -84,6 +84,10 @@ class MoELayer(nn.Module):
         # Shared experts
         self.shared = nn.ModuleList([ExpertSwiGLU(d_model, expert_dim, bias) for _ in range(n_shared)])
 
+        # Routing stats (tracked during forward)
+        self.register_buffer("last_counts", torch.zeros(n_experts, dtype=torch.long))
+        self.last_total = 0
+
     def _batched_expert_forward(self, x, expert_idx):
         """Run selected tokens through their chosen expert via bmm.
 
@@ -193,6 +197,8 @@ class MoELayer(nn.Module):
         # 7) Update biases for next step
         with torch.no_grad():
             counts = torch.bincount(topk_i.flatten(), minlength=self.n_experts)
+            self.last_counts = counts.clone()
+            self.last_total = N
             self._update_expert_bias(counts, N)
 
         # 8) z-loss
@@ -202,6 +208,12 @@ class MoELayer(nn.Module):
         if orig_ndim == 2:
             out = out.squeeze(1)
         return out, aux_loss
+
+    def balance_str(self):
+        """Return string like 'exp%: 25/25/25/25' for the last forward."""
+        total = self.last_total or 1
+        pcts = [f"{c*100//total}%" for c in self.last_counts]
+        return f"exp: {'/'.join(pcts)}"
 
 
 class DenseFFN(nn.Module):

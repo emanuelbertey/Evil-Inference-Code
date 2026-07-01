@@ -55,7 +55,7 @@ num_layers = 16
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 768
+seq_len = 720
 batch_size = 8
 grad_accum = 8
 lr = 3e-4
@@ -296,7 +296,14 @@ def main():
                     now = time.time()
                     tok = (step - last_rpt_step) * batch_size * grad_accum * seq_len
                     tps = tok / max(now - last_rpt_time, 0.001)
+                    balance_strs = []
+                    for li, layer in enumerate(model.transformer.layers):
+                        if getattr(layer, 'use_moe', False) and hasattr(layer.ffn, 'balance_str'):
+                            balance_strs.append(f"L{li}:{layer.ffn.balance_str()}")
+                    bal = " | ".join(balance_strs[:3])  # first 3 MoE layers only
                     print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
+                    if bal:
+                        print(f"  MoE balance: {bal}")
                     last_rpt_time = now
                     last_rpt_step = step
                     pm.log(step, loss.item(), lr_curr, tps, aux_loss.item() if isinstance(aux_loss, torch.Tensor) else None)

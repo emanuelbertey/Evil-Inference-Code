@@ -76,16 +76,18 @@ class PlotManager:
             return
         steps = [e["step"] for e in self.history]
         losses = [e["loss"] for e in self.history]
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(steps, losses, label="loss")
+        fig, ax1 = plt.subplots(figsize=(10, 5))
+        ax1.plot(steps, losses, label="loss", color="tab:blue")
+        ax1.set_xlabel("step")
+        ax1.set_ylabel("loss", color="tab:blue")
         if "aux_loss" in self.history[0]:
             aux = [e.get("aux_loss", 0) for e in self.history]
-            ax.plot(steps, aux, label="aux_loss", alpha=0.5)
-        ax.set_xlabel("step")
-        ax.set_ylabel("loss")
-        ax.set_title(f"Training loss (step {step})")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+            ax2 = ax1.twinx()
+            ax2.plot(steps, aux, label="aux_loss", alpha=0.5, color="tab:orange")
+            ax2.set_ylabel("aux_loss", color="tab:orange")
+        ax1.set_title(f"Training loss (step {step})")
+        fig.legend(loc="upper right")
+        ax1.grid(True, alpha=0.3)
         path = self.save_dir / f"plot_train_step_{step}.png"
         fig.savefig(path, dpi=100, bbox_inches="tight")
         plt.close(fig)
