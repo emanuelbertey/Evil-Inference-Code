@@ -1,0 +1,5 @@
+redes_recurrentes,aprendizaje_profundo,propagacion_errores
+secuencias_temporales,estado_oculto,memoria_largo_plazo
+puertas_olvido,paso_mensajes,conocimiento_estructurado
+arbol_sintactico,dependencias,contexto_global
+recurrencia,retroalimentacion,ciclos_conocimiento

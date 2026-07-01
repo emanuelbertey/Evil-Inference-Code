@@ -24,8 +24,8 @@ class BPEWrapper:
 def generate_sample(model, tokenizer, device, prompt="hola", max_new=100):
     model.eval()
     x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
-    out = model.generate(x, max_new_tokens=max_new, temperature=1.0, top_k=50, top_p=0.95,
-                         use_partial_rope=True, rotary_pct=0.25)
+    out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40, top_p=0.9,
+                         repetition_penalty=1.2, use_partial_rope=True, rotary_pct=0.25)
     model.train()
     return tokenizer.decode(out[0].tolist())
 
@@ -357,7 +357,9 @@ def main():
             sd.next_block()
             total_tokens = len(sd.get_tokens())
             n_seq = (total_tokens - seq_len - 1) // seq_len
-            total_steps = (n_seq // batch_size) * (epochs_do - epoch)
+            # NOTA: NO recalcular total_steps aqui — el LR coseno usa el total
+            # original del inicio. Recalcularlo por bloque hace que el coseno
+            # piense que estamos al final y cae el LR al minimo (0.2*lr).
 
     if not test_mode and hf:
         ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx, "model": model.state_dict()}
