@@ -1,217 +1,235 @@
-"""Generate a PNG visualization of recurrent knowledge graph nodes."""
-import os, sys, math, random
-from collections import defaultdict
+"""Knowledge Graph — Colab: download Wikipedia ES, extract entities, query."""
+# ── Install ──────────────────────────────────────────────────────────────
+import subprocess, sys, os, json, re, math
+from collections import defaultdict, Counter
 
-os.environ["QT_QPA_PLATFORM"] = "offscreen"
+subprocess.run([sys.executable, "-m", "pip", "install", "spacy", "scikit-learn", "sentence-transformers", "datasets", "-q"], capture_output=True)
+import spacy
+from sklearn.cluster import KMeans
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer
 
-try:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-except ImportError:
-    plt = None
-    mpatches = None
+# ── Download Wikipedia ES 100MB ──────────────────────────────────────────
+print("Downloading ~100MB Spanish Wikipedia...")
+from datasets import load_dataset
+ds = load_dataset("wikimedia/wikipedia", "20231101.es", split="train", streaming=True)
 
-try:
-    import networkx as nx
-    HAVE_NX = True
-except ImportError:
-    nx = None
-    HAVE_NX = False
+texts = []
+total = 0
+for item in ds:
+    t = f"{item['title']}. {item['text']}"
+    texts.append(t)
+    total += len(t.encode("utf-8"))
+    if total >= 100_000_000:
+        break
+print(f"Downloaded {len(texts)} articles, ~{total//1024//1024}MB")
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
+# ── Load models ──────────────────────────────────────────────────────────
+print("Loading NLP models...")
+nlp = spacy.load("es_core_news_sm")
+bert = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 
-
-def build_knowledge_graph(input_path):
-    """Parse input into a DAG with recurrent edges."""
-    G = nx.DiGraph() if HAVE_NX else None
-    tokens = set()
-    edges = []
-    with open(input_path) as f:
-        for line in f:
-            parts = [p.strip() for p in line.strip().split(",") if p.strip()]
-            for i in range(len(parts) - 1):
-                edges.append((parts[i], parts[i + 1]))
-                tokens.add(parts[i])
-                tokens.add(parts[i + 1])
-            if len(parts) > 0:
-                tokens.add(parts[0])
-    tokens = list(tokens)
-    if HAVE_NX:
-        for t in tokens:
-            G.add_node(t)
-        for a, b in edges:
-            G.add_edge(a, b)
-    return G, tokens, edges
-
-
-def build_recurrent_clusters(tokens, edges):
-    """Build clusters from connected components and add recurrent edges."""
-    adj = defaultdict(list)
-    for a, b in edges:
-        adj[a].append(b)
-        adj[b].append(a)
-    visited = set()
-    clusters = []
-    for t in tokens:
-        if t in visited:
+# ── Extract entities ─────────────────────────────────────────────────────
+print("Extracting entities (NER)...")
+entities = {}  # name -> {type, count, contexts}
+for text in texts[:500]:  # sample first 500 articles
+    doc = nlp(text[:10000])
+    for ent in doc.ents:
+        name = ent.text.strip()
+        if len(name) < 3:
             continue
-        stack = [t]
-        comp = set()
-        while stack:
-            n = stack.pop()
-            if n in visited:
-                continue
-            visited.add(n)
-            comp.add(n)
-            for nb in adj[n]:
-                if nb not in visited:
-                    stack.append(nb)
-        clusters.append(list(comp))
-    # Add recurrent self-loop edges
-    rec_edges = []
-    for i in range(len(tokens)):
-        rec_edges.append((tokens[i], tokens[(i + 1) % len(tokens)]))
-    return clusters, rec_edges
+        if name not in entities:
+            entities[name] = {"type": ent.label_, "count": 0, "contexts": [], "articles": set()}
+        entities[name]["count"] += 1
+        if len(entities[name]["contexts"]) < 5:
+            entities[name]["contexts"].append(doc.text[max(0, ent.start_char-50):ent.end_char+50])
+        entities[name]["articles"].add(text[:50])
 
+print(f"Found {len(entities)} entities")
 
-def draw_graph(G, tokens, edges, clusters, rec_edges, output_path):
-    if not HAVE_NX:
-        draw_graph_manual(tokens, edges, clusters, rec_edges, output_path)
-        return
-    pos = nx.spring_layout(G, k=2.0, iterations=100, seed=42)
-    fig, ax = plt.subplots(1, 1, figsize=(20, 14), facecolor="#0d1117")
-    ax.set_facecolor("#0d1117")
-    # Cluster colors
-    colors = ["#ff6b6b", "#51cf66", "#5c7cfa", "#fcc419", "#cc5de8",
-              "#20c997", "#ff922b", "#748ffc", "#f06595", "#38d9a9"]
-    node_colors = {}
-    for i, cl in enumerate(clusters):
-        c = colors[i % len(colors)]
-        for n in cl:
-            node_colors[n] = c
-    # Edges
-    for a, b in edges:
-        if a in pos and b in pos:
-            ax.annotate("", xy=pos[b], xytext=pos[a],
-                        arrowprops=dict(arrowstyle="->", color="#495057",
-                                        lw=1.2, alpha=0.6, connectionstyle="arc3,rad=0.1"))
-    # Recurrent edges (dashed, colored)
-    for a, b in rec_edges:
-        if a in pos and b in pos:
-            ax.annotate("", xy=pos[b], xytext=pos[a],
-                        arrowprops=dict(arrowstyle="->", color="#fcc419",
-                                        lw=0.8, alpha=0.4, connectionstyle="arc3,rad=0.3",
-                                        linestyle="dashed"))
-    # Nodes
-    for n, (x, y) in pos.items():
-        c = node_colors.get(n, "#868e96")
-        circle = plt.Circle((x, y), 0.12, color=c, ec="white", lw=1.5, alpha=0.9, zorder=5)
-        ax.add_patch(circle)
-        ax.text(x, y + 0.16, n.replace("_", " ").title(), ha="center", va="bottom",
-                fontsize=7, color="white", fontweight="bold", zorder=6)
-    # Legend
-    legend_elements = [
-        mpatches.Patch(color="#495057", label="Feedforward edge"),
-        plt.Line2D([0], [0], color="#fcc419", lw=1.5, linestyle="--", label="Recurrent edge"),
-        plt.Circle((0, 0), 0.05, color="#868e96", label="Knowledge node"),
-    ]
-    for i, cl in enumerate(clusters):
-        if i < 6:
-            c = colors[i % len(colors)]
-            name = f"Cluster {i+1}"
-            legend_elements.append(plt.Circle((0, 0), 0.05, color=c, label=name))
-    ax.legend(handles=legend_elements, loc="upper left", fontsize=8,
-              framealpha=0.7, facecolor="#1a1a2e", edgecolor="white",
-              labelcolor="white")
-    # Title
-    ax.text(0.5, 0.98, "Recurrent Knowledge Graph — Recurrence Nodes & Knowledge Trees",
-            transform=ax.transAxes, ha="center", va="top", fontsize=14,
-            color="white", fontweight="bold")
-    ax.text(0.5, 0.94, "Solid = feedforward propagation | Dashed = recurrent cycles | Colors = knowledge clusters",
-            transform=ax.transAxes, ha="center", va="top", fontsize=9, color="#adb5bd")
-    ax.set_xlim(-1.5, 1.5)
-    ax.set_ylim(-1.5, 1.5)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="#0d1117")
-    plt.close(fig)
+# ── Build knowledge graph ────────────────────────────────────────────────
+print("Building knowledge graph...")
+entity_names = list(entities.keys())[:200]  # top 200
+entity_types = [entities[e]["type"] for e in entity_names]
+entity_counts = [entities[e]["count"] for e in entity_names]
 
+# Embeddings for semantic clustering
+embeds = bert.encode(entity_names, show_progress_bar=True)
 
-def draw_graph_manual(tokens, edges, clusters, rec_edges, output_path):
-    """Fallback manual graph draw using matplotlib only."""
-    n = len(tokens)
-    angles = [2 * math.pi * i / max(n, 1) - math.pi / 2 for i in range(n)]
-    radius = 0.4
-    pos = {t: (radius * math.cos(a), radius * math.sin(a)) for t, a in zip(tokens, angles)}
-    fig, ax = plt.subplots(1, 1, figsize=(14, 14), facecolor="#0d1117")
-    ax.set_facecolor("#0d1117")
-    colors = ["#ff6b6b", "#51cf66", "#5c7cfa", "#fcc419", "#cc5de8",
-              "#20c997", "#ff922b", "#748ffc", "#f06595", "#38d9a9"]
-    node_colors = {}
-    for i, cl in enumerate(clusters):
-        c = colors[i % len(colors)]
-        for nn in cl:
-            node_colors[nn] = c
-    # Edges
-    for a, b in edges:
-        if a in pos and b in pos:
-            ax.annotate("", xy=pos[b], xytext=pos[a],
-                        arrowprops=dict(arrowstyle="->", color="#495057",
-                                        lw=1.2, alpha=0.6, connectionstyle="arc3,rad=0.1"))
-    # Recurrent edges
-    for a, b in rec_edges:
-        if a in pos and b in pos:
-            ax.annotate("", xy=pos[b], xytext=pos[a],
-                        arrowprops=dict(arrowstyle="->", color="#fcc419",
-                                        lw=0.8, alpha=0.4, connectionstyle="arc3,rad=0.3",
-                                        linestyle="dashed"))
-    # Nodes
-    for nn, (x, y) in pos.items():
-        c = node_colors.get(nn, "#868e96")
-        circle = plt.Circle((x, y), 0.08, color=c, ec="white", lw=1.5, alpha=0.9, zorder=5)
-        ax.add_patch(circle)
-        ax.text(x, y + 0.1, nn.replace("_", " ").title(), ha="center", va="bottom",
-                fontsize=6, color="white", fontweight="bold", zorder=6)
-    legend_elements = [
-        mpatches.Patch(color="#495057", label="Feedforward"),
-        plt.Line2D([0], [0], color="#fcc419", lw=1.5, linestyle="--", label="Recurrent"),
-        plt.Circle((0, 0), 0.05, color="#868e96", label="Node"),
-    ]
-    for i, cl in enumerate(clusters):
-        if i < 6:
-            c = colors[i % len(colors)]
-            legend_elements.append(plt.Circle((0, 0), 0.05, color=c, label=f"C{i+1}"))
-    ax.legend(handles=legend_elements, loc="upper left", fontsize=7,
-              framealpha=0.7, facecolor="#1a1a2e", edgecolor="white", labelcolor="white")
-    ax.text(0.5, 0.98, "Recurrent Knowledge Graph", transform=ax.transAxes,
-            ha="center", va="top", fontsize=14, color="white", fontweight="bold")
-    ax.set_xlim(-0.8, 0.8)
-    ax.set_ylim(-0.8, 0.8)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="#0d1117")
-    plt.close(fig)
+# Cluster into categories
+n_clusters = min(15, len(entity_names) // 5)
+kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+clusters = kmeans.fit_predict(embeds)
 
+# Build hierarchy: cluster → entity
+hierarchy = defaultdict(list)
+for name, cluster_id in zip(entity_names, clusters):
+    hierarchy[f"category_{cluster_id}"].append(name)
 
-def main():
-    input_path = os.path.join(_DIR, "rust", "input.txt")
-    output_path = os.path.join(_DIR, "graf1.png")
-    if not os.path.exists(input_path):
-        print(f"input.txt not found at {input_path}")
-        sys.exit(1)
-    G, tokens, edges = build_knowledge_graph(input_path)
-    clusters, rec_edges = build_recurrent_clusters(tokens, edges)
-    draw_graph(G, tokens, edges, clusters, rec_edges, output_path)
-    print(f"Graph saved: {output_path}")
-    print(f"  Nodes: {len(tokens)}")
-    print(f"  Edges: {len(edges)}")
-    print(f"  Recurrent edges: {len(rec_edges)}")
-    print(f"  Clusters: {len(clusters)}")
+# Name categories by most representative entity
+cluster_names = {}
+for i in range(n_clusters):
+    members = [(entity_names[j], entity_counts[j]) for j in range(len(entity_names)) if clusters[j] == i]
+    members.sort(key=lambda x: -x[1])
+    cluster_names[f"category_{i}"] = members[0][0] if members else f"cat_{i}"
 
+# Co-occurrence edges (within same article)
+print("Building relationships...")
+cooc = defaultdict(int)
+entity_set = set(entity_names)
+article_entities = []
+for text in texts[:500]:
+    doc = nlp(text[:10000])
+    found = set()
+    for ent in doc.ents:
+        if ent.text in entity_set:
+            found.add(ent.text)
+    article_entities.append(found)
+    for e1 in found:
+        for e2 in found:
+            if e1 < e2:
+                cooc[tuple(sorted([e1, e2]))] += 1
 
-if __name__ == "__main__":
-    main()
+# ── Query engine ─────────────────────────────────────────────────────────
+class KnowledgeGraph:
+    def __init__(self, entities, cooc, hierarchy, cluster_names, embeds, entity_names):
+        self.entities = entities
+        self.cooc = cooc
+        self.hierarchy = hierarchy
+        self.cluster_names = cluster_names
+        self.embeds = embeds
+        self.entity_names = entity_names
+        self.name_to_idx = {n: i for i, n in enumerate(entity_names)}
+
+    def query(self, name, depth=2):
+        """Query an entity: relationships, category, contexts."""
+        name_lower = name.lower()
+        # Find closest match
+        matches = [e for e in self.entity_names if name_lower in e.lower()]
+        if not matches:
+            # Semantic fallback: find closest by embedding
+            q_emb = bert.encode([name])
+            sims = (self.embeds @ q_emb.T).flatten()
+            best = sims.argsort()[-5:][::-1]
+            matches = [self.entity_names[i] for i in best if sims[i] > 0.3]
+            if not matches:
+                return f"No match for '{name}'"
+
+        result = {}
+        for ent in matches[:3]:
+            info = self.entities.get(ent, {})
+            # Find relationships
+            relations = []
+            for (a, b), w in self.cooc.most_common(100):
+                if a == ent:
+                    relations.append((b, w))
+                elif b == ent:
+                    relations.append((a, w))
+            relations.sort(key=lambda x: -x[1])
+            # Find category
+            cat = None
+            for cid, members in self.hierarchy.items():
+                if ent in members:
+                    cat = self.cluster_names.get(cid, cid)
+                    break
+            # Find same-category entities
+            same_cat = []
+            if cat:
+                for cid, cname in self.cluster_names.items():
+                    if cname == cat:
+                        same_cat = [m for m in self.hierarchy[cid] if m != ent][:10]
+                        break
+            result[ent] = {
+                "type": info.get("type", "?"),
+                "category": cat,
+                "count": info.get("count", 0),
+                "relations": relations[:15],
+                "same_category": same_cat,
+                "contexts": info.get("contexts", [])[:3],
+            }
+        return result
+
+    def list_category(self, category_name):
+        """List all entities in a category."""
+        for cid, cname in self.cluster_names.items():
+            if category_name.lower() in cname.lower() or category_name.lower() in cid.lower():
+                return self.hierarchy[cid]
+        # Search across categories
+        results = []
+        for cid, members in self.hierarchy.items():
+            base = self.cluster_names.get(cid, cid)
+            if category_name.lower() in base.lower():
+                results.extend(members)
+        return results[:30]
+
+    def export(self, query_name):
+        """Export all related entities for training."""
+        data = self.query(query_name)
+        all_entities = set()
+        for ent, info in data.items():
+            all_entities.add(ent)
+            for rel, _ in info.get("relations", []):
+                all_entities.add(rel)
+            for rel in info.get("same_category", []):
+                all_entities.add(rel)
+        # Get contexts
+        export = []
+        for ent in all_entities:
+            info = self.entities.get(ent, {})
+            export.append({
+                "entity": ent,
+                "type": info.get("type", "?"),
+                "count": info.get("count", 0),
+                "contexts": info.get("contexts", [])[:2],
+            })
+        return export
+
+kg = KnowledgeGraph(entities, cooc, hierarchy, cluster_names, embeds, entity_names)
+
+# ── Demo ─────────────────────────────────────────────────────────────────
+print("\n" + "="*60)
+print("KNOWLEDGE GRAPH READY — Query examples:")
+print("="*60)
+print("\nCategories found:")
+for cid, cname in sorted(cluster_names.items()):
+    n_members = len(hierarchy[cid])
+    print(f"  {cname}: {n_members} entities")
+
+# Test query
+test = "Romeo" if "Romeo" in entity_names else entity_names[0]
+print(f"\nQuery: '{test}'")
+result = kg.query(test)
+for ent, info in result.items():
+    print(f"\n  [{info['type']}] {ent} (cat: {info['category']})")
+    print(f"    Relations: {', '.join(r[0] for r in info['relations'][:8])}")
+    print(f"    Same cat: {', '.join(info['same_category'][:5])}")
+
+print("\n" + "="*60)
+print("Interactive: type 'exit' to quit")
+while True:
+    try:
+        q = input("\nQuery > ").strip()
+        if q.lower() in ("exit", "quit", "q"):
+            break
+        if q.startswith("cat:"):
+            items = kg.list_category(q[4:].strip())
+            print(f"Entities in '{q[4:].strip()}': {', '.join(items[:20])}")
+        else:
+            r = kg.query(q)
+            if isinstance(r, str):
+                print(r)
+            else:
+                for ent, info in r.items():
+                    print(f"\n  [{info['type']}] {ent} (x{info['count']})")
+                    print(f"    Category: {info['category']}")
+                    print(f"    Relations: {', '.join(f'{rel}({w})' for rel,w in info['relations'][:10])}")
+                    print(f"    Same cat: {', '.join(info['same_category'][:8])}")
+    except KeyboardInterrupt:
+        break
+
+# ── Save for reuse ───────────────────────────────────────────────────────
+import pickle
+with open("knowledge_graph.pkl", "wb") as f:
+    pickle.dump({"entities": entities, "cooc": cooc, "hierarchy": hierarchy,
+                 "cluster_names": cluster_names, "entity_names": entity_names}, f)
+print("\nSaved: knowledge_graph.pkl")
