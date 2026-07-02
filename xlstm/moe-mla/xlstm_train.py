@@ -4,6 +4,7 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
 
+from mlstm_kernels_mock import install_mock; install_mock()
 from xlstm_model import xLSTMMoEModel
 from dataset import download_wikipedia_50mb, StreamingDataset
 from huggingface import HFManager, PeriodicPusher

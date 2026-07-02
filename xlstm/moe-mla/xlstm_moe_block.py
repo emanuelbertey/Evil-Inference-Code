@@ -1,35 +1,48 @@
-"""xLSTM Large MoE block: xLSTMBlock with mLSTM + MoE FFN."""
-import sys, os
-_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_DIR, "..", ".."))
-
+"""xLSTM Large MoE block: RMSNorm → mLSTM → +residual → RMSNorm → MoE → +residual."""
+import math
 import torch
 from torch import nn
-from xlstm.blocks.xlstm_block import xLSTMBlock, xLSTMBlockConfig
-from xlstm.blocks.mlstm.layer import mLSTMLayerConfig
+from xlstm.xlstm_large.model import mLSTMLayer, mLSTMLayerConfig, FeedForward
+from xlstm.xlstm_large.components import RMSNorm
 from moe import MoELayer
 
 class xLSTMMoEBlock(nn.Module):
-    """xLSTMBlock (mLSTM) with MoE replacing the standard FeedForward."""
+    """mLSTM block (Large) with MoE replacing FeedForward."""
 
-    def __init__(self, d_model, mlstm_cfg, moe_cfg, layer_idx=0):
+    def __init__(self, config, moe_cfg, layer_idx=0):
         super().__init__()
         self._layer_idx = layer_idx
-        # xLSTMBlock without FFN
-        block_cfg = xLSTMBlockConfig(
-            mlstm=mlstm_cfg,
-            slstm=None,
-            feedforward=None,
-            _num_blocks=1,
-            _block_idx=layer_idx,
+        self.norm_mlstm = RMSNorm(
+            num_features=config.embedding_dim, eps=config.norm_eps,
+            use_weight=True, use_bias=False,
+            force_float32_reductions=config.norm_reduction_force_float32,
         )
-        self.block = xLSTMBlock(config=block_cfg)
-
-        # MoE in place of FFN
-        self.moe_norm = nn.LayerNorm(d_model)  # xLSTMBlock's pre-FFN norm is inside block, use another
+        self.mlstm_layer = mLSTMLayer(mLSTMLayerConfig(
+            embedding_dim=config.embedding_dim, num_heads=config.num_heads,
+            use_bias=config.use_bias, norm_eps=config.norm_eps,
+            norm_reduction_force_float32=config.norm_reduction_force_float32,
+            qk_dim_factor=config.qk_dim_factor, v_dim_factor=config.v_dim_factor,
+            gate_soft_cap=config.gate_soft_cap,
+            weight_mode=config.weight_mode,
+            mlstm_backend=type(config.mlstm_backend)(
+                chunkwise_kernel=config.chunkwise_kernel,
+                sequence_kernel=config.sequence_kernel,
+                step_kernel=config.step_kernel, mode=config.mode,
+                chunk_size=config.chunk_size,
+                return_last_states=config.return_last_states,
+                autocast_kernel_dtype=config.autocast_kernel_dtype,
+                eps=config.eps,
+                inference_state_dtype=config.inference_state_dtype,
+            ),
+        ))
+        self.norm_moe = RMSNorm(
+            num_features=config.embedding_dim, eps=config.norm_eps,
+            use_weight=True, use_bias=False,
+            force_float32_reductions=config.norm_reduction_force_float32,
+        )
         self.moe = MoELayer(
-            d_model=d_model,
-            expert_dim=moe_cfg["expert_dim"],
+            d_model=config.embedding_dim,
+            expert_dim=moe_cfg.get("expert_dim"),
             n_experts=moe_cfg["n_experts"],
             top_k=moe_cfg["top_k"],
             n_shared=moe_cfg["n_shared"],
@@ -39,15 +52,18 @@ class xLSTMMoEBlock(nn.Module):
             noise_std=moe_cfg.get("noise_std", 0.0),
         )
 
-    def forward(self, x, **kwargs):
-        x = self.block(x, **kwargs)
-        moe_out, aux_loss = self.moe(self.moe_norm(x))
-        x = x + moe_out
-        return x, aux_loss
+    def forward(self, x, state=None):
+        x_mlstm = self.norm_mlstm(x)
+        x_mlstm, state = self.mlstm_layer(x_mlstm, state)
+        x = x + x_mlstm
+        x_moe = self.norm_moe(x)
+        x_moe, aux_loss = self.moe(x_moe)
+        x = x + x_moe
+        return x, aux_loss, state
 
-    def step(self, x, mlstm_state=None, conv_state=None):
-        x_xlstm, state = self.block.xlstm.step(self.block.xlstm_norm(x), mlstm_state=mlstm_state, conv_state=conv_state)
-        x = x + x_xlstm
-        moe_out, _ = self.moe(self.moe_norm(x))
-        x = x + moe_out
+    def step(self, x, state=None):
+        x_mlstm, state = self.mlstm_layer(self.norm_mlstm(x), state)
+        x = x + x_mlstm
+        x_moe, _ = self.moe(self.norm_moe(x))
+        x = x + x_moe
         return x, state

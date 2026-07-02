@@ -1,13 +1,9 @@
-"""xLSTM MoE Model: xLSTM + MoE. Same structure as transformer model but with xLSTM blocks."""
-import sys, os, math
-_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_DIR, "..", ".."))
-
+"""xLSTM Large MoE Model: embedding → [MoE/dense blocks] → norm → lm_head."""
+import math
 import torch
 from torch import nn
-from xlstm.blocks.xlstm_block import xLSTMBlock, xLSTMBlockConfig
-from xlstm.blocks.mlstm.layer import mLSTMLayerConfig
-from xlstm.components.feedforward import FeedForwardConfig
+from xlstm.xlstm_large.model import xLSTMLargeConfig, mLSTMBlock
+from xlstm.xlstm_large.components import RMSNorm, soft_cap
 from xlstm_moe_block import xLSTMMoEBlock
 
 class xLSTMMoEModel(nn.Module):
@@ -16,22 +12,16 @@ class xLSTMMoEModel(nn.Module):
                  capacity_factor=1.0, z_loss_gamma=0.001, bias_decay=0.1,
                  noise_std=0.0, max_seq_len=1024):
         super().__init__()
-
         if moe_at is None:
             moe_at = list(range(num_layers))
 
-        self.embed = nn.Embedding(vocab_size, d_model)
-
-        mlstm_cfg = mLSTMLayerConfig(
-            embedding_dim=d_model,
-            num_heads=num_heads,
-            context_length=max_seq_len,
-            dropout=0.0,
-            bias=False,
+        config = xLSTMLargeConfig(
+            embedding_dim=d_model, num_heads=num_heads, num_blocks=num_layers,
+            vocab_size=vocab_size, use_bias=False,
         )
 
         moe_cfg = {
-            "expert_dim": expert_dim,  # None → 2 * d_model default in MoELayer
+            "expert_dim": expert_dim,
             "n_experts": n_experts,
             "top_k": top_k,
             "n_shared": n_shared,
@@ -41,22 +31,21 @@ class xLSTMMoEModel(nn.Module):
             "noise_std": noise_std,
         }
 
+        self.embedding = nn.Embedding(vocab_size, d_model)
+
         self.blocks = nn.ModuleList()
         for i in range(num_layers):
             if i in moe_at:
-                block = xLSTMMoEBlock(d_model, mlstm_cfg, moe_cfg, layer_idx=i)
+                block = xLSTMMoEBlock(config, moe_cfg, layer_idx=i)
             else:
-                block_cfg = xLSTMBlockConfig(
-                    mlstm=mlstm_cfg,
-                    slstm=None,
-                    feedforward=FeedForwardConfig(embedding_dim=d_model),
-                    _num_blocks=num_layers,
-                    _block_idx=i,
-                )
-                block = xLSTMBlock(config=block_cfg)
+                block = mLSTMBlock(config)
             self.blocks.append(block)
 
-        self.norm = nn.LayerNorm(d_model)
+        self.out_norm = RMSNorm(
+            num_features=d_model, eps=config.norm_eps,
+            use_weight=True, use_bias=False,
+            force_float32_reductions=config.norm_reduction_force_float32,
+        )
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self._init_weights()
 
@@ -64,19 +53,21 @@ class xLSTMMoEModel(nn.Module):
         for p in self.parameters():
             if p.dim() >= 2:
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * len(self.blocks)))
-        nn.init.normal_(self.embed.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.embedding.weight, mean=0.0, std=0.02)
 
     def forward(self, idx):
-        x = self.embed(idx)
+        x = self.embedding(idx)
         aux_loss = 0.0
-        for block in self.blocks:
+        state = {i: None for i in range(len(self.blocks))}
+        for i, block in enumerate(self.blocks):
             if isinstance(block, xLSTMMoEBlock):
-                x, loss = block(x)
+                x, loss, _ = block(x, state[i])
                 aux_loss = aux_loss + loss
             else:
-                x = block(x)
-        x = self.norm(x)
+                x, _ = block(x, state[i])
+        x = self.out_norm(x)
         logits = self.lm_head(x)
+        logits = soft_cap(logits, 30.0)
         return logits, aux_loss
 
     def generate(self, idx, max_new_tokens=50, temperature=1.0, top_k=50):
