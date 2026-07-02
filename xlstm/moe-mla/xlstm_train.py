@@ -200,11 +200,14 @@ def main():
                     tok = (step - last_rpt_step) * batch_size * grad_accum * seq_len
                     tps = tok / max(now - last_rpt_time, 0.001)
                     balance_strs = []
+                    moe_dist = {}
                     for blk in model.blocks:
-                        if hasattr(blk, "moe") and hasattr(blk.moe, "balance_str"):
-                            s = blk.moe.balance_str()
-                            if s:
-                                balance_strs.append(f"L{blk._layer_idx}:{s}")
+                        if hasattr(blk, "moe") and hasattr(blk.moe, "last_counts"):
+                            ffn = blk.moe
+                            total = ffn.last_total or 1
+                            pcts = (ffn.last_counts.float() / total * 100).tolist()
+                            moe_dist[f"L{blk._layer_idx}"] = pcts
+                            balance_strs.append(f"L{blk._layer_idx}:{ffn.balance_str()}")
                     bal = " | ".join(balance_strs[:5])
                     print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
                     if bal:
@@ -212,7 +215,8 @@ def main():
                     last_rpt_time = now
                     last_rpt_step = step
                     pm.log(step, loss.item(), lr_curr, tps, aux_loss.item(),
-                           grad_norm=grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
+                           grad_norm=grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                           moe_dist=moe_dist if moe_dist else None)
 
                 if step > 0 and step % 50 == 0:
                     t_gen = time.time()
@@ -227,6 +231,7 @@ def main():
                     torch.save(ckpt, ckpt_path)
                     pusher.maybe_push(ckpt_path, None, None, step)
                     pm.plot(step)
+                    pm.plot_grad_moe(step)
                     pm.upload(step)
 
         if micro > 0:
