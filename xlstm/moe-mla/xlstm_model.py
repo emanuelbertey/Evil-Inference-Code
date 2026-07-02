@@ -1,5 +1,7 @@
 """xLSTM Large MoE Model: embedding → [MoE/dense blocks] → norm → lm_head."""
-import math
+import sys, os, math
+_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_DIR, "..", ".."))
 import torch
 from torch import nn
 from xlstm.xlstm_large.model import xLSTMLargeConfig, mLSTMBlock

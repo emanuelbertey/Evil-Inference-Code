@@ -1,8 +1,10 @@
 """xLSTM Large MoE block: RMSNorm → mLSTM → +residual → RMSNorm → MoE → +residual."""
-import math
+import sys, os, math
+_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_DIR, "..", ".."))
 import torch
 from torch import nn
-from xlstm.xlstm_large.model import mLSTMLayer, mLSTMLayerConfig, FeedForward
+from xlstm.xlstm_large.model import mLSTMLayer, mLSTMLayerConfig
 from xlstm.xlstm_large.components import RMSNorm
 from moe import MoELayer
 
