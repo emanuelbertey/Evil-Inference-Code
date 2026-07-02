@@ -14,6 +14,7 @@ class xLSTMMoEBlock(nn.Module):
 
     def __init__(self, d_model, mlstm_cfg, moe_cfg, layer_idx=0):
         super().__init__()
+        self._layer_idx = layer_idx
         # xLSTMBlock without FFN
         block_cfg = xLSTMBlockConfig(
             mlstm=mlstm_cfg,

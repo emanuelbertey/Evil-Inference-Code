@@ -52,7 +52,7 @@ test_mode = False
 n_experts = 4
 top_k = 1
 n_shared = 1
-expert_dim = d_model * 4
+expert_dim = None  # default: 2 * d_model
 capacity_factor = 1.0
 z_loss_gamma = 0.001
 bias_decay = 0.1
@@ -96,9 +96,12 @@ def main():
     print(f"Vocab: {tokenizer.vocab_size}")
 
     # Model
+    n_dense_init = 3
+    n_dense_final = 3
+    moe_at = list(range(n_dense_init, num_layers - n_dense_final))
     model = xLSTMMoEModel(
         vocab_size=tokenizer.vocab_size, d_model=d_model, num_layers=num_layers,
-        num_heads=num_heads, use_moe=True, n_experts=n_experts, top_k=top_k,
+        num_heads=num_heads, moe_at=moe_at, n_experts=n_experts, top_k=top_k,
         n_shared=n_shared, expert_dim=expert_dim, capacity_factor=capacity_factor,
         z_loss_gamma=z_loss_gamma, bias_decay=bias_decay, noise_std=noise_std,
         max_seq_len=seq_len,
