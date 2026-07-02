@@ -27,7 +27,7 @@ class xLSTMMoEBlock(nn.Module):
             qk_dim_factor=config.qk_dim_factor, v_dim_factor=config.v_dim_factor,
             gate_soft_cap=config.gate_soft_cap,
             weight_mode=config.weight_mode,
-            mlstm_backend=type(config.mlstm_backend)(
+            mlstm_backend=mLSTMBackendConfig(
                 chunkwise_kernel=config.chunkwise_kernel,
                 sequence_kernel=config.sequence_kernel,
                 step_kernel=config.step_kernel, mode=config.mode,
