@@ -1,5 +1,6 @@
 """xLSTM MoE Training — mLSTM + MoE (uses transformer tokenizer, same revision)."""
-import sys, os, time, math, torch, json
+import sys, os, time, math, torch
+import torch.nn.functional as F
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
@@ -45,27 +46,25 @@ lr = 3e-4
 num_epochs = 200000
 warmup_steps = 50
 bpe_vocab = 32000
-tok_path = os.path.join(_DIR, "tokenizer.json")  # same tokenizer as transformer
-train_json = os.path.join(_DIR, "xlstm_train_state.json")
+tok_path = os.path.join(_DIR, "tokenizer.json")
 ckpt_path = os.path.join(_DIR, "xlstm_checkpoint.pt")
 plot_dir = _DIR
 test_mode = False
 n_experts = 4
 top_k = 1
 n_shared = 1
-expert_dim = None  # default: 2 * d_model
+expert_dim = None
 capacity_factor = 1.0
 z_loss_gamma = 0.001
 bias_decay = 0.1
 noise_std = 0.01
 
-# ─── Main ────────────────────────────────────────────────────────────────
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     repo_id = "ScortexIA/laurelia"
-    revision = "moe-mla"  # same branch as transformer
+    revision = "moe-mla"
     hf = pusher = None
     if not test_mode:
         hf = HFManager(repo_id=repo_id, revision=revision)
@@ -78,7 +77,6 @@ def main():
     dtype = {"b": torch.bfloat16, "f": torch.float16}.get(prec, torch.float32)
     print(f"  Compute: {dtype}")
 
-    # Tokenizer (same as transformer, no xlstm prefix)
     if os.path.exists(tok_path):
         tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
     elif hf and hf.tokenizer_exists(filename="tokenizer.json"):
@@ -96,7 +94,6 @@ def main():
         tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
     print(f"Vocab: {tokenizer.vocab_size}")
 
-    # Model
     n_dense_init = 3
     n_dense_final = 3
     moe_at = list(range(n_dense_init, num_layers - n_dense_final))
@@ -108,59 +105,66 @@ def main():
         max_seq_len=seq_len,
     ).to(device).to(dtype=dtype)
 
-    # Params
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Params: {total_params:,}")
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
-    # Load checkpoint (local → HF → fresh)
+    # Checkpoint
     step = 0
     epoch = 0
-    loaded = False
+    ckpt_block = 0
     if os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt["model"].pop("head.emb_weight", None)
         model.load_state_dict(ckpt["model"], strict=False)
         step = ckpt.get("step", 0)
         epoch = ckpt.get("epoch", 0)
-        print(f"Loaded checkpoint: step {step} epoch {epoch}")
+        ckpt_block = ckpt.get("block", 0)
         del ckpt
         torch.cuda.empty_cache()
-        loaded = True
-    if not loaded and hf:
-        if hf.download_checkpoint(ckpt_path, filename="xlstm_checkpoint.pt"):
-            ckpt = torch.load(ckpt_path, map_location="cpu")
-            model.load_state_dict(ckpt["model"], strict=False)
-            step = ckpt.get("step", 0)
-            epoch = ckpt.get("epoch", 0)
-            print(f"Loaded HF checkpoint: step {step} epoch {epoch}")
-            del ckpt
-            torch.cuda.empty_cache()
-    if not loaded:
+        print(f"Loaded checkpoint: step {step} epoch {epoch} block {ckpt_block}")
+    elif hf and hf.download_checkpoint(ckpt_path, filename="xlstm_checkpoint.pt"):
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt["model"].pop("head.emb_weight", None)
+        model.load_state_dict(ckpt["model"], strict=False)
+        step = ckpt.get("step", 0)
+        epoch = ckpt.get("epoch", 0)
+        ckpt_block = ckpt.get("block", 0)
+        del ckpt
+        torch.cuda.empty_cache()
+        print(f"Loaded HF checkpoint: step {step} epoch {epoch} block {ckpt_block}")
+    else:
         print("No checkpoint found, starting fresh")
 
     # Data
-    sd = StreamingDataset(block_idx=step // 2000)
-    tokens = sd.get_tokens() if step > 0 else None
-
-    total_steps = 100000
+    bi = input(f"Block [{ckpt_block}]: ").strip()
+    block_idx = int(bi) if bi else ckpt_block
+    sd = StreamingDataset(block_mb=3.0, block_idx=block_idx)
+    sd.load_tokens(tokenizer)
+    n = len(sd.get_tokens())
+    tokens_per_epoch = (n - seq_len - 1) // seq_len
+    total_steps = (tokens_per_epoch // batch_size) * num_epochs
     print(f"Tokens per step: {batch_size * seq_len}")
     print(f"Total steps: {total_steps}")
 
     # Train
     model.train()
     t0 = time.time()
+    last_rpt_time = t0
+    last_rpt_step = step
 
+    epoch = 0
     while True:
-        if tokens is None:
-            sd.load_tokens(tokenizer)
-            tokens = sd.get_tokens()
+        tokens = sd.get_tokens()
         n_seq = (len(tokens) - seq_len - 1) // seq_len
         if n_seq <= 0:
-            sd.next_block()
-            tokens = sd.get_tokens()
+            epoch += 1
+            if epoch >= num_epochs:
+                break
             continue
 
+        micro = 0
         for batch_start in range(0, n_seq, batch_size):
             if step >= total_steps:
                 break
@@ -173,53 +177,77 @@ def main():
                 x_list.append(x); y_list.append(y)
             x = torch.cat(x_list, dim=0); y = torch.cat(y_list, dim=0)
 
-            lr_curr = get_lr(step, total_steps, warmup_steps, lr)
-            for param_group in opt.param_groups:
-                param_group["lr"] = lr_curr
+            if micro == 0:
+                lr_curr = get_lr(step, total_steps, warmup_steps, lr)
+                for pg in opt.param_groups:
+                    pg["lr"] = lr_curr
+                opt.zero_grad()
 
             logits, aux_loss = model(x)
-            loss = torch.nn.functional.cross_entropy(logits.view(-1, tokenizer.vocab_size), y.view(-1))
-            (loss + aux_loss).backward()
+            loss = F.cross_entropy(logits.view(-1, tokenizer.vocab_size), y.view(-1))
+            loss = loss + aux_loss
+            (loss / grad_accum).backward()
+            micro += 1
 
+            if micro >= grad_accum:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                step += 1
+                micro = 0
+
+                if step % 10 == 0:
+                    now = time.time()
+                    tok = (step - last_rpt_step) * batch_size * grad_accum * seq_len
+                    tps = tok / max(now - last_rpt_time, 0.001)
+                    balance_strs = []
+                    for blk in model.blocks:
+                        if hasattr(blk, "moe") and hasattr(blk.moe, "balance_str"):
+                            s = blk.moe.balance_str()
+                            if s:
+                                balance_strs.append(f"L{blk._layer_idx}:{s}")
+                    bal = " | ".join(balance_strs[:5])
+                    print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
+                    if bal:
+                        print(f"  MoE balance: {bal}")
+                    last_rpt_time = now
+                    last_rpt_step = step
+                    pm.log(step, loss.item(), lr_curr, tps, aux_loss.item(),
+                           grad_norm=grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
+
+                if step > 0 and step % 50 == 0:
+                    t_gen = time.time()
+                    sample = generate_sample(model, tokenizer, device)
+                    gen_tps = 100 / (time.time() - t_gen)
+                    print(f"  >>> {sample}  [{gen_tps:.0f} tok/s]")
+
+                if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
+                    state = model.state_dict()
+                    state.pop("head.emb_weight", None)
+                    ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx, "model": state}
+                    torch.save(ckpt, ckpt_path)
+                    pusher.maybe_push(ckpt_path, None, None, step)
+                    pm.plot(step)
+                    pm.upload(step)
+
+        if micro > 0:
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            opt.zero_grad()
-
-            if step % 10 == 0:
-                dt = time.time() - t0
-                tps = batch_size * seq_len / max(dt, 1e-6)
-                t0 = time.time()
-                e = epoch + batch_start // (n_seq // max(num_epochs, 1) + 1)
-                balance_strs = []
-                for blk in model.blocks:
-                    if hasattr(blk, "moe") and hasattr(blk.moe, "balance_str"):
-                        s = blk.moe.balance_str()
-                        if s:
-                            balance_strs.append(f"L{blk._layer_idx}:{s}")
-                bal = " | ".join(balance_strs[:5])
-                print(f"e{e} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
-                if bal:
-                    print(f"  MoE balance: {bal}")
-                pm.log(step, loss.item(), lr_curr, tps, aux_loss.item(),
-                       grad_norm=grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
-
-            if step > 0 and step % 50 == 0:
-                t_gen = time.time()
-                sample = generate_sample(model, tokenizer, device)
-                gen_tps = 100 / (time.time() - t_gen)
-                print(f"  >>> {sample}  [{gen_tps:.0f} tok/s]")
-
-            if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
-                state = model.state_dict()
-                ckpt = {"step": step, "epoch": epoch, "model": state}
-                torch.save(ckpt, ckpt_path)
-                pusher.maybe_push(ckpt_path, None, None, step)
-
             step += 1
+
+        epoch += 1
+        print(f"-- Epoch {epoch} done: {step} steps --")
+        if epoch >= num_epochs:
+            break
 
         sd.next_block()
         tokens = sd.get_tokens()
-        epoch += 1
+
+    if not test_mode and hf:
+        ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx, "model": model.state_dict()}
+        torch.save(ckpt, ckpt_path)
+        hf.upload_checkpoint(ckpt_path, None, tok_path, step)
+
+    print(f"Done! {step} steps in {time.time() - t0:.1f}s")
 
 if __name__ == "__main__":
     main()
