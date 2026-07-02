@@ -191,7 +191,7 @@ def main():
                 e = epoch + batch_start // (n_seq // max(num_epochs, 1) + 1)
                 balance_strs = []
                 for blk in model.blocks:
-                    if hasattr(blk.moe, "balance_str"):
+                    if hasattr(blk, "moe") and hasattr(blk.moe, "balance_str"):
                         s = blk.moe.balance_str()
                         if s:
                             balance_strs.append(f"L{blk._layer_idx}:{s}")
