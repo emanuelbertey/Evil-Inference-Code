@@ -36,11 +36,11 @@ def get_lr(step, total, warmup, lr):
 
 # ─── Config ──────────────────────────────────────────────────────────────
 d_model = 512
-num_layers = 8
-num_heads = 4
+num_layers = 16
+num_heads = 8
 seq_len = 512
-batch_size = 4
-grad_accum = 4
+batch_size = 8
+grad_accum = 8
 lr = 3e-4
 num_epochs = 200000
 warmup_steps = 50
