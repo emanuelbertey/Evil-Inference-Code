@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from xlstm.xlstm_large.model import mLSTMLayer, mLSTMLayerConfig
 from xlstm.xlstm_large.components import RMSNorm
+from mlstm_kernels.torch.backend_module import mLSTMBackendConfig
 from moe import MoELayer
 
 class xLSTMMoEBlock(nn.Module):
